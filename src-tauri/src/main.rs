@@ -24,6 +24,14 @@ fn main() {
         workscene_lib::m9test();
         return;
     }
+    if let Some(pos) = args.iter().position(|a| a == "--baseline-live") {
+        let n = args
+            .get(pos + 1)
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(6);
+        workscene_lib::baseline_live(n);
+        return;
+    }
     if let Some(pos) = args.iter().position(|a| a == "--baseline") {
         let rounds = args
             .get(pos + 1)

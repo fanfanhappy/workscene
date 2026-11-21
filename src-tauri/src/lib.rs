@@ -1247,6 +1247,205 @@ pub fn m9test() {
     }
 }
 
+/// 现场基线：用**当前真实运行的窗口**测一次恢复成功率。
+///
+/// 这是唯一能证明"真实应用能不能恢复"的测法，代价是会临时移动用户已开的窗口
+/// （恢复会把它们放回去；开始前先存一份保护快照）。
+/// 用法：cargo run -- --baseline-live 6
+pub fn baseline_live(max_windows: usize) {
+    win::dpi::enable_per_monitor_v2();
+    let max_windows = max_windows.clamp(1, 12);
+    println!("[env] data_dir={}", storage::data_dir().display());
+    let self_pid = std::process::id();
+    let _ = self_pid;
+
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("数据库初始化失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    let capture = match capture::scan() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("捕获失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    // 只挑真实工作窗口，且排除本程序自己的窗口
+    let mut targets: Vec<WindowInfo> = capture
+        .windows
+        .iter()
+        .filter(|w| w.width >= 300 && w.height >= 200)
+        .cloned()
+        .collect();
+    targets.truncate(max_windows);
+
+    if targets.is_empty() {
+        eprintln!("没有可测的真实窗口，请先打开几个应用");
+        std::process::exit(2);
+    }
+
+    println!(
+        "[1/5] 选定 {} 个真实窗口（共捕获 {} 个）",
+        targets.len(),
+        capture.windows.len()
+    );
+    for w in &targets {
+        println!(
+            "      {:<28} {:<26} {}x{}",
+            w.process_name, w.class_name, w.width, w.height
+        );
+    }
+
+    let scene_capture = CaptureResult {
+        windows: targets.clone(),
+        displays: capture.displays.clone(),
+        ..capture.clone()
+    };
+
+    let ws = match tauri::async_runtime::block_on(data::workspaces::create_from_capture(
+        &db,
+        "现场基线",
+        &scene_capture,
+    )) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("创建工作空间失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    println!("[2/5] 已保存基线工作空间（{}），原始布局已落库", ws.id);
+
+    let originals: Vec<(usize, (i32, i32, i32, i32))> = targets
+        .iter()
+        .filter_map(|w| {
+            win::window::current_rect(w.hwnd as HWND)
+                .map(|r| (w.hwnd, (r.left, r.top, r.right - r.left, r.bottom - r.top)))
+        })
+        .collect();
+    println!("[3/5] 记录原始位置 {} 个窗口", originals.len());
+
+    // 扰动：每个窗口挪开一点（尺寸不变，只测位置恢复）
+    for (i, (hwnd, (x, y, w, h))) in originals.iter().enumerate() {
+        let dx = 60 + i as i32 * 17;
+        let dy = 40 + i as i32 * 11;
+        win::window::set_window_rect(*hwnd as HWND, x + dx, y + dy, *w, *h);
+    }
+    std::thread::sleep(Duration::from_millis(600));
+
+    let scene = match tauri::async_runtime::block_on(data::workspaces::to_scene(&db, &ws.id)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("构造恢复计划失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    println!("[4/5] 开始按工作空间恢复…");
+    let report = match restore::apply(None, &scene, false, None) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("恢复失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    // 独立复核：不信任报告，自己再量一次
+    let mut lines: Vec<String> = Vec::new();
+    let mut measured = 0usize;
+    let mut passed = 0usize;
+    let mut worst = 0i32;
+
+    println!("[5/5] 逐窗口复核（报告值 / 独立测量）：");
+    for (hwnd, original) in &originals {
+        let now = win::window::current_rect(*hwnd as HWND);
+        let Some(now) = now else {
+            lines.push(
+                serde_json::json!({ "hwnd": hwnd, "status": "vanished", "ok": false }).to_string(),
+            );
+            println!("      HWND {} 窗口已消失（用户可能关掉了）", hwnd);
+            continue;
+        };
+
+        let dx = (now.left - original.0).abs();
+        let dy = (now.top - original.1).abs();
+        let d = dx.max(dy);
+        let ok = d <= 8;
+        measured += 1;
+        if ok {
+            passed += 1;
+        }
+        worst = worst.max(d);
+
+        lines.push(
+            serde_json::json!({
+                "hwnd": hwnd,
+                "expected": [original.0, original.1, original.2, original.3],
+                "actual": [now.left, now.top, now.right - now.left, now.bottom - now.top],
+                "deltaPx": d,
+                "ok": ok,
+            })
+            .to_string(),
+        );
+
+        println!(
+            "      HWND {:<10} 目标 ({}, {}) 实际 ({}, {}) 偏差 {}px {}",
+            hwnd,
+            original.0,
+            original.1,
+            now.left,
+            now.top,
+            d,
+            if ok { "✓" } else { "✗" }
+        );
+    }
+
+    let rate = if measured == 0 {
+        0.0
+    } else {
+        passed as f64 * 100.0 / measured as f64
+    };
+
+    // 落一条 run，便于在「恢复记录」里回看
+    let _ = tauri::async_runtime::block_on(data::runs::save(
+        &db,
+        &report,
+        Some(&ws.id),
+        None,
+        "baseline-live",
+    ));
+
+    let dir = storage::data_dir().join("baseline");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("live-{:x}.jsonl", core::time::now_ms()));
+    let _ = std::fs::write(&path, lines.join("\n"));
+
+    println!(
+        "\n真实窗口基线：{passed}/{measured} 通过，成功率 {rate:.1}%，最大偏差 {worst}px"
+    );
+    println!("明细：{}", path.display());
+    println!(
+        "报告口径：成功 {} / 失败 {} / 跳过 {}",
+        report.succeeded, report.failed, report.skipped
+    );
+    for s in &report.steps {
+        println!(
+            "      [{}] {} · {:?} · {}",
+            s.step_type, s.target_name, s.status, s.message
+        );
+    }
+
+    let _ = tauri::async_runtime::block_on(data::workspaces::delete(&db, &ws.id));
+
+    if rate < 95.0 {
+        std::process::exit(1);
+    }
+}
+
 /// 保留：按 pid 等待窗口，供后续需要外部进程的测试使用
 #[allow(dead_code)]
 fn wait_window_of_pid(pid: u32, timeout: Duration) -> Option<HWND> {

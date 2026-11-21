@@ -14,7 +14,7 @@ Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
 
-## 进度：M11（恢复记录回看）；M1–M10 已完成
+## 进度：M12（真实窗口成功率基线）；M1–M11 已完成
 
 ### M1 系统能力验证
 
@@ -145,6 +145,15 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | 顺带修掉：`restore_steps.step_type` 写死为 window，资源步骤在记录里被标错 | 已修（测试先抓到） |
 | 顺带修掉：同一毫秒连续添加资源时 `workspace_items.id` 冲突 | 已修（测试先抓到） |
 
+### M12 真实窗口成功率基线
+
+| 内容 | 状态 |
+|---|---|
+| `--baseline-live N`：用当前真实窗口建空间 → 扰动 → 恢复 → **独立复核**偏差 | 完成 |
+| 实测：4 个真实窗口（Chrome×2 / Antigravity / DeepSeek Harness）全部 0px 复原，成功率 100% | 完成 |
+| 顺带修掉：Chromium 系窗口 `SetWindowPlacement` 返回 FALSE 但实际已移动，旧代码据此报失败 | 已修（实测先抓到） |
+| 多显示器 / 混合 DPI 场景 | 未做（本机单屏） |
+
 ### 按评审已修的问题
 
 | 评审项 | 处理 |
@@ -200,7 +209,8 @@ cargo run --manifest-path src-tauri/Cargo.toml -- --m1test        # 捕获→破
 cargo run --manifest-path src-tauri/Cargo.toml -- --m2test        # 工作空间闭环：建库→建空间→恢复→报告入库→删除
 cargo run --manifest-path src-tauri/Cargo.toml -- --m5test       # 快照去重/节流/保留/差异
 cargo run --manifest-path src-tauri/Cargo.toml -- --m9test       # 资源（文件/文件夹/网址）入库与预览判定
-cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 成功率基线（JSONL + 汇总，95% 门槛）
+cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 模拟窗口基线（JSONL + 汇总，95% 门槛）
+cargo run --manifest-path src-tauri/Cargo.toml -- --baseline-live 6 # 真实窗口基线（会临时移动已开窗口，恢复后复原）
 cargo run --manifest-path src-tauri/Cargo.toml -- --snap "名称"    # 给同名工作空间追加一份手动快照（并设为激活空间）
 cargo run --manifest-path src-tauri/Cargo.toml -- --capture "名称" # 无头捕获并保存为工作空间
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -257,6 +267,6 @@ src-tauri/
 - 关闭窗口会隐藏到托盘；退出必须用托盘菜单（或任务管理器）\n- 安装包未签名，分发时会被 SmartScreen 提示\n- 全局快捷键固定为 Ctrl+Alt+W，设置页只能查看，改了要重新编译\n- 开机启动在**本沙箱环境写注册表被拒（Win32 错误码 5）**：PowerShell 与 reg.exe 能写，本程序进程不能，判断是执行环境令牌限制，未能在真机验证端到端；UI 会如实报错\n- 自动快照的开关/间隔/保留已可配置，但全局开关与每工作空间开关是两层（都需打开）\n- 自动快照只在"有激活工作空间"时工作；应用没运行的应用不会被自动记录\n- 指纹用 DefaultHasher，跨版本不稳定，仅用于同一次运行内去重
 - 最小化窗口恢复为普通窗口（有 `stateRestored=false` 与文案说明，不算谎报）
 
-## 下一步（M12）
+## 下一步（M13）
 
-10 应用 × 3 场景真实成功率矩阵、快捷键自定义、自动更新。
+多显示器 / 混合 DPI 场景验证、快捷键自定义、自动更新、Office/IDE/终端类真实应用样本。

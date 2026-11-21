@@ -365,23 +365,10 @@ pub fn apply(
             used.insert(target.hwnd);
             let hwnd = target.hwnd as HWND;
 
-            let (placed, state_restored) = place_window(hwnd, rect, win.show_state);
+            let state_restored = place_window(hwnd, rect, win.show_state);
             let elapsed = || t0.elapsed().as_millis() as i64;
 
-            if !placed {
-                RestoreStepResult {
-                    step_type: "window".into(),
-                    target_name,
-                    status: StepStatus::Failed,
-                    message: "SetWindowPlacement 调用失败（窗口已关闭或受 UIPI 限制）".into(),
-                    match_note: outcome.note,
-                    duration_ms: elapsed(),
-                    delta_x: None,
-                    delta_y: None,
-                    state_restored: false,
-                    code: Some("window_control_denied".into()),
-                }
-            } else {
+            {
                 // 等应用自身把窗口改回去（Chromium/Electron 常见），再判定偏差
                 std::thread::sleep(Duration::from_millis(160));
                 let mut delta = verify(hwnd, &target_info, win.show_state);
@@ -666,35 +653,41 @@ fn delta_threshold(dpi: u32) -> i32 {
     BASE_DELTA_PX.max((2.0 * scale).round() as i32)
 }
 
-/// 恢复窗口位置与显示状态，返回 (写入是否成功, 显示状态是否与快照一致)
-fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState) -> (bool, bool) {
+/// 恢复窗口位置与显示状态。返回「显示状态是否与快照一致」。
+///
+/// 注意：不以 SetWindowPlacement 的返回值判成败。实测发现 Chromium 系窗口
+/// 会返回 FALSE，但位置其实已经改对了（SetWindowPos 生效）——用返回值判会把
+/// 成功的恢复报成失败。这里只负责尝试，成败交给后续的实测校验。
+fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState) -> bool {
     if !window::is_window(hwnd) {
-        return (false, false);
+        return false;
     }
 
-    let placed = match target_state {
+    match target_state {
         ShowState::Maximized => {
-            // 先给一个还原矩形，再最大化；否则最大化会回到旧屏幕
+            // 先给还原矩形，再最大化；SetWindowPlacement 失败时至少位置是对的
             window::set_window_rect(hwnd, rect.0, rect.1, rect.2, rect.3);
-            window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized)
+            let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+            // 有些窗口不认 SetWindowPlacement，用 ShowWindow 兜底
+            if !window::is_zoomed(hwnd) {
+                let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+            }
         }
         // 最小化不强行还原为最小化：用户看不到窗口会以为失败（但报告会说明）
         ShowState::Minimized | ShowState::Normal => {
-            window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Normal)
+            let placed = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Normal);
+            if !placed {
+                // 退一步：只改位置，至少布局对得上
+                window::set_window_rect(hwnd, rect.0, rect.1, rect.2, rect.3);
+            }
         }
-    };
-
-    if !placed {
-        return (false, false);
     }
 
-    let state_restored = match target_state {
+    match target_state {
         ShowState::Maximized => window::is_zoomed(hwnd),
         ShowState::Normal => !window::is_zoomed(hwnd) && !window::is_iconic(hwnd),
         ShowState::Minimized => false,
-    };
-
-    (true, state_restored)
+    }
 }
 
 /// 四边偏差：返回 (最大偏差, dx, dy)，尺寸偏差计入最大值（评审补充意见 D4）。
