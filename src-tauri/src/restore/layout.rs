@@ -57,6 +57,18 @@ pub fn clamp(rect: Area, work: Area) -> Area {
     }
 }
 
+/// 比例坐标归一化到 [0,1] 且 x+w ≤ 1。
+/// 最大化的窗口实测会略大于工作区（含不可见边框，例如 -0.3% / 100.6%），
+/// 直接存盘会让 UI 显示出"负偏移"，而恢复时本来也会被 clamp，所以存盘即归一。
+pub fn normalize_ratios(r: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let clamp01 = |v: f64| v.clamp(0.0, 1.0);
+    let x = clamp01(r.0);
+    let y = clamp01(r.1);
+    let w = clamp01(r.2).min(1.0 - x).max(0.0);
+    let h = clamp01(r.3).min(1.0 - y).max(0.0);
+    (x, y, w, h)
+}
+
 /// 四舍五入到整数像素（SetWindowPos 只接受整数）
 pub fn round(rect: Area) -> (i32, i32, i32, i32) {
     (
@@ -118,5 +130,20 @@ mod tests {
     fn round_is_pixel_exact() {
         let (x, y, w, h) = round(Area::new(10.4, 10.6, 100.5, 200.49));
         assert_eq!((x, y, w, h), (10, 11, 101, 200));
+    }
+
+    #[test]
+    fn normalize_ratios_clamps_maximized_overshoot() {
+        // 最大化窗口实测：x=-0.003, w=1.006
+        let (x, y, w, h) = normalize_ratios((-0.003, -0.005, 1.006, 1.011));
+        assert_eq!((x, y), (0.0, 0.0));
+        assert!(w <= 1.0 && h <= 1.0);
+        assert!((w - 1.0).abs() < 1e-9 && (h - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn normalize_ratios_keeps_in_range_values() {
+        let r = normalize_ratios((0.25, 0.1, 0.5, 0.4));
+        assert_eq!(r, (0.25, 0.1, 0.5, 0.4));
     }
 }

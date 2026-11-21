@@ -15,6 +15,12 @@ pub fn run() {
     // 必须在创建任何窗口前设置，否则坐标会被 DWM 虚拟化
     win::dpi::enable_per_monitor_v2();
 
+    // 单实例：第二个实例只负责把已存在的窗口拉到前台
+    if !win::single_instance::acquire() {
+        win::single_instance::focus_existing();
+        return;
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // 数据库在启动时初始化（建库 + 跑迁移），失败直接让启动失败，
@@ -42,6 +48,16 @@ pub fn run() {
             }
 
             builder.build()?;
+
+            // 诊断用：WORKSCENE_ROUTE=/workspaces 可直接打开指定页面（截图与回归用）
+            if let Ok(route) = std::env::var("WORKSCENE_ROUTE") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.eval(&format!(
+                        "window.location.hash = '{}';",
+                        route.replace('\'', "")
+                    ));
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -54,11 +70,13 @@ pub fn run() {
             commands::workspace_create,
             commands::workspace_rename,
             commands::workspace_delete,
+            commands::workspace_item_update,
             commands::workspace_preview,
             commands::workspace_restore,
             commands::snapshot_restore,
             commands::run_list,
             commands::run_error_stats,
+            commands::restore_is_busy,
         ])
         .run(tauri::generate_context!())
         .expect("WorkScene 启动失败");
@@ -481,6 +499,186 @@ pub fn m2test() {
         if ok { "PASS" } else { "FAIL" }
     );
     if !ok {
+        std::process::exit(1);
+    }
+}
+
+/// 成功率基线：重复 N 轮「破坏布局 → 按工作空间恢复 → 校验」，输出 JSONL 与汇总。
+/// 这是评审 R8/A5 要求的测量协议的最小实现：没有它，"恢复成功率"只能靠跑一遍看看。
+/// 用法：cargo run -- --baseline 5
+pub fn baseline(iterations: usize) {
+    win::dpi::enable_per_monitor_v2();
+    let iterations = iterations.max(1);
+    println!("[env] data_dir={}", storage::data_dir().display());
+
+    let specs: [(&str, (i32, i32, i32, i32), bool); 3] = [
+        ("基线窗口 A", (300, 200, 900, 600), false),
+        ("基线窗口 B", (760, 420, 780, 560), false),
+        ("基线窗口 C", (500, 260, 820, 620), true),
+    ];
+
+    let mut mocks: Vec<win::mock::MockWindow> = Vec::new();
+    for (title, rect, _) in specs {
+        match win::mock::MockWindow::spawn(title, rect) {
+            Some(m) => mocks.push(m),
+            None => {
+                eprintln!("创建模拟窗口失败：{title}");
+                std::process::exit(2);
+            }
+        }
+    }
+    std::thread::sleep(Duration::from_millis(350));
+
+    // 按快照里的期望状态初始化（C 设为最大化）
+    for (m, (_, rect, maximized)) in mocks.iter().zip(specs.iter()) {
+        if *maximized {
+            win::window::apply_placement(m.hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+        } else {
+            win::window::set_window_rect(m.hwnd, rect.0, rect.1, rect.2, rect.3);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    let hwnds: Vec<usize> = mocks.iter().map(|m| m.hwnd as usize).collect();
+
+    let capture = match capture::scan_for_test() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("捕获失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    let mine: Vec<WindowInfo> = capture
+        .windows
+        .iter()
+        .filter(|w| hwnds.contains(&w.hwnd))
+        .cloned()
+        .collect();
+    if mine.len() != mocks.len() {
+        eprintln!("捕获到 {} 个模拟窗口（应为 {}）", mine.len(), mocks.len());
+        std::process::exit(2);
+    }
+    let isolated = CaptureResult {
+        windows: mine,
+        displays: capture.displays.clone(),
+        ..capture
+    };
+
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("数据库初始化失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    let ws = match tauri::async_runtime::block_on(data::workspaces::create_from_capture(
+        &db,
+        "基线工作空间",
+        &isolated,
+    )) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("创建工作空间失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    let scene = match tauri::async_runtime::block_on(data::workspaces::to_scene(&db, &ws.id)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("构造恢复计划失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    println!(
+        "[1/3] 工作空间就绪：{} 个窗口，开始 {} 轮恢复基线",
+        scene.windows.len(),
+        iterations
+    );
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut success = 0usize;
+    let mut codes: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+
+    for i in 0..iterations {
+        // 确定性扰动：每轮位移不同，但不依赖随机数
+        let dx = (i as i32 * 37) % 240;
+        let dy = (i as i32 * 53) % 180;
+        for (idx, m) in mocks.iter().enumerate() {
+            if idx as usize == 2 {
+                win::window::apply_placement(m.hwnd, 120 + dx, 90 + dy, 700, 480, ShowState::Normal);
+            } else {
+                win::window::set_window_rect(m.hwnd, 100 + dx + idx as i32 * 40, 80 + dy, 820, 540);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(260));
+
+        let report = match restore::apply(None, &scene, false, None) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("第 {i} 轮恢复失败：{e}");
+                continue;
+            }
+        };
+
+        for step in &report.steps {
+            let delta = step
+                .delta_x
+                .unwrap_or(0)
+                .abs()
+                .max(step.delta_y.unwrap_or(0).abs());
+            let ok = step.status == core::models::StepStatus::Success
+                && delta <= 8
+                && step.state_restored;
+            total += 1;
+            if ok {
+                success += 1;
+            }
+            let code = step.code.clone().unwrap_or_else(|| "ok".into());
+            *codes.entry(code.clone()).or_insert(0) += 1;
+
+            lines.push(
+                serde_json::json!({
+                    "iteration": i,
+                    "target": step.target_name,
+                    "status": format!("{:?}", step.status).to_lowercase(),
+                    "code": code,
+                    "deltaPx": delta,
+                    "stateRestored": step.state_restored,
+                    "durationMs": step.duration_ms,
+                    "ok": ok,
+                })
+                .to_string(),
+            );
+        }
+    }
+
+    let dir = storage::data_dir().join("baseline");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("baseline-{:x}.jsonl", core::time::now_ms()));
+    let _ = std::fs::write(&path, lines.join("\n"));
+
+    let rate = if total == 0 {
+        0.0
+    } else {
+        success as f64 * 100.0 / total as f64
+    };
+    println!("[2/3] 复核项 {total} 个，通过 {success} 个，成功率 {rate:.1}%");
+    println!("[3/3] 错误码分布：{codes:?}");
+    println!("     明细：{}", path.display());
+
+    let _ = tauri::async_runtime::block_on(data::workspaces::delete(&db, &ws.id));
+    for m in mocks {
+        m.close();
+    }
+
+    let pass = rate >= 95.0;
+    println!(
+        "\n基线结果：{}（门槛 95%，实际 {rate:.1}%）",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    if !pass {
         std::process::exit(1);
     }
 }

@@ -181,6 +181,7 @@ export interface WorkspaceItem {
   targetKind: string;
   enabled: boolean;
   reusePolicy: string;
+  launchArgs: string | null;
 }
 
 export interface WorkspaceWindow {

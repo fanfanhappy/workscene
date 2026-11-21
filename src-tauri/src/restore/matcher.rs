@@ -185,6 +185,8 @@ mod tests {
             source_dpi: 96,
             show_state: ShowState::Normal,
             z_order: 0,
+            reuse_policy: "reuse_or_launch".into(),
+            launch_args: None,
         }
     }
 

@@ -32,6 +32,7 @@ pub struct WorkspaceItem {
     pub target_kind: String,
     pub enabled: bool,
     pub reuse_policy: String,
+    pub launch_args: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +209,7 @@ pub async fn create_from_capture(
             .or_else(|| capture.displays.first());
 
         let (xr, yr, wr, hr) = match work {
-            Some(d) => to_ratios(
+            Some(d) => crate::restore::layout::normalize_ratios(to_ratios(
                 Area::new(w.x as f64, w.y as f64, w.width as f64, w.height as f64),
                 Area::new(
                     d.work_x as f64,
@@ -216,7 +217,7 @@ pub async fn create_from_capture(
                     d.work_width as f64,
                     d.work_height as f64,
                 ),
-            ),
+            )),
             None => (0.0, 0.0, 1.0, 1.0),
         };
 
@@ -358,7 +359,8 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
 
     let item_rows = sqlx::query(
         "SELECT i.id, i.item_type, i.display_name, i.target, i.target_kind, i.enabled,
-                COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy
+                COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
+                c.launch_args_json
          FROM workspace_items i
          LEFT JOIN app_configs c ON c.item_id = i.id
          WHERE i.workspace_id = ?
@@ -378,6 +380,7 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
             target_kind: r.get("target_kind"),
             enabled: r.get::<i64, _>("enabled") != 0,
             reuse_policy: r.get("reuse_policy"),
+            launch_args: r.get("launch_args_json"),
         })
         .collect();
 
@@ -476,6 +479,60 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// 更新应用项配置：复用策略、启动参数、启用状态。
+/// `launch_args` 以原始字符串存进 `launch_args_json`（不使用 shell，切分在恢复侧做）。
+pub async fn update_item(
+    db: &Db,
+    item_id: &str,
+    reuse_policy: &str,
+    launch_args: Option<String>,
+    enabled: bool,
+) -> AppResult<()> {
+    let policy = match reuse_policy {
+        "reuse_if_matched" | "always_launch" | "reuse_or_launch" => reuse_policy,
+        other => return Err(AppError::msg(format!("未知的复用策略：{other}"))),
+    };
+
+    let workspace_id: Option<String> =
+        sqlx::query_scalar("SELECT workspace_id FROM workspace_items WHERE id = ?")
+            .bind(item_id)
+            .fetch_optional(&db.pool)
+            .await?;
+    let workspace_id = workspace_id.ok_or_else(|| AppError::msg("应用项不存在"))?;
+
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+
+    sqlx::query("UPDATE workspace_items SET enabled = ?, updated_at = ? WHERE id = ?")
+        .bind(if enabled { 1 } else { 0 })
+        .bind(now)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+         VALUES (?, ?, ?, 8000)
+         ON CONFLICT(item_id) DO UPDATE SET
+             reuse_policy = excluded.reuse_policy,
+             launch_args_json = excluded.launch_args_json",
+    )
+    .bind(item_id)
+    .bind(policy)
+    .bind(&launch_args)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(&workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// 由工作空间当前布局构造可恢复的 SceneFile（恢复引擎的唯一输入）
 pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
     let detail = get(db, id).await?;
@@ -486,23 +543,31 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
     let windows = detail
         .windows
         .iter()
-        .map(|w| SceneWindow {
-            process_path: w.process_path.clone(),
-            process_name: w.process_name.clone(),
-            class_name: w.class_name.clone(),
-            title: w.title.clone(),
-            monitor_key: w.monitor_key.clone(),
-            x_ratio: w.x_ratio,
-            y_ratio: w.y_ratio,
-            width_ratio: w.width_ratio,
-            height_ratio: w.height_ratio,
-            original_x: 0,
-            original_y: 0,
-            original_width: 0,
-            original_height: 0,
-            source_dpi: w.source_dpi.unwrap_or(96) as u32,
-            show_state: w.show_state,
-            z_order: w.z_order as i32,
+        .map(|w| {
+            // 每个窗口带上所属应用的复用策略与启动参数（M3）
+            let item = detail.items.iter().find(|i| i.id == w.item_id);
+            SceneWindow {
+                process_path: w.process_path.clone(),
+                process_name: w.process_name.clone(),
+                class_name: w.class_name.clone(),
+                title: w.title.clone(),
+                monitor_key: w.monitor_key.clone(),
+                x_ratio: w.x_ratio,
+                y_ratio: w.y_ratio,
+                width_ratio: w.width_ratio,
+                height_ratio: w.height_ratio,
+                original_x: 0,
+                original_y: 0,
+                original_width: 0,
+                original_height: 0,
+                source_dpi: w.source_dpi.unwrap_or(96) as u32,
+                show_state: w.show_state,
+                z_order: w.z_order as i32,
+                reuse_policy: item
+                    .map(|i| i.reuse_policy.clone())
+                    .unwrap_or_else(|| "reuse_or_launch".into()),
+                launch_args: item.and_then(|i| i.launch_args.clone()),
+            }
         })
         .collect();
 

@@ -11,6 +11,7 @@ use crate::win::{display, filter, process, window};
 use layout::{clamp, from_ratios, round, Area};
 use matcher::{match_window, Candidate};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use windows_sys::Win32::Foundation::HWND;
@@ -21,6 +22,33 @@ const BASE_DELTA_PX: i32 = 8;
 const LAUNCH_WAIT_MS: u64 = 8000;
 /// 单次恢复最多为同一个可执行文件补启的实例数，避免失控
 const MAX_RELAUNCH_PER_EXE: usize = 3;
+/// 单次恢复总启动上限
+/// 单次恢复总启动上限
+const MAX_LAUNCH_TOTAL: usize = 8;
+
+/// 全局恢复互斥：两个恢复任务同时跑会互相搬窗口，报告也会互相污染
+static RESTORE_BUSY: AtomicBool = AtomicBool::new(false);
+
+pub struct RestoreGuard;
+
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        RESTORE_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 拿不到锁就立刻返回 None，由调用方转成用户可读的错误
+pub fn try_acquire() -> Option<RestoreGuard> {
+    if RESTORE_BUSY.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        Some(RestoreGuard)
+    }
+}
+
+pub fn is_busy() -> bool {
+    RESTORE_BUSY.load(Ordering::SeqCst)
+}
 
 fn current_candidates(self_pid: u32) -> Vec<Candidate> {
     let mut out = Vec::with_capacity(48);
@@ -251,31 +279,22 @@ pub fn apply(
     let mut used: HashSet<usize> = HashSet::new();
     let mut current = current_candidates(self_pid);
 
-    // 先按可执行文件补齐实例数：快照里有 3 个 Chrome 窗口、当前只开 1 个时，
-    // 必须再启动 2 个，否则多个目标会抢同一个窗口（评审补充意见 D3）
+    // 先按复用策略补齐实例：快照里有 3 个 Chrome 窗口、当前只开 1 个时，
+    // 只有 reuse_or_launch 才会补 2 个；reuse_if_matched 不启动，
+    // always_launch 则每个窗口各启一个（评审 R1-4 的三值语义）
     if relaunch_missing {
         let mut launched_total: usize = 0;
-        for (exe, need) in required_instances(scene) {
-            if launched_total >= MAX_RELAUNCH_PER_EXE * 4 {
+        for plan in plan_launches(scene, &current) {
+            if launched_total >= MAX_LAUNCH_TOTAL {
                 break;
             }
-            let available = current
-                .iter()
-                .filter(|c| {
-                    c.process_path
-                        .as_ref()
-                        .map(|p| p.eq_ignore_ascii_case(&exe))
-                        .unwrap_or(false)
-                })
-                .count();
-            let missing = need.saturating_sub(available);
-            if missing == 0 || !std::path::Path::new(&exe).is_file() {
+            if !std::path::Path::new(&plan.exe).is_file() {
                 continue;
             }
-            for _ in 0..missing.min(MAX_RELAUNCH_PER_EXE) {
-                launch_app(&exe);
+            for _ in 0..plan.count.min(MAX_RELAUNCH_PER_EXE) {
+                launch_app(&plan.exe, &plan.args);
                 launched_total += 1;
-                if wait_for_process_window(&exe) {
+                if wait_for_process_window(&plan.exe) {
                     current = current_candidates(self_pid);
                 }
             }
@@ -448,19 +467,125 @@ pub fn apply(
     Ok(report)
 }
 
-/// 快照里每个可执行文件需要几个窗口实例
-fn required_instances(scene: &SceneFile) -> Vec<(String, usize)> {
-    let mut map: Vec<(String, usize)> = Vec::new();
+/// 复用策略三值（PRD FR-005/006 的交界，此前只有默认行为）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReusePolicy {
+    /// 只复用已存在且能被匹配的窗口，从不启动新实例
+    ReuseIfMatched,
+    /// 每个快照窗口都新启一个实例
+    AlwaysLaunch,
+    /// 缺几个补几个（默认）
+    ReuseOrLaunch,
+}
+
+pub fn parse_policy(raw: &str) -> ReusePolicy {
+    match raw.trim().to_lowercase().as_str() {
+        "reuse_if_matched" => ReusePolicy::ReuseIfMatched,
+        "always_launch" => ReusePolicy::AlwaysLaunch,
+        _ => ReusePolicy::ReuseOrLaunch,
+    }
+}
+
+/// 按类 shell 规则切分参数：支持单/双引号包住空格，不做转义与变量展开。
+/// 参数始终以数组形式交给 CreateProcess，绝不拼接成 cmd.exe 命令行（文档 §14.2）。
+pub fn split_args(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut has_token = false;
+
+    for ch in input.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                has_token = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                has_token = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if has_token {
+                    out.push(std::mem::take(&mut cur));
+                    has_token = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        out.push(cur);
+    }
+    out
+}
+
+struct LaunchPlan {
+    exe: String,
+    args: Vec<String>,
+    count: usize,
+}
+
+/// 每个可执行文件要补几个实例，取决于它自己的复用策略与当前已开窗口数
+fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
+    struct Group {
+        key: String,
+        exe: String,
+        policy: String,
+        args: Option<String>,
+        need: usize,
+    }
+
+    let mut groups: Vec<Group> = Vec::new();
     for w in &scene.windows {
         let Some(path) = w.process_path.as_ref() else {
             continue;
         };
-        match map.iter_mut().find(|(p, _)| p.eq_ignore_ascii_case(path)) {
-            Some((_, n)) => *n += 1,
-            None => map.push((path.clone(), 1)),
+        let key = path.to_lowercase();
+        match groups.iter_mut().find(|g| g.key == key) {
+            Some(g) => g.need += 1,
+            None => groups.push(Group {
+                key,
+                exe: path.clone(),
+                policy: w.reuse_policy.clone(),
+                args: w.launch_args.clone(),
+                need: 1,
+            }),
         }
     }
-    map
+
+    groups
+        .into_iter()
+        .filter_map(|g| {
+            let available = current
+                .iter()
+                .filter(|c| {
+                    c.process_path
+                        .as_ref()
+                        .map(|p| p.to_lowercase() == g.key)
+                        .unwrap_or(false)
+                })
+                .count();
+
+            let count = match parse_policy(&g.policy) {
+                ReusePolicy::AlwaysLaunch => g.need,
+                ReusePolicy::ReuseIfMatched => 0,
+                ReusePolicy::ReuseOrLaunch => g.need.saturating_sub(available),
+            };
+
+            if count == 0 {
+                return None;
+            }
+            Some(LaunchPlan {
+                exe: g.exe,
+                args: split_args(g.args.as_deref().unwrap_or("")),
+                count,
+            })
+        })
+        .collect()
 }
 
 fn delta_threshold(dpi: u32) -> i32 {
@@ -524,12 +649,15 @@ fn verify(hwnd: HWND, target: &Target, state: ShowState) -> (i32, i32, i32) {
     (dx.max(dy).max(dw).max(dh), dx, dy)
 }
 
-fn launch_app(exe: &str) {
+fn launch_app(exe: &str, args: &[String]) {
     let mut cmd = std::process::Command::new(exe);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
     if let Some(dir) = std::path::Path::new(exe).parent() {
         cmd.current_dir(dir);
     }
-    // 不拼接 Shell 字符串，参数始终以数组传入（文档 §14.2）
+    // 参数以数组传入，不拼接 Shell 字符串（文档 §14.2）
     let _ = cmd.spawn();
 }
 
@@ -561,5 +689,95 @@ mod tests {
         assert_eq!(delta_threshold(96), 8);
         assert_eq!(delta_threshold(144), 8);
         assert_eq!(delta_threshold(480), 10);
+    }
+
+    #[test]
+    fn policy_parses_three_values_and_defaults_safely() {
+        assert_eq!(parse_policy("reuse_if_matched"), ReusePolicy::ReuseIfMatched);
+        assert_eq!(parse_policy("ALWAYS_LAUNCH"), ReusePolicy::AlwaysLaunch);
+        assert_eq!(parse_policy("reuse_or_launch"), ReusePolicy::ReuseOrLaunch);
+        // 未知值必须退化成最保守的默认策略，而不是 panic 或不启动
+        assert_eq!(parse_policy("garbage"), ReusePolicy::ReuseOrLaunch);
+    }
+
+    #[test]
+    fn args_split_supports_quotes_and_spaces() {
+        assert_eq!(split_args(""), Vec::<String>::new());
+        assert_eq!(split_args("--new-window"), vec!["--new-window"]);
+        assert_eq!(
+            split_args(r#"--profile "C:\Work Space" --flag"#),
+            vec!["--profile", r"C:\Work Space", "--flag"]
+        );
+        assert_eq!(split_args("'a b' c"), vec!["a b", "c"]);
+        assert_eq!(split_args("  a   b  "), vec!["a", "b"]);
+    }
+
+    fn scene_with(policy: &str, path: &str, count: usize) -> SceneFile {
+        let windows = (0..count)
+            .map(|i| SceneWindow {
+                process_path: Some(path.into()),
+                process_name: "app.exe".into(),
+                class_name: "Class".into(),
+                title: format!("w{i}"),
+                monitor_key: "M1".into(),
+                x_ratio: 0.0,
+                y_ratio: 0.0,
+                width_ratio: 0.5,
+                height_ratio: 0.5,
+                original_x: 0,
+                original_y: 0,
+                original_width: 800,
+                original_height: 600,
+                source_dpi: 96,
+                show_state: ShowState::Normal,
+                z_order: i as i32,
+                reuse_policy: policy.into(),
+                launch_args: None,
+            })
+            .collect();
+        SceneFile {
+            schema_version: 1,
+            id: "s".into(),
+            name: "s".into(),
+            captured_at: 0,
+            displays: vec![],
+            windows,
+        }
+    }
+
+    fn candidate(path: &str, n: usize) -> Vec<Candidate> {
+        (0..n)
+            .map(|_| Candidate {
+                hwnd: 1,
+                pid: 1,
+                process_path: Some(path.into()),
+                process_name: "app.exe".into(),
+                class_name: "Class".into(),
+                title: "w".into(),
+                rect: (0, 0, 100, 100),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reuse_or_launch_only_fills_the_gap() {
+        let scene = scene_with("reuse_or_launch", r"C:\app\a.exe", 3);
+        let plans = plan_launches(&scene, &candidate(r"C:\app\a.exe", 1));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].count, 2, "3 个窗口、已开 1 个 -> 补 2 个");
+    }
+
+    #[test]
+    fn reuse_if_matched_never_launches() {
+        let scene = scene_with("reuse_if_matched", r"C:\app\a.exe", 3);
+        assert!(plan_launches(&scene, &candidate(r"C:\app\a.exe", 1)).is_empty());
+        assert!(plan_launches(&scene, &[]).is_empty());
+    }
+
+    #[test]
+    fn always_launch_ignores_existing_windows() {
+        let scene = scene_with("always_launch", r"C:\app\a.exe", 2);
+        let plans = plan_launches(&scene, &candidate(r"C:\app\a.exe", 5));
+        assert_eq!(plans[0].count, 2, "always_launch 不管已开多少都新启");
     }
 }

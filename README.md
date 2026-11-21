@@ -14,7 +14,7 @@ Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
 
-## 进度：M2（工作空间 + SQLite），M1 闭环已验证
+## 进度：M3（安全与可测量性）叠加在 M2 之上；M1 闭环已验证
 
 ### M1 系统能力验证
 
@@ -40,7 +40,20 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | 恢复报告入库（run + 逐步 step，含 `seq` 与 `error_code`），按错误码聚合 | 完成 |
 | 按快照恢复（撤销这次恢复 / 历史回退） | 完成 |
 | UI：工作空间页（列表 + 详情 + 应用清单）、捕获改为"保存为工作空间" | 完成 |
-| 工作空间编辑（增删应用、拖拽布局）、`reuse_policy` 配置项 | 未做（M3） |
+| 工作空间编辑（增删应用、拖拽布局） | 未做（M4） |
+
+### M3 安全与可测量性
+
+| 内容 | 状态 |
+|---|---|
+| 单实例：第二个实例把已有窗口拉到前台后退出（`CreateMutexW`） | 完成，实测双开只剩 1 个进程 |
+| 全局恢复互斥：同时发起两次恢复会被拒绝，UI 轮询 `restore_is_busy` 禁用按钮 | 完成 |
+| `reuse_policy` 三值语义：`reuse_if_matched` / `always_launch` / `reuse_or_launch` | 完成，含 3 条单测 |
+| 应用启动参数（类 shell 切分、按数组传给 CreateProcess，绝不拼 cmd） | 完成，含切分单测 |
+| 应用项配置 UI：复用策略下拉 + 启动参数输入（失焦保存） | 完成 |
+| 快照比例坐标归一化（最大化窗口实测 -0.3%/100.6% 越界） | 完成，含 2 条单测 |
+| 成功率基线协议 `--baseline N`（JSONL 明细 + 错误码分布 + 95% 门槛） | 完成，5 轮 15 项 100% |
+| 10 应用 × 3 场景真实矩阵 | 未做（需真实应用与双屏） |
 
 ### 按评审已修的问题
 
@@ -55,7 +68,9 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | **A8**：恢复不可撤销 | 已修：恢复前自动保护快照 + 报告页「撤销这次恢复」 |
 | R2 DPI | PMv2 已启用；最小化取 `rcNormalPosition`；`SetThreadDpiAwarenessContext` 未做（见下） |
 | R5 导入即执行 | 尚无导入功能，但 `launch_app` 无二次确认 —— 未处理 |
-| R6 指纹/自动快照、R7 单实例、R8 成功率基线 | 未做 |
+| R7 单实例 / 并发恢复 | 已修：进程级互斥 + 恢复互斥锁 |
+| R8 成功率基线 | 已实现协议 `--baseline`（模拟窗口样本，见 `docs/BASELINE.md`） |
+| R6 指纹/自动快照 | 未做（`content_fingerprint` 已入库，未参与去重） |
 
 ### 实测证据（本机，2026-11-21）
 
@@ -93,6 +108,7 @@ pnpm tauri dev                       # 开发
 cargo run --manifest-path src-tauri/Cargo.toml -- --selftest      # 打印真实捕获 JSON
 cargo run --manifest-path src-tauri/Cargo.toml -- --m1test        # 捕获→破坏→恢复→校验（含最大化）
 cargo run --manifest-path src-tauri/Cargo.toml -- --m2test        # 工作空间闭环：建库→建空间→恢复→报告入库→删除
+cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 成功率基线（JSONL + 汇总，95% 门槛）
 cargo run --manifest-path src-tauri/Cargo.toml -- --capture "名称" # 无头捕获并保存为工作空间
 cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -139,15 +155,15 @@ src-tauri/
 
 - **不支持 UWP / 打包应用**（`ApplicationFrameWindow` 显式排除；Win11 的记事本、设置、计算器都是这一类）
 - 不支持虚拟桌面归属恢复：窗口恢复到当前虚拟桌面
-- 应用启动不支持自定义参数；`reuse_policy` 只有默认值，UI 还不能改
+- 应用启动参数由用户填写原始字符串，只支持引号分组，不支持转义与变量展开
 - 工作空间**不能编辑**：只能整体重建（重新捕获）或删除
 - **未在真实双屏 / 跨 DPI 环境验证**（本机单屏 3840×2160 @150%）
 - 未调用 `SetThreadDpiAwarenessContext`：目标进程 DPI 感知模式与 WorkScene 不一致时可能错位
 - 快照 JSON 明文保存窗口标题与完整路径，**没有加密**；导入/导出未实现（实现时必须按评审 R5 补信任模型）
-- 无单实例互斥；同一时刻发起两次恢复会互相干扰
+- 单实例与恢复互斥已实现，但窗口标题写死为 "WorkScene"（多语言改名后需同步）
 - 无自动快照、无指纹去重（`content_fingerprint` 已入库，但目前只记录不参与去重）
 - 最小化窗口恢复为普通窗口（有 `stateRestored=false` 与文案说明，不算谎报）
 
-## 下一步（M3）
+## 下一步（M4）
 
-工作空间编辑（增删应用、可视化拖拽布局 UI-06b）、`reuse_policy` 三值与启动参数、`SetThreadDpiAwarenessContext`、单实例与恢复互斥、10 应用 × 3 场景成功率基线（把 M1 的 go/no-go 门补上）。
+工作空间编辑（增删应用、可视化拖拽布局 UI-06b）、`SetThreadDpiAwarenessContext`、10 应用 × 3 场景真实成功率矩阵（把模拟窗口基线换成真实应用）。

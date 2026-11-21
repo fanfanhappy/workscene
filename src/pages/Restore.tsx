@@ -48,6 +48,13 @@ export function RestorePage() {
     staleTime: 2_000,
   });
 
+  // 全局恢复互斥：一次只跑一个恢复任务（后端有同样的锁）
+  const busy = useQuery({
+    queryKey: ["restore-busy"],
+    queryFn: api.restoreIsBusy,
+    refetchInterval: 1_500,
+  });
+
   const active = useMemo(
     () => (workspaces.data ?? []).find((s) => s.id === workspaceId) ?? (workspaces.data ?? [])[0],
     [workspaces.data, workspaceId],
@@ -173,7 +180,8 @@ export function RestorePage() {
                   </Button>
                   <Button
                     variant="primary"
-                    disabled={preview.isPending || !preview.data}
+                    disabled={preview.isPending || !preview.data || busy.data === true}
+                    title={busy.data === true ? "已有恢复任务在执行" : undefined}
                     onClick={() => run.mutate()}
                   >
                     <Play size={15} /> 开始恢复

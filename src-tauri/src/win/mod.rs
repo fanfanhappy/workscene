@@ -3,5 +3,6 @@ pub mod dpi;
 pub mod filter;
 pub mod mock;
 pub mod process;
+pub mod single_instance;
 pub mod strings;
 pub mod window;

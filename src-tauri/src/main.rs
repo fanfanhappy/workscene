@@ -1,4 +1,4 @@
-// 发布版不弹控制台窗口；--selftest / --m1test / --m2test / --capture 走 debug 构建，仍有输出
+// 发布版不弹控制台窗口；诊断入口走 debug 构建，仍有输出
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
@@ -14,6 +14,14 @@ fn main() {
     }
     if args.iter().any(|a| a == "--m2test") {
         workscene_lib::m2test();
+        return;
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--baseline") {
+        let rounds = args
+            .get(pos + 1)
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5);
+        workscene_lib::baseline(rounds);
         return;
     }
     if let Some(pos) = args.iter().position(|a| a == "--capture") {

@@ -54,6 +54,19 @@ export function WorkspacesPage() {
     onError: (e) => setError(String((e as Error).message)),
   });
 
+  const saveItem = useMutation({
+    mutationFn: (v: {
+      itemId: string;
+      reusePolicy: string;
+      launchArgs: string | null;
+      enabled: boolean;
+    }) => api.workspaceItemUpdate(v.itemId, v.reusePolicy, v.launchArgs, v.enabled),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+    },
+    onError: (e) => setError(String((e as Error).message)),
+  });
+
   if (list.isPending) {
     return (
       <Card className="flex items-center gap-2 text-aux text-ink-3">
@@ -229,16 +242,50 @@ export function WorkspacesPage() {
 
             <Card padded={false} className="overflow-hidden">
               <div className="border-b border-line px-5 py-2.5 text-aux text-ink-2">
-                应用清单（识别与复用策略）
+                应用清单（复用策略与启动参数）
               </div>
               <ul className="divide-y divide-line/60">
                 {detail.data.items.map((it) => (
-                  <li key={it.id} className="flex items-center gap-3 px-5 py-2">
-                    <span className="min-w-0 flex-1 truncate text-body">{it.displayName}</span>
-                    <span className="max-w-[45%] truncate font-mono text-[11px] text-ink-3">
-                      {it.target ?? "路径不可读"}
-                    </span>
-                    <Badge>{it.reusePolicy}</Badge>
+                  <li key={it.id} className="flex flex-col gap-2 px-5 py-2.5">
+                    <div className="flex items-center gap-3">
+                      <span className="min-w-0 flex-1 truncate text-body">{it.displayName}</span>
+                      <span className="max-w-[45%] truncate font-mono text-[11px] text-ink-3">
+                        {it.target ?? "路径不可读"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={it.reusePolicy}
+                        onChange={(e) =>
+                          saveItem.mutate({
+                            itemId: it.id,
+                            reusePolicy: e.target.value,
+                            launchArgs: it.launchArgs,
+                            enabled: it.enabled,
+                          })
+                        }
+                        className="h-7 rounded-sm border border-line-strong bg-canvas px-2 text-[11px] text-ink-2 outline-none focus:border-accent"
+                      >
+                        <option value="reuse_or_launch">缺几个补几个（默认）</option>
+                        <option value="reuse_if_matched">只复用，不新启</option>
+                        <option value="always_launch">每个窗口都新启</option>
+                      </select>
+                      <input
+                        defaultValue={it.launchArgs ?? ""}
+                        placeholder="启动参数，例如 --new-window"
+                        onBlur={(e) => {
+                          const value = e.target.value.trim();
+                          if (value === (it.launchArgs ?? "")) return;
+                          saveItem.mutate({
+                            itemId: it.id,
+                            reusePolicy: it.reusePolicy,
+                            launchArgs: value === "" ? null : value,
+                            enabled: it.enabled,
+                          });
+                        }}
+                        className="h-7 min-w-0 flex-1 rounded-sm border border-line-strong bg-canvas px-2 font-mono text-[11px] outline-none focus:border-accent"
+                      />
+                    </div>
                   </li>
                 ))}
               </ul>

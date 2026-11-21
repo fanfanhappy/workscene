@@ -95,6 +95,12 @@ pub struct SceneWindow {
     pub source_dpi: u32,
     pub show_state: ShowState,
     pub z_order: i32,
+    /// 复用策略：reuse_if_matched / always_launch / reuse_or_launch（缺省按后者）
+    #[serde(default)]
+    pub reuse_policy: String,
+    /// 启动参数（命令行字符串，按类 shell 规则切分，绝不经过 cmd.exe）
+    #[serde(default)]
+    pub launch_args: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

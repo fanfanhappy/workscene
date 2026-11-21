@@ -50,6 +50,19 @@ export const api = {
   workspaceRename: (id: string, name: string) =>
     call<void>("workspace_rename", { id, name }),
   workspaceDelete: (id: string) => call<void>("workspace_delete", { id }),
+  workspaceItemUpdate: (
+    itemId: string,
+    reusePolicy: string,
+    launchArgs: string | null,
+    enabled: boolean,
+  ) =>
+    call<void>("workspace_item_update", {
+      itemId,
+      reusePolicy,
+      launchArgs,
+      enabled,
+    }),
+  restoreIsBusy: () => call<boolean>("restore_is_busy"),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),

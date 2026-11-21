@@ -1,6 +1,6 @@
 use crate::core::models::{CaptureResult, SceneFile, SceneSummary, SceneWindow, ShowState};
 use crate::core::{AppError, AppResult};
-use crate::restore::layout::{to_ratios, Area};
+use crate::restore::layout::{normalize_ratios, to_ratios, Area};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -71,7 +71,7 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
             .or_else(|| capture.displays.first());
 
         let (x_ratio, y_ratio, width_ratio, height_ratio) = match work {
-            Some(d) => to_ratios(
+            Some(d) => normalize_ratios(to_ratios(
                 Area::new(w.x as f64, w.y as f64, w.width as f64, w.height as f64),
                 Area::new(
                     d.work_x as f64,
@@ -79,7 +79,7 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
                     d.work_width as f64,
                     d.work_height as f64,
                 ),
-            ),
+            )),
             None => (0.0, 0.0, 1.0, 1.0),
         };
 
@@ -104,6 +104,8 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
                 w.show_state
             },
             z_order: windows.len() as i32,
+            reuse_policy: "reuse_or_launch".into(),
+            launch_args: None,
         });
     }
 
