@@ -14,7 +14,7 @@ Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
 
-## 进度：M5（Hybrid 快照）；M1–M4 已完成
+## 进度：M6（异常退出恢复 + L2 适配建议）；M1–M5 已完成
 
 ### M1 系统能力验证
 
@@ -77,7 +77,19 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | 恢复成功即记录激活工作空间（自动快照的归属） | 完成 |
 | 快照差异：按「进程+类名+归一化标题」对齐，输出新增/移除/移动/状态变化 | 完成，含 2 条单测 |
 | 历史页：时间线、类型标签、保护标记、比较、恢复、删除、清理自动快照 | 完成 |
-| 崩溃后恢复提示（异常退出检测） | 未做 |
+| 崩溃后恢复提示（异常退出检测） | **已完成（M6）** |
+
+### M6 异常退出恢复与 L2 适配
+
+| 内容 | 状态 |
+|---|---|
+| 会话标记：启动写 `session.json(clean=false)`，正常退出改 clean | 完成 |
+| 异常退出检测：启动读到未清理标记 + 激活工作空间 + 最近快照，生成 `recovery-hint.json` | 完成，实测强杀后重启命中 |
+| 总览页恢复横幅：显示崩溃时间与可恢复快照，「恢复上次现场」/「忽略」 | 完成 |
+| L2 适配建议：按可执行文件名给 VS Code / Terminal / 浏览器 / Explorer 的建议参数 | 完成，含 4 条单测 |
+| 适配建议只做提示不自动填（避免猜错参数把恢复变成乱开窗口），用户点「建议参数」才写入 | 完成 |
+| 系统托盘 / 全局快捷键 | 未做（M6 剩余） |
+| 安装包与代码签名 | 未做（`pnpm tauri build` 可出 MSI/NSIS，未签名） |
 
 ### 按评审已修的问题
 
@@ -134,7 +146,7 @@ cargo run --manifest-path src-tauri/Cargo.toml -- --m1test        # 捕获→破
 cargo run --manifest-path src-tauri/Cargo.toml -- --m2test        # 工作空间闭环：建库→建空间→恢复→报告入库→删除
 cargo run --manifest-path src-tauri/Cargo.toml -- --m5test       # 快照去重/节流/保留/差异
 cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 成功率基线（JSONL + 汇总，95% 门槛）
-cargo run --manifest-path src-tauri/Cargo.toml -- --snap "名称"    # 给同名工作空间追加一份手动快照
+cargo run --manifest-path src-tauri/Cargo.toml -- --snap "名称"    # 给同名工作空间追加一份手动快照（并设为激活空间）
 cargo run --manifest-path src-tauri/Cargo.toml -- --capture "名称" # 无头捕获并保存为工作空间
 cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -187,9 +199,9 @@ src-tauri/
 - 跨 DPI 已加线程级 context 切换，但**真实双屏 + 混合 DPI 仍未实机验证**
 - 快照 JSON 明文保存窗口标题与完整路径，**没有加密**；导入/导出未实现（实现时必须按评审 R5 补信任模型）
 - 单实例与恢复互斥已实现，但窗口标题写死为 "WorkScene"（多语言改名后需同步）
-- 自动快照只在"有激活工作空间"时工作；应用没运行的应用不会被自动记录\n- 指纹用 DefaultHasher，跨版本不稳定，仅用于同一次运行内去重
+- 托盘与全局快捷键未做；关闭窗口即退出（没有"最小化到托盘"）\n- 安装包未签名，分发时会被 SmartScreen 提示\n- 自动快照只在"有激活工作空间"时工作；应用没运行的应用不会被自动记录\n- 指纹用 DefaultHasher，跨版本不稳定，仅用于同一次运行内去重
 - 最小化窗口恢复为普通窗口（有 `stateRestored=false` 与文案说明，不算谎报）
 
-## 下一步（M6）
+## 下一步（M7）
 
-异常退出后的恢复提示、应用适配器（L2：VS Code / Terminal / 浏览器启动参数）、托盘与快捷键、安装包与签名、10 应用 × 3 场景真实成功率矩阵。
+系统托盘与全局快捷键、安装包与代码签名、L3 深度适配（VS Code 工作区 / Terminal 配置）、10 应用 × 3 场景真实成功率矩阵。

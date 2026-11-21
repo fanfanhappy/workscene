@@ -13,6 +13,43 @@ import {
 import { api, formatRelative, formatTime } from "@/services/api";
 import type { WorkspaceWindow } from "@/types/contract";
 import { LayoutEditor, toLayoutUpdates } from "@/components/LayoutEditor";
+
+/**
+ * L2 适配建议：由 Rust 侧按可执行文件名判断，UI 只展示"建议参数"并允许一键填入。
+ * 不自动填 —— 猜错会让恢复变成乱开窗口。
+ */
+function SuggestArgs({
+  exeName,
+  target,
+  current,
+  onApply,
+}: {
+  exeName: string;
+  target: string | null;
+  current: string | null;
+  onApply: (args: string) => void;
+}) {
+  const q = useQuery({
+    queryKey: ["adapter", exeName, target],
+    queryFn: () => api.adapterSuggest(exeName, target),
+    staleTime: Infinity,
+    retry: 0,
+    enabled: Boolean(exeName),
+  });
+
+  const suggestion = q.data?.args ?? null;
+  if (!suggestion || suggestion === (current ?? "")) return null;
+
+  return (
+    <button
+      onClick={() => onApply(suggestion)}
+      title={`${q.data?.kind ?? "generic"} 适配建议：${suggestion}`}
+      className="h-7 shrink-0 rounded-sm border border-accent/40 px-2 text-[11px] text-accent hover:bg-accent/10"
+    >
+      建议参数
+    </button>
+  );
+}
 import { Badge, Button, Card, EmptyState, ErrorNote, SectionTitle, Spinner } from "@/components/ui";
 
 export function WorkspacesPage() {
@@ -380,6 +417,19 @@ export function WorkspacesPage() {
                           });
                         }}
                         className="h-7 min-w-0 flex-1 rounded-sm border border-line-strong bg-canvas px-2 font-mono text-[11px] outline-none focus:border-accent"
+                      />
+                      <SuggestArgs
+                        exeName={it.target?.split(/[\\/]/).pop() ?? ""}
+                        target={it.target}
+                        current={it.launchArgs}
+                        onApply={(args) =>
+                          saveItem.mutate({
+                            itemId: it.id,
+                            reusePolicy: it.reusePolicy,
+                            launchArgs: args,
+                            enabled: it.enabled,
+                          })
+                        }
                       />
                     </div>
                   </li>

@@ -258,6 +258,21 @@ export interface SnapshotDiff {
   displayDetail: string;
 }
 
+// ---- M6：崩溃恢复提示 / 适配建议 ----
+
+export interface RecoveryHint {
+  crashedAt: number;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  snapshotId: string | null;
+  snapshotAt: number | null;
+}
+
+export interface AdapterSuggestion {
+  kind: string;
+  args: string | null;
+}
+
 export interface RunSummary {  id: string;
   workspaceId: string | null;
   snapshotId: string | null;

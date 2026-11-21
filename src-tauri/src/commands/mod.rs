@@ -4,6 +4,7 @@ use crate::core::models::{
 };
 use crate::core::{AppError, AppResult};
 use crate::data::runs::{self, RunSummary};
+use crate::data::session;
 use crate::data::snapshots::{self, SnapshotDiff, SnapshotSummary};
 use crate::data::workspaces::{self, WorkspaceDetail, WorkspaceSummary};
 use crate::data::Db;
@@ -282,4 +283,35 @@ pub async fn snapshot_prune(
     keep: usize,
 ) -> AppResult<usize> {
     snapshots::prune(&db, &workspace_id, keep).await
+}
+
+// ---- 崩溃恢复提示（M6） ----
+
+/// 存在即表示"上次 WorkScene 没有正常退出"
+#[tauri::command]
+pub fn recovery_hint() -> Option<session::RecoveryHint> {
+    session::read_hint()
+}
+
+#[tauri::command]
+pub fn recovery_dismiss() {
+    session::clear_hint();
+}
+
+// ---- 应用适配建议（L2，仅建议不自动填） ----
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterSuggestion {
+    pub kind: String,
+    pub args: Option<String>,
+}
+
+#[tauri::command]
+pub fn adapter_suggest(exe_name: String, target: Option<String>) -> AdapterSuggestion {
+    let kind = crate::adapters::classify(&exe_name);
+    AdapterSuggestion {
+        kind: kind.as_str().to_string(),
+        args: crate::adapters::suggest_args(&exe_name, target.as_deref()),
+    }
 }

@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AppWindow, Camera, Monitor, RotateCcw, Trash2 } from "lucide-react";
-import { api, formatRelative } from "@/services/api";
+import { AppWindow, AlertTriangle, Camera, Monitor, RotateCcw, Trash2 } from "lucide-react";
+import { api, formatRelative, formatTime } from "@/services/api";
 import type { DisplayInfo } from "@/types/contract";
 import {
   Badge,
@@ -39,6 +39,27 @@ export function OverviewPage() {
     staleTime: 30_000,
   });
 
+  // 崩溃恢复提示：上次没有正常退出时，后端会在数据目录留下 hint
+  const hint = useQuery({
+    queryKey: ["recovery-hint"],
+    queryFn: api.recoveryHint,
+    staleTime: 0,
+    retry: 0,
+  });
+
+  const dismissHint = useMutation({
+    mutationFn: api.recoveryDismiss,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["recovery-hint"] }),
+  });
+
+  const recoverLast = useMutation({
+    mutationFn: (snapshotId: string) => api.snapshotRestore(snapshotId, false),
+    onSuccess: () => {
+      dismissHint.mutate();
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
+    },
+  });
+
   const remove = useMutation({
     mutationFn: (id: string) => api.workspaceDelete(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
@@ -54,6 +75,43 @@ export function OverviewPage() {
 
   return (
     <div className="mx-auto flex max-w-[1100px] flex-col gap-6">
+      {hint.data ? (
+        <Card className="border-warning/40 bg-warning/5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="flex items-center gap-2 text-body font-medium text-warning">
+                <AlertTriangle size={15} />
+                上次 WorkScene 没有正常退出
+              </p>
+              <p className="mt-1 text-aux text-ink-2">
+                时间：{formatTime(hint.data.crashedAt)}
+                {hint.data.snapshotId
+                  ? ` · 可以恢复到崩溃前最近一份快照${
+                      hint.data.workspaceName ? `（${hint.data.workspaceName}）` : ""
+                    }${hint.data.snapshotAt ? `，捕获于 ${formatTime(hint.data.snapshotAt)}` : ""}`
+                  : " · 没有找到可恢复的快照"}
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {hint.data.snapshotId ? (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={recoverLast.isPending}
+                  onClick={() => recoverLast.mutate(hint.data!.snapshotId!)}
+                >
+                  <RotateCcw size={14} />
+                  恢复上次现场
+                </Button>
+              ) : null}
+              <Button size="sm" variant="ghost" onClick={() => dismissHint.mutate()}>
+                忽略
+              </Button>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+
       <Card className="flex flex-col gap-5">
         <div className="flex items-start justify-between gap-4">
           <div>

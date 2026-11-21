@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AdapterSuggestion,
   AppInfo,
   CaptureResult,
   DisplayInfo,
   LayoutUpdate,
+  RecoveryHint,
   RestorePreview,
   RestoreReport,
   RunSummary,
@@ -83,6 +85,11 @@ export const api = {
     call<SnapshotDiff>("snapshot_diff", { idA, idB }),
   snapshotPrune: (workspaceId: string, keep: number) =>
     call<number>("snapshot_prune", { workspaceId, keep }),
+
+  recoveryHint: () => call<RecoveryHint | null>("recovery_hint"),
+  recoveryDismiss: () => call<void>("recovery_dismiss"),
+  adapterSuggest: (exeName: string, target: string | null) =>
+    call<AdapterSuggestion>("adapter_suggest", { exeName, target }),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),

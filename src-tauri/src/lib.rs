@@ -1,3 +1,4 @@
+mod adapters;
 mod capture;
 mod commands;
 mod core;
@@ -26,6 +27,14 @@ pub fn run() {
             // 数据库在启动时初始化（建库 + 跑迁移），失败直接让启动失败，
             // 避免出现"能开窗但什么都不能用"的半死状态。
             let db = tauri::async_runtime::block_on(data::init())?;
+
+            // 会话标记：上次是否正常退出。崩溃时在数据目录留下 recovery-hint.json，
+            // 本次启动据此在总览页提示"可以恢复上次现场"。
+            if let Some(previous) = data::session::begin() {
+                let hint = tauri::async_runtime::block_on(build_recovery_hint(&db, previous.started_at));
+                let _ = data::session::write_hint(&hint);
+            }
+
             app.manage(db);
 
             // 窗口在代码里创建而不是写在配置里，为的是把 WebView2 的用户数据目录
@@ -87,9 +96,50 @@ pub fn run() {
             commands::snapshot_delete,
             commands::snapshot_diff,
             commands::snapshot_prune,
+            commands::recovery_hint,
+            commands::recovery_dismiss,
+            commands::adapter_suggest,
         ])
-        .run(tauri::generate_context!())
-        .expect("WorkScene 启动失败");
+        .build(tauri::generate_context!())
+        .expect("WorkScene 构建失败")
+        .run(|_app, event| {
+            // 正常退出时把会话标记改成 clean，下次启动就不会误报"异常退出"
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                data::session::mark_clean();
+            }
+        });
+}
+
+/// 组装崩溃恢复提示：激活工作空间 + 该工作空间最近一份快照
+async fn build_recovery_hint(db: &data::Db, crashed_at: i64) -> data::session::RecoveryHint {
+    let mut hint = data::session::RecoveryHint {
+        crashed_at,
+        workspace_id: None,
+        workspace_name: None,
+        snapshot_id: None,
+        snapshot_at: None,
+    };
+
+    let Ok(Some(ws_id)) = data::snapshots::active_workspace(db).await else {
+        return hint;
+    };
+    hint.workspace_id = Some(ws_id.clone());
+
+    if let Ok(detail) = data::workspaces::get(db, &ws_id).await {
+        hint.workspace_name = Some(detail.name);
+    }
+
+    if let Ok(snaps) = data::snapshots::list(db, &ws_id, 1).await {
+        if let Some(latest) = snaps.first() {
+            hint.snapshot_id = Some(latest.id.clone());
+            hint.snapshot_at = Some(latest.captured_at);
+        }
+    }
+
+    hint
 }
 
 /// 无 UI 自检：把真实捕获结果打印成 JSON。
@@ -169,10 +219,17 @@ pub fn cli_snapshot(name: &str) {
         &format!("手动快照 {}", ws.name),
         &capture,
     )) {
-        Ok(s) => println!(
-            "已写入快照：{}（{} 个窗口，类型 {}）",
-            s.id, s.window_count, s.snapshot_type
-        ),
+        Ok(s) => {
+            // 命令行给某个工作空间拍快照，视为把它设为当前工作空间，
+            // 这样自动快照与崩溃恢复提示都能找到归属
+            let _ = tauri::async_runtime::block_on(data::snapshots::set_active_workspace(
+                &db, &ws.id,
+            ));
+            println!(
+                "已写入快照：{}（{} 个窗口，类型 {}）",
+                s.id, s.window_count, s.snapshot_type
+            )
+        }
         Err(e) => eprintln!("写入快照失败：{e}"),
     }
 }
