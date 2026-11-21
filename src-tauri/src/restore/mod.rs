@@ -3,7 +3,7 @@ pub mod matcher;
 
 use crate::core::models::{
     PreviewItem, PreviewSummary, RestorePreview, RestoreReport, RestoreStepResult, SceneFile,
-    SceneWindow, ShowState, StepStatus,
+    SceneResource, SceneWindow, ShowState, StepStatus,
 };
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
@@ -246,6 +246,34 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
         items.push(item);
     }
 
+    // 资源（文件 / 文件夹 / 网址）：预览只判断可达性，不打开任何东西
+    for r in &scene.resources {
+        let exists = resource_exists(r);
+        if exists {
+            ready += 1;
+        } else {
+            missing += 1;
+        }
+        items.push(PreviewItem {
+            target_name: r.display_name.clone(),
+            detail: match r.item_type.as_str() {
+                "url" => format!("将用默认浏览器打开 {}", r.target),
+                "folder" => format!("将用资源管理器打开 {}", r.target),
+                _ => format!("将用默认程序打开 {}", r.target),
+            },
+            status: if exists {
+                StepStatus::Success
+            } else {
+                StepStatus::Failed
+            },
+            match_note: if exists {
+                "资源可达".to_string()
+            } else {
+                "路径不存在或网址无效".to_string()
+            },
+        });
+    }
+
     Ok(RestorePreview {
         scene_id: scene.id.clone(),
         scene_name: scene.name.clone(),
@@ -259,7 +287,6 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
         display_notes,
     })
 }
-
 /// 串行恢复：M1 只验证「识别 + 定位」的准确性，并发编排留给 M3。
 pub fn apply(
     app: Option<&AppHandle>,
@@ -340,6 +367,7 @@ pub fn apply(
 
             if !placed {
                 RestoreStepResult {
+                    step_type: "window".into(),
                     target_name,
                     status: StepStatus::Failed,
                     message: "SetWindowPlacement 调用失败（窗口已关闭或受 UIPI 限制）".into(),
@@ -397,6 +425,7 @@ pub fn apply(
                 };
 
                 RestoreStepResult {
+                    step_type: "window".into(),
                     target_name,
                     status,
                     message,
@@ -410,6 +439,7 @@ pub fn apply(
             }
         } else if outcome.ambiguous {
             RestoreStepResult {
+                step_type: "window".into(),
                 target_name,
                 status: StepStatus::Skipped,
                 message: "窗口匹配存在歧义，已跳过（不改动任何窗口）".into(),
@@ -422,6 +452,7 @@ pub fn apply(
             }
         } else {
             RestoreStepResult {
+                step_type: "window".into(),
                 target_name,
                 status: StepStatus::Skipped,
                 message: "未找到可用的对应窗口（应用未运行，或已被其他目标占用）".into(),
@@ -435,6 +466,45 @@ pub fn apply(
         };
 
         // 真实进度：每完成一步推送一次（无 UI 的自检里 app 为 None）
+        if let Some(app) = app {
+            let _ = app.emit("restore:step", &step);
+        }
+        steps.push(step);
+    }
+
+    // 资源恢复：窗口摆好之后再打开文件/文件夹/网址，避免被窗口抢走焦点
+    for r in &scene.resources {
+        let t0 = Instant::now();
+        let ok = open_resource(r);
+        let step = RestoreStepResult {
+            step_type: "resource".into(),
+            target_name: r.display_name.clone(),
+            status: if ok {
+                StepStatus::Success
+            } else {
+                StepStatus::Failed
+            },
+            message: if ok {
+                match r.item_type.as_str() {
+                    "url" => "已交给默认浏览器打开".to_string(),
+                    "folder" => "已在资源管理器中打开".to_string(),
+                    _ => "已用默认程序打开".to_string(),
+                }
+            } else {
+                format!("无法打开：{}（路径不存在或没有关联程序）", r.target)
+            },
+            match_note: r.target.clone(),
+            duration_ms: t0.elapsed().as_millis() as i64,
+            delta_x: None,
+            delta_y: None,
+            state_restored: true,
+            code: if ok {
+                None
+            } else {
+                Some("resource_open_failed".to_string())
+            },
+        };
+
         if let Some(app) = app {
             let _ = app.emit("restore:step", &step);
         }
@@ -649,8 +719,41 @@ fn verify(hwnd: HWND, target: &Target, state: ShowState) -> (i32, i32, i32) {
     (dx.max(dy).max(dw).max(dh), dx, dy)
 }
 
-fn launch_app(exe: &str, args: &[String]) {
-    let mut cmd = std::process::Command::new(exe);
+/// 资源是否可达：网址看协议，文件/文件夹看存在性
+fn resource_exists(r: &SceneResource) -> bool {
+    match r.item_type.as_str() {
+        "url" => r.target.starts_with("http://") || r.target.starts_with("https://"),
+        _ => std::path::Path::new(&r.target).exists(),
+    }
+}
+
+/// 用系统默认关联打开资源（ShellExecuteW，"open" 动词）。
+/// 不走 cmd.exe，也不拼接命令行字符串。
+fn open_resource(r: &SceneResource) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    const SW_SHOWNORMAL: i32 = 1;
+
+    if !resource_exists(r) {
+        return false;
+    }
+
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = r.target.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let ret = ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+        (ret as isize) > 32
+    }
+}
+
+fn launch_app(exe: &str, args: &[String]) {    let mut cmd = std::process::Command::new(exe);
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -742,6 +845,7 @@ mod tests {
             captured_at: 0,
             displays: vec![],
             windows,
+            resources: Vec::new(),
         }
     }
 

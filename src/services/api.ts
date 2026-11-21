@@ -15,6 +15,7 @@ import type {
   SnapshotSummary,
   StorageStats,
   WorkspaceDetail,
+  WorkspaceItem,
   WorkspaceSummary,
 } from "@/types/contract";
 
@@ -77,6 +78,18 @@ export const api = {
     call<void>("workspace_window_delete", { workspaceId, windowId }),
   workspaceItemDelete: (workspaceId: string, itemId: string) =>
     call<void>("workspace_item_delete", { workspaceId, itemId }),
+  workspaceItemAdd: (
+    workspaceId: string,
+    itemType: string,
+    target: string,
+    displayName: string | null = null,
+  ) =>
+    call<WorkspaceItem>("workspace_item_add", {
+      workspaceId,
+      itemType,
+      target,
+      displayName,
+    }),
 
   snapshotList: (workspaceId: string, limit = 50) =>
     call<SnapshotSummary[]>("snapshot_list", { workspaceId, limit }),

@@ -109,6 +109,18 @@ pub async fn workspace_item_delete(
     workspaces::delete_item(&db, &workspace_id, &item_id).await
 }
 
+/// 添加资源项：文件 / 文件夹 / 网址
+#[tauri::command]
+pub async fn workspace_item_add(
+    db: State<'_, Db>,
+    workspace_id: String,
+    item_type: String,
+    target: String,
+    display_name: Option<String>,
+) -> AppResult<workspaces::WorkspaceItem> {
+    workspaces::add_item(&db, &workspace_id, &item_type, &target, display_name.as_deref()).await
+}
+
 #[tauri::command]
 pub async fn workspace_preview(db: State<'_, Db>, id: String) -> AppResult<RestorePreview> {
     let scene = workspaces::to_scene(&db, &id).await?;

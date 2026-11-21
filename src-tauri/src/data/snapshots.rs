@@ -381,6 +381,7 @@ mod tests {
             captured_at: 0,
             displays: vec![],
             windows,
+            resources: Vec::new(),
         }
     }
 

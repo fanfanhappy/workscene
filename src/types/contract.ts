@@ -167,6 +167,7 @@ export interface WorkspaceSummary {
   description: string | null;
   isFavorite: boolean;
   itemCount: number;
+  resourceCount: number;
   windowCount: number;
   createdAt: number;
   updatedAt: number;

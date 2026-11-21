@@ -14,7 +14,7 @@ Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
 
-## 进度：M8（设置页 + 可配置策略）；M1–M7 已完成
+## 进度：M9（文件/文件夹/网址恢复）；M1–M8 已完成
 
 ### M1 系统能力验证
 
@@ -114,6 +114,18 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | 设置入口放在侧栏底部（与 UI 规范 §3.2 一致） | 完成 |
 | 快捷键自定义、开机启动开关 | 未做（快捷键写死 Ctrl+Alt+W） |
 
+### M9 资源恢复（PRD FR-008 / FR-009）
+
+| 内容 | 状态 |
+|---|---|
+| 工作空间可加文件 / 文件夹 / 网址（地址栏输入，不依赖文件选择器插件） | 完成 |
+| 入库校验：类型白名单、网址必须 http(s)、同空间去重、空值拒绝 | 完成，含单测 |
+| 恢复流程：窗口摆好后再打开资源（避免抢焦点），ShellExecuteW 走系统默认关联 | 完成 |
+| 报告区分 `window` / `resource` 两类步骤，失败给 `resource_open_failed` | 完成 |
+| 预览判定：文件/文件夹看存在性，网址看协议；不可达直接标红 | 完成 |
+| 列表与详情区分「应用 / 资源 / 窗口」三个计数（之前资源被算进应用） | 完成 |
+| 抽样自检 `--m9test`：4 个资源（1 个故意不存在）→ 预览判定 1 个不可达 | 完成 |
+
 ### 按评审已修的问题
 
 | 评审项 | 处理 |
@@ -168,6 +180,7 @@ cargo run --manifest-path src-tauri/Cargo.toml -- --selftest      # 打印真实
 cargo run --manifest-path src-tauri/Cargo.toml -- --m1test        # 捕获→破坏→恢复→校验（含最大化）
 cargo run --manifest-path src-tauri/Cargo.toml -- --m2test        # 工作空间闭环：建库→建空间→恢复→报告入库→删除
 cargo run --manifest-path src-tauri/Cargo.toml -- --m5test       # 快照去重/节流/保留/差异
+cargo run --manifest-path src-tauri/Cargo.toml -- --m9test       # 资源（文件/文件夹/网址）入库与预览判定
 cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 成功率基线（JSONL + 汇总，95% 门槛）
 cargo run --manifest-path src-tauri/Cargo.toml -- --snap "名称"    # 给同名工作空间追加一份手动快照（并设为激活空间）
 cargo run --manifest-path src-tauri/Cargo.toml -- --capture "名称" # 无头捕获并保存为工作空间
@@ -225,6 +238,6 @@ src-tauri/
 - 关闭窗口会隐藏到托盘；退出必须用托盘菜单（或任务管理器）\n- 安装包未签名，分发时会被 SmartScreen 提示\n- 全局快捷键固定为 Ctrl+Alt+W，设置页只能查看，改了要重新编译\n- 开机启动未做（设置页暂无该开关）\n- 自动快照的开关/间隔/保留已可配置，但全局开关与每工作空间开关是两层（都需打开）\n- 自动快照只在"有激活工作空间"时工作；应用没运行的应用不会被自动记录\n- 指纹用 DefaultHasher，跨版本不稳定，仅用于同一次运行内去重
 - 最小化窗口恢复为普通窗口（有 `stateRestored=false` 与文案说明，不算谎报）
 
-## 下一步（M9）
+## 下一步（M10）
 
 L3 深度适配（VS Code 工作区 / Terminal 配置）、10 应用 × 3 场景真实成功率矩阵、快捷键自定义与开机启动、自动更新。

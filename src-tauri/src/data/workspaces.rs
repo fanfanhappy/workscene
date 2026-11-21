@@ -1,4 +1,4 @@
-use crate::core::models::{CaptureResult, SceneFile, SceneWindow, ShowState};
+use crate::core::models::{CaptureResult, SceneFile, SceneResource, SceneWindow, ShowState};
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
 use crate::restore::layout::{to_ratios, Area};
@@ -16,6 +16,7 @@ pub struct WorkspaceSummary {
     pub description: Option<String>,
     pub is_favorite: bool,
     pub item_count: i64,
+    pub resource_count: i64,
     pub window_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -277,6 +278,7 @@ pub async fn create_from_capture(
         description: None,
         is_favorite: false,
         item_count: item_ids.len() as i64,
+        resource_count: 0,
         window_count: capture.windows.len() as i64,
         created_at: now,
         updated_at: now,
@@ -322,7 +324,8 @@ pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
     let rows = sqlx::query(
         "SELECT w.id, w.name, w.description, w.is_favorite, w.created_at, w.updated_at,
                 w.last_restored_at,
-                (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id) AS item_count,
+                (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type = 'application') AS item_count,
+                (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type <> 'application') AS resource_count,
                 (SELECT COUNT(*) FROM window_layouts l WHERE l.workspace_id = w.id) AS window_count
          FROM workspaces w
          ORDER BY w.is_favorite DESC, w.updated_at DESC",
@@ -338,6 +341,7 @@ pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
             description: r.get("description"),
             is_favorite: r.get::<i64, _>("is_favorite") != 0,
             item_count: r.get("item_count"),
+            resource_count: r.get("resource_count"),
             window_count: r.get("window_count"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
@@ -644,12 +648,136 @@ pub async fn delete_item(db: &Db, workspace_id: &str, item_id: &str) -> AppResul
     Ok(())
 }
 
+/// 添加一个资源项（文件 / 文件夹 / 网址）。
+/// 同一工作空间内相同 target 会被 UNIQUE 约束拦住，这里转成可读错误。
+pub async fn add_item(
+    db: &Db,
+    workspace_id: &str,
+    item_type: &str,
+    target: &str,
+    display_name: Option<&str>,
+) -> AppResult<WorkspaceItem> {
+    if !matches!(item_type, "file" | "folder" | "url") {
+        return Err(AppError::msg(format!("不支持的资源类型：{item_type}")));
+    }
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(AppError::msg("资源路径或网址不能为空"));
+    }
+    if item_type == "url" && !(target.starts_with("http://") || target.starts_with("https://")) {
+        return Err(AppError::msg("网址必须以 http:// 或 https:// 开头"));
+    }
+
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(&db.pool)
+            .await?;
+    if exists.is_none() {
+        return Err(AppError::msg("工作空间不存在"));
+    }
+
+    let identity = target.to_lowercase();
+    let duplicate: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM workspace_items WHERE workspace_id = ? AND item_type = ? AND identity_key = ?",
+    )
+    .bind(workspace_id)
+    .bind(item_type)
+    .bind(&identity)
+    .fetch_optional(&db.pool)
+    .await?;
+    if duplicate.is_some() {
+        return Err(AppError::msg("该资源已在此工作空间中"));
+    }
+
+    let name = display_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_display_name(item_type, target));
+
+    let now = now_ms();
+    let id = format!("it-{:x}-res", now);
+    let sort: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM workspace_items WHERE workspace_id = ?",
+    )
+    .bind(workspace_id)
+    .fetch_one(&db.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+            identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(workspace_id)
+    .bind(item_type)
+    .bind(&name)
+    .bind(&identity)
+    .bind(target)
+    .bind(item_type)
+    .bind(sort)
+    .bind(now)
+    .bind(now)
+    .execute(&db.pool)
+    .await?;
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&db.pool)
+        .await?;
+
+    Ok(WorkspaceItem {
+        id,
+        item_type: item_type.to_string(),
+        display_name: name,
+        target: Some(target.to_string()),
+        target_kind: item_type.to_string(),
+        enabled: true,
+        reuse_policy: "reuse_or_launch".into(),
+        launch_args: None,
+    })
+}
+
+fn default_display_name(item_type: &str, target: &str) -> String {
+    match item_type {
+        "url" => target
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string(),
+        _ => std::path::Path::new(target)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| target.to_string()),
+    }
+}
+
 /// 由工作空间当前布局构造可恢复的 SceneFile（恢复引擎的唯一输入）
 pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
     let detail = get(db, id).await?;
-    if detail.windows.is_empty() {
-        return Err(AppError::msg("该工作空间没有窗口，无法恢复"));
+    if detail.windows.is_empty() && detail.items.iter().all(|i| i.item_type == "application") {
+        return Err(AppError::msg("该工作空间没有可恢复的窗口或资源"));
     }
+
+    // 文件 / 文件夹 / 网址：恢复时按默认程序打开（PRD FR-008 / FR-009）
+    let resources: Vec<SceneResource> = detail
+        .items
+        .iter()
+        .filter(|i| i.enabled && matches!(i.item_type.as_str(), "file" | "folder" | "url"))
+        .filter_map(|i| {
+            let target = i.target.clone().unwrap_or_default();
+            if target.trim().is_empty() {
+                return None;
+            }
+            Some(SceneResource {
+                item_type: i.item_type.clone(),
+                target,
+                display_name: i.display_name.clone(),
+            })
+        })
+        .collect();
 
     let windows = detail
         .windows
@@ -689,6 +817,7 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
         captured_at: detail.updated_at,
         displays: Vec::new(),
         windows,
+        resources,
     })
 }
 
@@ -929,6 +1058,32 @@ mod tests {
         )
         .await;
         assert!(err.is_err(), "不属于该工作空间的布局必须被拒绝");
+    }
+
+    #[tokio::test]
+    async fn resources_are_added_deduped_and_included_in_scene() {
+        let db = db().await;
+        let s = create_from_capture(&db, "资源", &capture()).await.unwrap();
+
+        let file = add_item(&db, &s.id, "file", r"D:\docs\spec.md", None).await.unwrap();
+        assert_eq!(file.display_name, "spec.md");
+
+        add_item(&db, &s.id, "folder", r"D:\docs", None).await.unwrap();
+        let url = add_item(&db, &s.id, "url", "https://example.com/x", None)
+            .await
+            .unwrap();
+        assert_eq!(url.display_name, "example.com/x");
+
+        // 同一资源重复添加必须被拒绝（UNIQUE + 前置检查）
+        assert!(add_item(&db, &s.id, "file", r"d:\docs\SPEC.md", None).await.is_err());
+        // 非 http(s) 的网址直接拒绝
+        assert!(add_item(&db, &s.id, "url", "file:///etc/passwd", None).await.is_err());
+        // 不支持的类型
+        assert!(add_item(&db, &s.id, "application", r"C:\a.exe", None).await.is_err());
+
+        let scene = to_scene(&db, &s.id).await.unwrap();
+        assert_eq!(scene.resources.len(), 3);
+        assert!(scene.resources.iter().any(|r| r.item_type == "url"));
     }
 
     #[tokio::test]

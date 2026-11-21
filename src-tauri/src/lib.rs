@@ -94,6 +94,7 @@ pub fn run() {
             commands::workspace_layout_update,
             commands::workspace_window_delete,
             commands::workspace_item_delete,
+            commands::workspace_item_add,
             commands::workspace_preview,
             commands::workspace_restore,
             commands::snapshot_restore,
@@ -1066,6 +1067,153 @@ pub fn m5test() {
     mock_b.close();
 
     println!("\nM5 结果：{}", if ok { "PASS" } else { "FAIL" });
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
+/// M9 自检：资源恢复（文件/文件夹/网址）。
+/// 只验证「入库 → 构造恢复计划 → 预览判定」这一段；不真的打开资源，
+/// 避免在自检里弹出资源管理器/浏览器窗口。
+/// 用法：cargo run -- --m9test
+pub fn m9test() {
+    win::dpi::enable_per_monitor_v2();
+    println!("[env] data_dir={}", storage::data_dir().display());
+    let mut ok = true;
+
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("数据库初始化失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    let Some(mock) = win::mock::MockWindow::spawn("M9 模拟窗口", (340, 240, 820, 560)) else {
+        eprintln!("无法创建模拟窗口，自检中止");
+        std::process::exit(2);
+    };
+    std::thread::sleep(Duration::from_millis(300));
+
+    let capture = match capture::scan_for_test() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("捕获失败：{e}");
+            mock.close();
+            std::process::exit(2);
+        }
+    };
+    let mine: Vec<WindowInfo> = capture
+        .windows
+        .iter()
+        .filter(|w| w.hwnd == mock.hwnd as usize)
+        .cloned()
+        .collect();
+    let isolated = CaptureResult {
+        windows: mine,
+        displays: capture.displays.clone(),
+        ..capture
+    };
+
+    let ws = match tauri::async_runtime::block_on(data::workspaces::create_from_capture(
+        &db,
+        "M9 资源自检",
+        &isolated,
+    )) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("创建工作空间失败：{e}");
+            mock.close();
+            std::process::exit(2);
+        }
+    };
+
+    // 一个真实存在的文件（仓库里的 README）、一个文件夹、一个网址、一个不存在的路径
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let real_file = repo.join("README.md");
+    let real_folder = repo.join("docs");
+
+    let mut added = 0;
+    for (kind, target) in [
+        ("file", real_file.to_string_lossy().to_string()),
+        ("folder", real_folder.to_string_lossy().to_string()),
+        ("url", "https://example.com/docs".to_string()),
+        ("file", repo.join("no-such-file.md").to_string_lossy().to_string()),
+    ] {
+        match tauri::async_runtime::block_on(data::workspaces::add_item(
+            &db,
+            &ws.id,
+            kind,
+            &target,
+            None,
+        )) {
+            Ok(_) => added += 1,
+            Err(e) => {
+                eprintln!("添加资源失败（{kind} {target}）：{e}");
+                ok = false;
+            }
+        }
+    }
+    println!("[1/3] 已添加 {added} 个资源");
+
+    let detail = tauri::async_runtime::block_on(data::workspaces::get(&db, &ws.id));
+    let resources = detail
+        .map(|d| d.items.iter().filter(|i| i.item_type != "application").count())
+        .unwrap_or(0);
+    println!("[2/3] 工作空间内资源项：{resources}");
+    if resources != 4 {
+        ok = false;
+    }
+
+    let scene = match tauri::async_runtime::block_on(data::workspaces::to_scene(&db, &ws.id)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("构造恢复计划失败：{e}");
+            mock.close();
+            std::process::exit(2);
+        }
+    };
+    let preview = match restore::preview(&scene) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("生成预览失败：{e}");
+            mock.close();
+            std::process::exit(2);
+        }
+    };
+
+    let resource_items: Vec<_> = preview
+        .items
+        .iter()
+        .filter(|i| i.detail.starts_with("将用") || i.detail.starts_with("将交给"))
+        .collect();
+    let missing = resource_items
+        .iter()
+        .filter(|i| i.status == core::models::StepStatus::Failed)
+        .count();
+
+    println!(
+        "[3/3] 预览：{} 个窗口 + {} 个资源（其中 {} 个判定为不可达）",
+        preview.items.len() - resource_items.len(),
+        resource_items.len(),
+        missing
+    );
+
+    // 4 个资源里应当正好 1 个不可达（no-such-file.md）
+    if scene.resources.len() != 4 || resource_items.len() != 4 || missing != 1 {
+        ok = false;
+    }
+
+    // 保留现场时用 WORKSCENE_KEEP=1，方便截图/人工检查
+    if std::env::var("WORKSCENE_KEEP").is_err() {
+        let _ = tauri::async_runtime::block_on(data::workspaces::delete(&db, &ws.id));
+    }
+    mock.close();
+
+    println!("\nM9 结果：{}", if ok { "PASS" } else { "FAIL" });
     if !ok {
         std::process::exit(1);
     }

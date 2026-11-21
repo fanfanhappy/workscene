@@ -20,6 +20,10 @@ fn main() {
         workscene_lib::m5test();
         return;
     }
+    if args.iter().any(|a| a == "--m9test") {
+        workscene_lib::m9test();
+        return;
+    }
     if let Some(pos) = args.iter().position(|a| a == "--baseline") {
         let rounds = args
             .get(pos + 1)

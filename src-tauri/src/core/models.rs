@@ -103,6 +103,16 @@ pub struct SceneWindow {
     pub launch_args: Option<String>,
 }
 
+/// 非应用类资源：文件、文件夹、网址（PRD FR-008 / FR-009）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneResource {
+    /// file / folder / url
+    pub item_type: String,
+    pub target: String,
+    pub display_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneFile {
@@ -112,6 +122,9 @@ pub struct SceneFile {
     pub captured_at: i64,
     pub displays: Vec<DisplayInfo>,
     pub windows: Vec<SceneWindow>,
+    /// 旧快照没有这个字段，读取时默认为空
+    #[serde(default)]
+    pub resources: Vec<SceneResource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +146,10 @@ pub enum StepStatus {
     Skipped,
     Timeout,
     NeedsReview,
+}
+
+fn default_step_type() -> String {
+    "window".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +183,9 @@ pub struct PreviewSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreStepResult {
+    /// window / resource
+    #[serde(default = "default_step_type")]
+    pub step_type: String,
     pub target_name: String,
     pub status: StepStatus,
     pub message: String,

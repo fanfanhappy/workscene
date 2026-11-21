@@ -48,6 +48,7 @@
 | `exe_missing` | 可执行文件不存在 | 重新定位应用 | 未实现 |
 | `launch_timeout` | 启动后超时未见窗口 | 重试 | 未实现（当前归入 `window_not_found`） |
 | `display_missing` | 目标显示器不在 | 查看映射预览 | 部分（仅 `displayNotes`） |
+| `resource_open_failed` | 文件/文件夹/网址打不开 | 检查路径或关联程序 | **已实现（M9）** |
 | `uipi_denied` | 权限不足 | 提示提权 | 未实现（与 `window_control_denied` 合并） |
 
 ## 4. 报告落盘

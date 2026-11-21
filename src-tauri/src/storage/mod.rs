@@ -116,6 +116,7 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
         captured_at: capture.captured_at,
         displays: capture.displays.clone(),
         windows,
+        resources: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&scene)?;

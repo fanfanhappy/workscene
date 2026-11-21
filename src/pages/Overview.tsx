@@ -225,7 +225,7 @@ export function OverviewPage() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-body font-medium">{w.name}</p>
                     <p className="mt-0.5 text-aux text-ink-3">
-                      {w.itemCount} 个应用 · {w.windowCount} 个窗口 ·{" "}
+                      {w.itemCount} 个应用 · {w.resourceCount} 个资源 · {w.windowCount} 个窗口 ·{" "}
                       {w.lastRestoredAt
                         ? `上次恢复 ${formatRelative(w.lastRestoredAt)}`
                         : `创建于 ${formatRelative(w.createdAt)}`}

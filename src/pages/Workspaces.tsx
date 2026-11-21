@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { api, formatRelative, formatTime } from "@/services/api";
-import type { WorkspaceWindow } from "@/types/contract";
+import type { WorkspaceItem, WorkspaceWindow } from "@/types/contract";
 import { LayoutEditor, toLayoutUpdates } from "@/components/LayoutEditor";
 
 /**
@@ -207,7 +207,7 @@ export function WorkspacesPage() {
                 >
                   <p className="truncate text-body font-medium">{w.name}</p>
                   <p className="mt-0.5 text-[11px] text-ink-3">
-                    {w.itemCount} 应用 · {w.windowCount} 窗口
+                    {w.itemCount} 应用 · {w.resourceCount} 资源 · {w.windowCount} 窗口
                   </p>
                 </button>
               </li>
@@ -293,10 +293,18 @@ export function WorkspacesPage() {
                 </div>
               </div>
 
-              <dl className="grid grid-cols-3 gap-3 border-t border-line pt-3 text-aux">
+              <dl className="grid grid-cols-4 gap-3 border-t border-line pt-3 text-aux">
                 <div>
                   <dt className="text-ink-3">应用</dt>
-                  <dd className="tabnum mt-0.5 text-card">{detail.data.items.length}</dd>
+                  <dd className="tabnum mt-0.5 text-card">
+                    {detail.data.items.filter((i) => i.itemType === "application").length}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-ink-3">资源</dt>
+                  <dd className="tabnum mt-0.5 text-card">
+                    {detail.data.items.filter((i) => i.itemType !== "application").length}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-ink-3">窗口</dt>
@@ -436,9 +444,113 @@ export function WorkspacesPage() {
                 ))}
               </ul>
             </Card>
+            <ResourcesCard
+              workspaceId={detail.data.id}
+              items={detail.data.items.filter((i) =>
+                ["file", "folder", "url"].includes(i.itemType),
+              )}
+              onChanged={() => {
+                qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+                qc.invalidateQueries({ queryKey: ["workspaces"] });
+              }}
+              onError={setError}
+            />
           </>
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** 文件 / 文件夹 / 网址（PRD FR-008 / FR-009） */
+function ResourcesCard({
+  workspaceId,
+  items,
+  onChanged,
+  onError,
+}: {
+  workspaceId: string;
+  items: WorkspaceItem[];
+  onChanged: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [type, setType] = useState<"file" | "folder" | "url">("file");
+  const [target, setTarget] = useState("");
+
+  const add = useMutation({
+    mutationFn: () => api.workspaceItemAdd(workspaceId, type, target.trim(), null),
+    onSuccess: () => {
+      setTarget("");
+      onChanged();
+    },
+    onError: (e) => onError(String((e as Error).message)),
+  });
+
+  const remove = useMutation({
+    mutationFn: (itemId: string) => api.workspaceItemDelete(workspaceId, itemId),
+    onSuccess: onChanged,
+    onError: (e) => onError(String((e as Error).message)),
+  });
+
+  return (
+    <Card className="flex flex-col gap-3">
+      <div>
+        <p className="text-body font-medium">资源（文件 / 文件夹 / 网址）</p>
+        <p className="mt-0.5 text-[11px] text-ink-3">
+          恢复时在窗口摆好之后，用默认程序或资源管理器打开
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value as "file" | "folder" | "url")}
+          className="h-8 rounded-sm border border-line-strong bg-canvas px-2 text-aux text-ink-2 outline-none focus:border-accent"
+        >
+          <option value="file">文件</option>
+          <option value="folder">文件夹</option>
+          <option value="url">网址</option>
+        </select>
+        <input
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          placeholder={type === "url" ? "https://example.com" : "D:\\path\\to\\thing"}
+          className="h-8 min-w-0 flex-1 rounded-sm border border-line-strong bg-canvas px-2 font-mono text-[11px] outline-none focus:border-accent"
+        />
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={add.isPending || target.trim() === ""}
+          onClick={() => add.mutate()}
+        >
+          添加
+        </Button>
+      </div>
+
+      {items.length === 0 ? (
+        <p className="text-[11px] text-ink-3">还没有添加资源。</p>
+      ) : (
+        <ul className="divide-y divide-line/60 rounded-md border border-line">
+          {items.map((it) => (
+            <li key={it.id} className="flex items-center gap-3 px-3 py-2">
+              <Badge>{it.itemType === "url" ? "网址" : it.itemType === "folder" ? "文件夹" : "文件"}</Badge>
+              <span className="min-w-0 flex-1 truncate text-aux">{it.displayName}</span>
+              <span className="max-w-[45%] truncate font-mono text-[11px] text-ink-3">
+                {it.target}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(it.id)}
+                title="移除该资源"
+              >
+                <Trash2 size={13} />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
