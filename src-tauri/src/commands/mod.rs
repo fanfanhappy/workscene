@@ -78,6 +78,34 @@ pub async fn workspace_item_update(
     workspaces::update_item(&db, &item_id, &reuse_policy, launch_args, enabled).await
 }
 
+/// 布局编辑：批量提交窗口的新比例坐标（一个事务）
+#[tauri::command]
+pub async fn workspace_layout_update(
+    db: State<'_, Db>,
+    workspace_id: String,
+    updates: Vec<workspaces::LayoutUpdate>,
+) -> AppResult<()> {
+    workspaces::update_layouts(&db, &workspace_id, &updates).await
+}
+
+#[tauri::command]
+pub async fn workspace_window_delete(
+    db: State<'_, Db>,
+    workspace_id: String,
+    window_id: String,
+) -> AppResult<()> {
+    workspaces::delete_window(&db, &workspace_id, &window_id).await
+}
+
+#[tauri::command]
+pub async fn workspace_item_delete(
+    db: State<'_, Db>,
+    workspace_id: String,
+    item_id: String,
+) -> AppResult<()> {
+    workspaces::delete_item(&db, &workspace_id, &item_id).await
+}
+
 #[tauri::command]
 pub async fn workspace_preview(db: State<'_, Db>, id: String) -> AppResult<RestorePreview> {
     let scene = workspaces::to_scene(&db, &id).await?;

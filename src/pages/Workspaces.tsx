@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -11,6 +11,8 @@ import {
   X,
 } from "lucide-react";
 import { api, formatRelative, formatTime } from "@/services/api";
+import type { WorkspaceWindow } from "@/types/contract";
+import { LayoutEditor, toLayoutUpdates } from "@/components/LayoutEditor";
 import { Badge, Button, Card, EmptyState, ErrorNote, SectionTitle, Spinner } from "@/components/ui";
 
 export function WorkspacesPage() {
@@ -33,6 +35,65 @@ export function WorkspacesPage() {
     queryFn: () => api.workspaceGet(activeId!),
     enabled: Boolean(activeId),
     retry: 0,
+  });
+
+  // 编辑草稿：详情加载后同步，拖拽只改草稿，保存时才写库
+  const [draft, setDraft] = useState<WorkspaceWindow[]>([]);
+  useEffect(() => {
+    if (detail.data) setDraft(detail.data.windows);
+  }, [detail.data]);
+
+  // 布局画布需要真实显示器几何（工作区、DPI）
+  const displays = useQuery({
+    queryKey: ["displays"],
+    queryFn: api.getDisplays,
+    staleTime: 30_000,
+    retry: 0,
+  });
+
+  const saveLayout = useMutation({
+    mutationFn: async () => {
+      const ws = detail.data!;
+      let changes = 0;
+
+      // 画布上被移除的窗口 -> 删库
+      const removed = ws.windows.filter((w) => !draft.some((d) => d.id === w.id));
+      for (const w of removed) {
+        await api.workspaceWindowDelete(ws.id, w.id);
+        changes += 1;
+      }
+
+      // 位置/尺寸变化 -> 批量更新（后端一个事务）
+      const moved = draft.filter((d) => {
+        const origin = ws.windows.find((w) => w.id === d.id);
+        return (
+          origin &&
+          (origin.xRatio !== d.xRatio ||
+            origin.yRatio !== d.yRatio ||
+            origin.widthRatio !== d.widthRatio ||
+            origin.heightRatio !== d.heightRatio)
+        );
+      });
+      if (moved.length > 0) {
+        await api.workspaceLayoutUpdate(ws.id, toLayoutUpdates(moved));
+        changes += moved.length;
+      }
+      return changes;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
+    },
+    onError: (e) => setError(String((e as Error).message)),
+  });
+
+  const removeItem = useMutation({
+    mutationFn: (itemId: string) => api.workspaceItemDelete(detail.data!.id, itemId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
+    },
+    onError: (e) => setError(String((e as Error).message)),
   });
 
   const rename = useMutation({
@@ -213,12 +274,27 @@ export function WorkspacesPage() {
               </dl>
             </Card>
 
+            {displays.data ? (
+              <LayoutEditor
+                displays={displays.data}
+                windows={draft}
+                onChange={setDraft}
+                onReset={() => setDraft(detail.data!.windows)}
+                onSave={() => saveLayout.mutate()}
+                saving={saveLayout.isPending}
+              />
+            ) : (
+              <Card className="flex items-center gap-2 text-aux text-ink-3">
+                <Spinner /> 读取显示器…
+              </Card>
+            )}
+
             <Card padded={false} className="overflow-hidden">
               <div className="border-b border-line px-5 py-2.5 text-aux text-ink-2">
-                应用与窗口
+                窗口明细与显示状态
               </div>
               <ul className="divide-y divide-line/60">
-                {detail.data.windows.map((w) => (
+                {draft.map((w) => (
                   <li key={w.id} className="flex items-start gap-3 px-5 py-2.5">
                     <MonitorSmartphone size={15} className="mt-0.5 shrink-0 text-ink-3" />
                     <div className="min-w-0 flex-1">
@@ -235,6 +311,14 @@ export function WorkspacesPage() {
                     </div>
                     {w.showState === "maximized" ? <Badge>最大化</Badge> : null}
                     {w.showState === "minimized" ? <Badge>最小化</Badge> : null}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="从工作空间移除"
+                      onClick={() => setDraft((prev) => prev.filter((x) => x.id !== w.id))}
+                    >
+                      <Trash2 size={13} />
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -252,6 +336,18 @@ export function WorkspacesPage() {
                       <span className="max-w-[45%] truncate font-mono text-[11px] text-ink-3">
                         {it.target ?? "路径不可读"}
                       </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="删除该应用及其窗口"
+                        disabled={removeItem.isPending}
+                        onClick={() => {
+                          if (confirm(`从工作空间移除「${it.displayName}」及其窗口？`))
+                            removeItem.mutate(it.id);
+                        }}
+                      >
+                        <Trash2 size={13} />
+                      </Button>
                     </div>
                     <div className="flex items-center gap-2">
                       <select

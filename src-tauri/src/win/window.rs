@@ -95,21 +95,24 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     TRUE
 }
 
-/// 用于恢复：把位置写回窗口。始终不激活窗口（评审 U7）。
+/// 用于恢复：把位置写回窗口。始终不激活窗口（评审 U7），
+/// 并在 PMv2 坐标语义下执行，避免目标进程 awareness 不同导致二次缩放。
 pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
     unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            x,
-            y,
-            w,
-            h,
-            SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS,
-        ) != 0
+        super::dpi::with_pmv2_context(|| {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS,
+            ) != 0
+        })
     }
 }
 
@@ -137,7 +140,11 @@ pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowSt
         bottom: y + h,
     };
 
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPlacement(hwnd, &wp) != 0 }
+    unsafe {
+        super::dpi::with_pmv2_context(|| {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPlacement(hwnd, &wp) != 0
+        })
+    }
 }
 
 pub fn is_zoomed(hwnd: HWND) -> bool {

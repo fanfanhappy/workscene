@@ -216,8 +216,16 @@ export interface WorkspaceDetail {
   windows: WorkspaceWindow[];
 }
 
-export interface RunSummary {
-  id: string;
+/** 布局编辑：一次提交多个窗口的新比例坐标 */
+export interface LayoutUpdate {
+  windowId: string;
+  xRatio: number;
+  yRatio: number;
+  widthRatio: number;
+  heightRatio: number;
+}
+
+export interface RunSummary {  id: string;
   workspaceId: string | null;
   snapshotId: string | null;
   status: string;

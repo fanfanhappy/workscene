@@ -533,6 +533,117 @@ pub async fn update_item(
     Ok(())
 }
 
+/// 布局编辑：一次提交多个窗口的新比例坐标（整体一个事务）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutUpdate {
+    pub window_id: String,
+    pub x_ratio: f64,
+    pub y_ratio: f64,
+    pub width_ratio: f64,
+    pub height_ratio: f64,
+}
+
+/// 最小可编辑尺寸，防止把窗口拖成一条线
+pub const MIN_RATIO: f64 = 0.08;
+
+/// 归一化 + 边界约束。UI 拖拽与直接调用命令都要过这一层。
+pub fn sanitize_layout(u: &LayoutUpdate) -> (f64, f64, f64, f64) {
+    let clamp01 = |v: f64| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let x = clamp01(u.x_ratio).min(1.0 - MIN_RATIO);
+    let y = clamp01(u.y_ratio).min(1.0 - MIN_RATIO);
+    let max_w = (1.0 - x).max(MIN_RATIO);
+    let max_h = (1.0 - y).max(MIN_RATIO);
+    let w = clamp01(u.width_ratio).clamp(MIN_RATIO, max_w);
+    let h = clamp01(u.height_ratio).clamp(MIN_RATIO, max_h);
+    (x, y, w, h)
+}
+
+pub async fn update_layouts(
+    db: &Db,
+    workspace_id: &str,
+    updates: &[LayoutUpdate],
+) -> AppResult<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+
+    for u in updates {
+        let (x, y, w, h) = sanitize_layout(u);
+        let affected = sqlx::query(
+            "UPDATE window_layouts
+             SET x_ratio = ?, y_ratio = ?, width_ratio = ?, height_ratio = ?
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(x)
+        .bind(y)
+        .bind(w)
+        .bind(h)
+        .bind(&u.window_id)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(AppError::msg(format!(
+                "窗口布局不存在或不属于该工作空间：{}",
+                u.window_id
+            )));
+        }
+    }
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn delete_window(db: &Db, workspace_id: &str, window_id: &str) -> AppResult<()> {
+    let affected = sqlx::query(
+        "DELETE FROM window_layouts WHERE id = ? AND workspace_id = ?",
+    )
+    .bind(window_id)
+    .bind(workspace_id)
+    .execute(&db.pool)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::msg("窗口布局不存在或不属于该工作空间"));
+    }
+    Ok(())
+}
+
+/// 删除应用项：其窗口布局由外键级联删除（migration 里 ON DELETE CASCADE）
+pub async fn delete_item(db: &Db, workspace_id: &str, item_id: &str) -> AppResult<()> {
+    let affected = sqlx::query(
+        "DELETE FROM workspace_items WHERE id = ? AND workspace_id = ?",
+    )
+    .bind(item_id)
+    .bind(workspace_id)
+    .execute(&db.pool)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::msg("应用项不存在或不属于该工作空间"));
+    }
+    Ok(())
+}
+
 /// 由工作空间当前布局构造可恢复的 SceneFile（恢复引擎的唯一输入）
 pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
     let detail = get(db, id).await?;
@@ -753,5 +864,86 @@ mod tests {
         let mut c = capture();
         c.windows.clear();
         assert!(create_from_capture(&db, "空", &c).await.is_err());
+    }
+
+    #[test]
+    fn sanitize_layout_clamps_into_unit_square() {
+        let (x, y, w, h) = sanitize_layout(&LayoutUpdate {
+            window_id: "w".into(),
+            x_ratio: -0.5,
+            y_ratio: 1.4,
+            width_ratio: 0.02,
+            height_ratio: 5.0,
+        });
+        assert_eq!((x, y), (0.0, 1.0 - MIN_RATIO));
+        assert!(w >= MIN_RATIO && w <= (1.0 - x) + 1e-9);
+        assert!(h >= MIN_RATIO && h <= (1.0 - y) + 1e-9);
+
+        // NaN 不应产生非法值
+        let (x, _, w, _) = sanitize_layout(&LayoutUpdate {
+            window_id: "w".into(),
+            x_ratio: f64::NAN,
+            y_ratio: 0.0,
+            width_ratio: f64::NAN,
+            height_ratio: 0.2,
+        });
+        assert_eq!(x, 0.0);
+        assert!(w >= MIN_RATIO);
+    }
+
+    #[tokio::test]
+    async fn update_layouts_persists_and_rejects_foreign_window() {
+        let db = db().await;
+        let s = create_from_capture(&db, "编辑", &capture()).await.unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let first = &detail.windows[0];
+
+        update_layouts(
+            &db,
+            &s.id,
+            &[LayoutUpdate {
+                window_id: first.id.clone(),
+                x_ratio: 0.25,
+                y_ratio: 0.25,
+                width_ratio: 0.5,
+                height_ratio: 0.5,
+            }],
+        )
+        .await
+        .unwrap();
+
+        let after = get(&db, &s.id).await.unwrap();
+        let updated = after.windows.iter().find(|w| w.id == first.id).unwrap();
+        assert!((updated.x_ratio - 0.25).abs() < 1e-9);
+
+        let err = update_layouts(
+            &db,
+            &s.id,
+            &[LayoutUpdate {
+                window_id: "not-mine".into(),
+                x_ratio: 0.1,
+                y_ratio: 0.1,
+                width_ratio: 0.2,
+                height_ratio: 0.2,
+            }],
+        )
+        .await;
+        assert!(err.is_err(), "不属于该工作空间的布局必须被拒绝");
+    }
+
+    #[tokio::test]
+    async fn delete_item_cascades_its_windows() {
+        let db = db().await;
+        let s = create_from_capture(&db, "删应用", &capture()).await.unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let item = &detail.items[0];
+        let owned = detail.windows.iter().filter(|w| w.item_id == item.id).count();
+        assert!(owned > 0);
+
+        delete_item(&db, &s.id, &item.id).await.unwrap();
+
+        let after = get(&db, &s.id).await.unwrap();
+        assert_eq!(after.windows.len(), detail.windows.len() - owned);
+        assert!(!after.items.iter().any(|i| i.id == item.id));
     }
 }

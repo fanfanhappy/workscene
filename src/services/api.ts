@@ -3,6 +3,7 @@ import type {
   AppInfo,
   CaptureResult,
   DisplayInfo,
+  LayoutUpdate,
   RestorePreview,
   RestoreReport,
   RunSummary,
@@ -63,6 +64,13 @@ export const api = {
       enabled,
     }),
   restoreIsBusy: () => call<boolean>("restore_is_busy"),
+
+  workspaceLayoutUpdate: (workspaceId: string, updates: LayoutUpdate[]) =>
+    call<void>("workspace_layout_update", { workspaceId, updates }),
+  workspaceWindowDelete: (workspaceId: string, windowId: string) =>
+    call<void>("workspace_window_delete", { workspaceId, windowId }),
+  workspaceItemDelete: (workspaceId: string, itemId: string) =>
+    call<void>("workspace_item_delete", { workspaceId, itemId }),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),
