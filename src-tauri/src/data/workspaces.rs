@@ -24,6 +24,10 @@ pub struct WorkspaceSummary {
     pub last_restored_at: Option<i64>,
     #[serde(default)]
     pub app_paths: Vec<String>,
+    /// Ctrl+Alt+N 绑定的槽位（1..=9），None 表示未绑定。
+    /// 持久化而不是按列表位置推算：否则删掉一个空间后快捷键会指到别的空间。
+    #[serde(default)]
+    pub hotkey_slot: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +328,7 @@ pub async fn create_from_capture(
         updated_at: now,
         last_restored_at: None,
         app_paths,
+        hotkey_slot: None,
     })
 }
 
@@ -364,7 +369,7 @@ pub async fn add_snapshot(
 pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
     let rows = sqlx::query(
         "SELECT w.id, w.name, w.description, w.color, w.is_favorite, w.created_at, w.updated_at,
-                w.last_restored_at,
+                w.last_restored_at, w.hotkey_slot,
                 (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type = 'application') AS item_count,
                 (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type <> 'application') AS resource_count,
                 (SELECT COUNT(*) FROM window_layouts l WHERE l.workspace_id = w.id) AS window_count
@@ -412,6 +417,7 @@ pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
                 last_restored_at: r.get("last_restored_at"),
+                hotkey_slot: r.get::<Option<i64>, _>("hotkey_slot"),
                 app_paths,
             }
         })
@@ -1127,6 +1133,64 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
     })
 }
 
+/// 快捷槽上限（Ctrl+Alt+1..9）
+pub const MAX_HOTKEY_SLOT: i64 = 9;
+
+fn validate_slot(slot: Option<i64>) -> AppResult<Option<i64>> {
+    match slot {
+        None => Ok(None),
+        Some(s) if (1..=MAX_HOTKEY_SLOT).contains(&s) => Ok(Some(s)),
+        Some(s) => Err(AppError::msg(format!(
+            "快捷槽必须是 1..{MAX_HOTKEY_SLOT} 之间的数字，收到 {s}"
+        ))),
+    }
+}
+
+/// 绑定/解绑 Ctrl+Alt+N。
+///
+/// 槽位独占：绑到已被占用的槽时，把原占用者解绑（而不是报错），
+/// 否则用户会遇到"点了没反应又不说为什么"。
+pub async fn set_hotkey_slot(db: &Db, id: &str, slot: Option<i64>) -> AppResult<()> {
+    let slot = validate_slot(slot)?;
+    let mut tx = db.pool.begin().await?;
+
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM workspaces WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::msg(format!("工作空间不存在：{id}")));
+    }
+
+    if let Some(s) = slot {
+        sqlx::query("UPDATE workspaces SET hotkey_slot = NULL, updated_at = ? WHERE hotkey_slot = ? AND id <> ?")
+            .bind(now_ms())
+            .bind(s)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query("UPDATE workspaces SET hotkey_slot = ?, updated_at = ? WHERE id = ?")
+        .bind(slot)
+        .bind(now_ms())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 槽位 → 工作空间 id。空槽返回 None（快捷键不应该"恢复到列表第 N 个"）。
+pub async fn id_for_slot(db: &Db, slot: i64) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT id FROM workspaces WHERE hotkey_slot = ?")
+        .bind(slot)
+        .fetch_optional(&db.pool)
+        .await
+        .ok()
+        .flatten()
+}
 pub async fn set_favorite(db: &Db, id: &str, is_favorite: bool) -> AppResult<()> {
     let affected = sqlx::query(
         "UPDATE workspaces SET is_favorite = ?, updated_at = ? WHERE id = ?",
@@ -1338,6 +1402,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         updated_at: now,
         last_restored_at: None,
         app_paths,
+        hotkey_slot: None,
     })
 }
 
@@ -1837,6 +1902,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         updated_at: now,
         last_restored_at: None,
         app_paths,
+        hotkey_slot: None,
     })
 }
 
@@ -2154,6 +2220,65 @@ mod tests {
         assert_eq!(detail.items.len(), 2);
         assert_eq!(detail.windows.len(), 3);
         assert!(detail.windows.iter().all(|w| w.x_ratio >= 0.0));
+    }
+
+    #[tokio::test]
+    async fn hotkey_slot_is_stable_and_exclusive() {
+        let db = db().await;
+        let a = create_from_capture(&db, "写作", &capture()).await.unwrap();
+        let b = create_from_capture(&db, "开发", &capture()).await.unwrap();
+
+        // 绑定后按槽能查回来
+        set_hotkey_slot(&db, &a.id, Some(2)).await.unwrap();
+        assert_eq!(id_for_slot(&db, 2).await.as_deref(), Some(a.id.as_str()));
+
+        // 槽位独占：b 抢走 2 之后，a 必须被解绑（否则唯一索引会炸）
+        set_hotkey_slot(&db, &b.id, Some(2)).await.unwrap();
+        assert_eq!(id_for_slot(&db, 2).await.as_deref(), Some(b.id.as_str()));
+
+        let rows = list(&db).await.unwrap();
+        let slot_of = |id: &str| rows.iter().find(|w| w.id == id).unwrap().hotkey_slot;
+        assert_eq!(slot_of(&a.id), None, "被抢占的空间应回到未绑定");
+        assert_eq!(slot_of(&b.id), Some(2));
+
+        // 列表顺序变化（改名会改 updated_at 排序）不能影响槽位含义
+        rename(&db, &a.id, "写作（改）").await.unwrap();
+        let rows = list(&db).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|w| w.hotkey_slot == Some(2))
+                .map(|w| w.id.clone()),
+            Some(b.id.clone()),
+            "槽位必须跟着工作空间走，而不是跟着列表位置"
+        );
+
+        // 解绑
+        set_hotkey_slot(&db, &b.id, None).await.unwrap();
+        assert_eq!(id_for_slot(&db, 2).await, None);
+
+        // 删除后槽位自然释放
+        set_hotkey_slot(&db, &a.id, Some(1)).await.unwrap();
+        delete(&db, &a.id).await.unwrap();
+        assert_eq!(id_for_slot(&db, 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn hotkey_slot_rejects_out_of_range() {
+        let db = db().await;
+        let a = create_from_capture(&db, "边界", &capture()).await.unwrap();
+
+        for bad in [0i64, -1, 10, 99] {
+            let err = set_hotkey_slot(&db, &a.id, Some(bad)).await.unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("快捷槽"),
+                "越界槽位应给出可读错误，实际：{msg}"
+            );
+        }
+        // 1 和 9 是合法边界
+        set_hotkey_slot(&db, &a.id, Some(1)).await.unwrap();
+        set_hotkey_slot(&db, &a.id, Some(9)).await.unwrap();
+        assert_eq!(id_for_slot(&db, 9).await.as_deref(), Some(a.id.as_str()));
     }
 
     #[tokio::test]

@@ -181,6 +181,8 @@ export interface WorkspaceSummary {
   updatedAt: number;
   lastRestoredAt: number | null;
   appPaths: string[];
+  /** Ctrl+Alt+N 绑定槽（1..9），null 表示未绑定 */
+  hotkeySlot?: number | null;
 }
 
 export interface WorkspaceItem {

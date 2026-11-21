@@ -131,6 +131,15 @@ pub async fn workspace_update_meta(
 }
 
 #[tauri::command]
+pub async fn workspace_set_hotkey_slot(
+    db: State<'_, Db>,
+    id: String,
+    slot: Option<i64>,
+) -> AppResult<()> {
+    workspaces::set_hotkey_slot(&db, &id, slot).await
+}
+
+#[tauri::command]
 pub async fn workspace_duplicate(
     app: tauri::AppHandle,
     db: State<'_, Db>,

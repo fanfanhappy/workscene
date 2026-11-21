@@ -10,8 +10,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, Unregister
 use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY};
 
 pub const HOTKEY_ID: i32 = 0x5753; // 'WS'
-pub const HOTKEY_WS_BASE: i32 = 0x5760; // Ctrl+Alt+1 .. Ctrl+Alt+5
-pub const WS_HOTKEY_COUNT: usize = 5;
+pub const HOTKEY_WS_BASE: i32 = 0x5760; // Ctrl+Alt+1 .. Ctrl+Alt+9
+pub const WS_HOTKEY_COUNT: usize = 9;
 
 /// 支持的预设组合（白名单，避免任意字符串注册失败）
 pub const PRESETS: [&str; 4] = ["Ctrl+Alt+W", "Ctrl+Shift+W", "Ctrl+Alt+Space", ""];
@@ -106,10 +106,11 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
                         crate::win::tray::show_main(&app);
                     } else if (HOTKEY_WS_BASE..HOTKEY_WS_BASE + WS_HOTKEY_COUNT as i32).contains(&id)
                     {
-                        let slot = (id - HOTKEY_WS_BASE) as usize;
+                        // 槽位从 1 开始，与设置页显示的 Ctrl+Alt+1..9 对齐
+                        let slot = (id - HOTKEY_WS_BASE) as i64 + 1;
                         let handle = app.clone();
                         std::thread::spawn(move || {
-                            crate::win::tray::restore_workspace_by_index(&handle, slot);
+                            crate::win::tray::restore_workspace_by_slot(&handle, slot);
                         });
                     }
                 }

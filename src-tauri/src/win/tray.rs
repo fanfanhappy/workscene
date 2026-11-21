@@ -113,13 +113,14 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 /// 后台按序号（收藏优先列表第 `index` 个，供 Ctrl+Alt+1~5 全局快捷键调用）一键恢复
-pub fn restore_workspace_by_index(app: &AppHandle, index: usize) {
+/// 按快捷槽（Ctrl+Alt+1..9）恢复：槽是持久化绑定，不随列表顺序漂移。
+/// 空槽时把主窗口叫出来——用户才知道"这个槽没绑东西"，而不是以为快捷键坏了。
+pub fn restore_workspace_by_slot(app: &AppHandle, slot: i64) {
     let db = app.state::<data::Db>().inner().clone();
-    let target_id = tauri::async_runtime::block_on(data::workspaces::list(&db))
-        .ok()
-        .and_then(|list| list.get(index).map(|w| w.id.clone()));
-    if let Some(ws_id) = target_id {
-        restore_from_tray(app, &ws_id);
+    let target_id = tauri::async_runtime::block_on(data::workspaces::id_for_slot(&db, slot));
+    match target_id {
+        Some(ws_id) => restore_from_tray(app, &ws_id),
+        None => show_main(app),
     }
 }
 

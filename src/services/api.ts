@@ -62,6 +62,8 @@ export const api = {
     call<WorkspaceSummary>("workspace_create", { name, capture }),
   workspaceRename: (id: string, name: string) =>
     call<void>("workspace_rename", { id, name }),
+  workspaceSetHotkeySlot: (id: string, slot: number | null) =>
+    call<void>("workspace_set_hotkey_slot", { id, slot }),
   workspaceSetFavorite: (id: string, isFavorite: boolean) =>
     call<void>("workspace_set_favorite", { id, isFavorite }),
   workspaceUpdateMeta: (

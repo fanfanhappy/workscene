@@ -98,6 +98,7 @@ export function SettingsPage() {
     queryFn: api.workspaceList,
     staleTime: 5_000,
   });
+  const wsList = workspaces.data ?? [];
   const liveCapture = useQuery({
     queryKey: ["capture"],
     queryFn: api.captureStart,
@@ -210,6 +211,16 @@ export function SettingsPage() {
     patch({ ignoredProcesses: [...cur, key] });
   };
 
+  const setSlot = useMutation({
+    mutationFn: (v: { id: string; slot: number | null }) =>
+      api.workspaceSetHotkeySlot(v.id, v.slot),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+      toast.success("快捷槽已更新");
+    },
+    onError: (e) => toast.danger("快捷槽设置失败", String((e as Error).message)),
+  });
+
   if (settings.isPending || !draft) {
     return (
       <Card className="flex items-center gap-2 text-aux text-ink-3">
@@ -312,8 +323,8 @@ export function SettingsPage() {
               </div>
             </Row>
             <Row
-              label="工作空间全局切屏热键（Ctrl + Alt + 1 ~ 5）"
-              hint="任何界面下按 Ctrl+Alt+1~5，直接切换前 5 个工作空间（收藏优先）"
+              label="工作空间快捷槽（Ctrl + Alt + 1 ~ 9）"
+              hint="按下后直接恢复该槽绑定的工作空间；具体绑定在下方「工作空间快捷槽」里设置"
             >
               <Switch
                 checked={draft.workspaceHotkeysEnabled}
@@ -327,7 +338,7 @@ export function SettingsPage() {
             <p className="text-body font-medium text-ink">应用内快捷键</p>
             <div className="grid gap-1.5 text-aux sm:grid-cols-2">
               {[
-                ["Ctrl + Alt + 1~5", "全局快速切换前 5 个工作空间"],
+                ["Ctrl + Alt + 1~9", "恢复该槽绑定的工作空间"],
                 ["Ctrl + K", "打开快捷命令面板"],
                 ["Ctrl + S", "保存布局画布修改"],
                 ["方向键 / Shift+方向键", "布局画布微调窗口位置 (1% / 5%)"],
@@ -584,6 +595,58 @@ export function SettingsPage() {
                 ))}
               </div>
             )}
+          </Card>
+
+          <Card className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-body font-semibold text-ink">
+                  <Keyboard size={14} className="text-ink-3" /> 工作空间快捷槽
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  Ctrl+Alt+1..9 直接恢复对应工作空间；绑定跟着工作空间走，删除别的空间不会串号
+                </p>
+              </div>
+              <Badge>{wsList.filter((w) => w.hotkeySlot).length} 个已绑定</Badge>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+              {Array.from({ length: 9 }, (_, i) => i + 1).map((slot) => (
+                <div
+                  key={slot}
+                  className="flex items-center gap-2 rounded-[8px] border border-line/70 bg-canvas/60 px-2 py-1.5"
+                >
+                  <kbd className="shrink-0 rounded border border-line-strong px-1.5 py-0.5 font-mono text-[10px] text-ink-2">
+                    Ctrl+Alt+{slot}
+                  </kbd>
+                  <select
+                    value={wsList.find((w) => w.hotkeySlot === slot)?.id ?? ""}
+                    disabled={setSlot.isPending}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      // 槽位独占由后端保证：绑到被占用的槽时，原占用者会被自动解绑
+                      const current = wsList.find((w) => w.hotkeySlot === slot);
+                      if (nextId) {
+                        setSlot.mutate({ id: nextId, slot });
+                      } else if (current) {
+                        setSlot.mutate({ id: current.id, slot: null });
+                      }
+                    }}
+                    className="h-7 min-w-0 flex-1 rounded border border-line-strong/70 bg-canvas px-1.5 text-[11px] text-ink-2 outline-none focus:border-accent"
+                  >
+                    <option value="">未绑定</option>
+                    {wsList.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-ink-3">
+              槽位需要在设置里开启「工作空间数字快捷键」后才会注册；未绑定的槽按下时只会把主窗口叫出来。
+            </p>
           </Card>
 
           <Card padded={false} className="overflow-hidden">

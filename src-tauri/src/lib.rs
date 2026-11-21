@@ -113,6 +113,7 @@ pub fn run() {
             commands::workspace_set_favorite,
             commands::workspace_update_meta,
             commands::workspace_duplicate,
+            commands::workspace_set_hotkey_slot,
             commands::workspace_export,
             commands::workspace_import,
             commands::workspace_import_preview,
