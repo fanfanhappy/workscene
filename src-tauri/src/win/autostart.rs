@@ -225,7 +225,7 @@ pub fn sync_detailed(enabled: bool) -> Result<(), (u32, String)> {
                         return Err((
                             reg_rc,
                             format!(
-                                "Windows 安全防护拦截了未签名程序自动写入开机启动项（注册表错误码 {reg_rc}，{folder_err}）。可点右侧「打开启动文件夹」手动放入快捷方式，或在 Windows 安全中心允许 WorkScene 后再开启。"
+                                "系统拒绝了开机启动项写入（注册表错误码 {reg_rc}；{folder_err}）。常见原因：安全软件拦截、受限账户/组策略、或程序由权限受限的父进程启动。可点右侧「打开启动文件夹」手动放入快捷方式，或改用管理员身份运行 WorkScene 再开启。"
                             ),
                         ));
                     }
@@ -243,7 +243,7 @@ pub fn sync_detailed(enabled: bool) -> Result<(), (u32, String)> {
                 Err(folder_err) => Err((
                     reg_rc,
                     format!(
-                        "Windows 安全防护拦截了未签名程序自动写入开机启动项（注册表错误码 {reg_rc}，{folder_err}）。可点右侧「打开启动文件夹」手动放入快捷方式，或在 Windows 安全中心允许 WorkScene 后再开启。"
+                        "系统拒绝了开机启动项写入（注册表错误码 {reg_rc}；{folder_err}）。常见原因：安全软件拦截、受限账户/组策略、或程序由权限受限的父进程启动。可点右侧「打开启动文件夹」手动放入快捷方式，或改用管理员身份运行 WorkScene 再开启。"
                     ),
                 )),
             },
@@ -282,6 +282,27 @@ pub fn open_startup_folder() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// 诊断用：手动执行 `cargo test --lib probe_autostart -- --ignored --nocapture`
+    /// 会逐层打印写注册表 / 写启动文件夹的真实结果（带路径），用于排查"开关一直失败"。
+    #[test]
+    #[ignore]
+    fn probe_autostart() {
+        unsafe {
+            match create_or_open_run_key_write() {
+                Ok(k) => {
+                    println!("[probe] 打开 HKCU\\Run（写权限）成功");
+                    RegCloseKey(k);
+                }
+                Err(rc) => println!("[probe] 打开 HKCU\\Run 失败，Win32 = {rc}"),
+            }
+        }
+        println!("[probe] write_registry => {:?}", write_registry("\"C:\\probe.exe\""));
+        println!("[probe] startup_script_path => {:?}", startup_script_path());
+        println!("[probe] write_startup_folder => {:?}", write_startup_folder());
+        println!("[probe] is_enabled => {}", is_enabled());
+        let _ = delete_registry();
+        let _ = remove_startup_folder();
+    }
     #[test]
     fn launch_command_is_quoted() {
         if let Some(cmd) = launch_command() {
