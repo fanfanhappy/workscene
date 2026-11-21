@@ -17,15 +17,22 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/icon.ico"
-    ],
+    "targets": ["nsis"],
+    "publisher": "WorkScene",
+    "copyright": "Copyright © 2026 WorkScene",
+    "category": "Utility",
+    "shortDescription": "保存并恢复整个 Windows 工作现场",
+    "longDescription": "WorkScene 把应用、窗口布局、显示器配置保存为可复用的工作空间，需要时一键恢复，并给出可诊断的恢复报告。",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
       }
     }
   }

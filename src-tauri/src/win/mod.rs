@@ -5,4 +5,5 @@ pub mod mock;
 pub mod process;
 pub mod single_instance;
 pub mod strings;
+pub mod tray;
 pub mod window;

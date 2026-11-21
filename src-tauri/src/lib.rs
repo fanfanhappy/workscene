@@ -58,6 +58,10 @@ pub fn run() {
 
             builder.build()?;
 
+            win::tray::build_tray(app)?;
+            win::tray::intercept_close(app);
+            win::tray::spawn_hotkey(app.handle().clone());
+
             spawn_auto_snapshot(app.handle().clone());
 
             // 诊断用：WORKSCENE_ROUTE=/workspaces 可直接打开指定页面（截图与回归用）
