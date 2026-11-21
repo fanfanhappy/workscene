@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// 同一毫秒内可能创建多份快照（并行测试、快速连续捕获），
+/// 用进程内序号保证 id 唯一，避免两个写入抢同一个 .tmp 文件。
+static SCENE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 数据根目录。默认 %LOCALAPPDATA%\WorkScene；
 /// 可用 WORKSCENE_DATA_DIR 覆盖（便携模式、自动化测试、以及 UI 规范 §12.1 的「存储位置」设置）。
 pub fn data_dir() -> PathBuf {
@@ -53,10 +57,18 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
         trimmed.to_string()
     };
 
-    let mut id = format!("scene-{:x}", capture.captured_at);
+    let mut id = format!(
+        "scene-{:x}-{:x}",
+        capture.captured_at,
+        SCENE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let mut n = 1;
     while scene_path(&id).exists() {
-        id = format!("scene-{:x}-{n}", capture.captured_at);
+        id = format!(
+            "scene-{:x}-{}-{n}",
+            capture.captured_at,
+            SCENE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         n += 1;
     }
 
