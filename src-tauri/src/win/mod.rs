@@ -1,4 +1,5 @@
 pub mod autostart;
+pub mod dialog;
 pub mod display;
 pub mod dpi;
 pub mod filter;

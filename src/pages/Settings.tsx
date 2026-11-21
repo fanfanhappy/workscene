@@ -1,18 +1,95 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, Info, Keyboard, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import {
+  Camera,
+  CheckCircle2,
+  Copy,
+  Cpu,
+  FolderOpen,
+  Globe,
+  HardDrive,
+  Info,
+  Keyboard,
+  Monitor,
+  Moon,
+  Palette,
+  RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  Sun,
+  Terminal,
+  Wrench,
+} from "lucide-react";
 import { api } from "@/services/api";
-import type { AppSettings } from "@/types/contract";
-import { Badge, Button, Card, ErrorNote, SectionTitle, Spinner } from "@/components/ui";
+import type { AdapterSuggestion, AppSettings } from "@/types/contract";
+import { confirmAction, toast, useUiStore, type ThemeMode } from "@/stores/ui.store";
+import {
+  Badge,
+  Button,
+  Card,
+  ErrorNote,
+  Spinner,
+  Switch,
+  Tabs,
+} from "@/components/ui";
+
+type SettingsTab = "general" | "behavior" | "storage" | "adapters" | "about";
+
+const BUILTIN_ADAPTERS = [
+  {
+    id: "vscode",
+    name: "VS Code / Cursor",
+    exes: "Code.exe · Code - Insiders.exe · Cursor.exe",
+    supported: ["进程启动", "窗口定位", "项目目录参数建议"],
+    limit: "不恢复未保存编辑缓冲区。",
+    icon: Cpu,
+  },
+  {
+    id: "terminal",
+    name: "Windows Terminal / Shell",
+    exes: "WindowsTerminal.exe · wt.exe · pwsh.exe · cmd.exe",
+    supported: ["进程启动", "窗口定位", "工作目录参数建议"],
+    limit: "不恢复历史 Shell 内存态。",
+    icon: Terminal,
+  },
+  {
+    id: "browser",
+    name: "Chrome / Edge / Firefox / Brave",
+    exes: "chrome.exe · msedge.exe · firefox.exe · brave.exe",
+    supported: ["窗口定位", "显式网址 --new-window 建议"],
+    limit: "不读取密码、Cookie 或私有会话库。",
+    icon: Globe,
+  },
+  {
+    id: "explorer",
+    name: "Windows 资源管理器",
+    exes: "explorer.exe",
+    supported: ["目录路径打开", "窗口定位"],
+    limit: "多标签与虚拟路径受系统外壳行为影响。",
+    icon: FolderOpen,
+  },
+];
 
 export function SettingsPage() {
   const qc = useQueryClient();
+  const [tab, setTab] = useState<SettingsTab>("general");
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
 
+  const [testExe, setTestExe] = useState("Code.exe");
+  const [testTarget, setTestTarget] = useState("D:\\AI_Work\\WorkScene");
+  const [testRes, setTestRes] = useState<AdapterSuggestion | null>(null);
+
+  const themeMode = useUiStore((s) => s.themeMode);
+  const setThemeMode = useUiStore((s) => s.setThemeMode);
+
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settingsGet });
   const stats = useQuery({ queryKey: ["storage-stats"], queryFn: api.storageStats });
-  const info = useQuery({ queryKey: ["app-info"], queryFn: api.getAppInfo, staleTime: 60_000 });
+  const info = useQuery({
+    queryKey: ["app-info"],
+    queryFn: api.getAppInfo,
+    staleTime: 60_000,
+  });
 
   useEffect(() => {
     if (settings.data) setDraft(settings.data);
@@ -21,16 +98,33 @@ export function SettingsPage() {
   const save = useMutation({
     mutationFn: (next: AppSettings) => api.settingsSet(next),
     onSuccess: (saved) => {
+      setError(null);
       setDraft(saved);
+      qc.setQueryData(["settings"], saved);
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      toast.success("设置已保存");
+    },
+    onError: (e) => {
+      const msg = String((e as Error).message);
+      setError(msg);
+      toast.danger("保存失败", msg);
       qc.invalidateQueries({ queryKey: ["settings"] });
     },
-    onError: (e) => setError(String((e as Error).message)),
   });
 
   const cleanup = useMutation({
     mutationFn: api.storageCleanup,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["storage-stats"] }),
-    onError: (e) => setError(String((e as Error).message)),
+    onSuccess: (n) => {
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["snapshots"] });
+      toast.success(n > 0 ? `已清理 ${n} 份旧自动快照` : "暂无可清理的自动快照");
+    },
+    onError: (e) => toast.danger("清理失败", String((e as Error).message)),
+  });
+
+  const testSuggest = useMutation({
+    mutationFn: () => api.adapterSuggest(testExe.trim(), testTarget.trim() || null),
+    onSuccess: setTestRes,
   });
 
   const patch = (next: Partial<AppSettings>) => {
@@ -49,166 +143,339 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="mx-auto flex max-w-[900px] flex-col gap-6">
-      {error ? <ErrorNote message={error} /> : null}
+    <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
+      <div>
+        <h1 className="text-module font-semibold tracking-tight text-ink">设置与适配</h1>
+        <p className="text-aux text-ink-3">
+          主题外观、自动快照、系统热键、存储维护与 L2 应用适配规则
+        </p>
+      </div>
 
-      <section>
-        <SectionTitle title="自动快照" hint="后台按指纹去重，只有在环境真的变化时才写库" />
-        <Card className="flex flex-col gap-4">
-          <Row
-            label="启用自动快照"
-            hint="关闭后不会再后台记录；手动快照与恢复前保护快照不受影响"
-          >
-            <Toggle
-              checked={draft.autoSnapshotEnabled}
-              onChange={(v) => patch({ autoSnapshotEnabled: v })}
-            />
-          </Row>
+      {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
 
-          <Row label="每个工作空间保留" hint="只淘汰最旧的自动快照，手动/保护快照永不清理">
-            <NumberInput
-              value={draft.autoKeep}
-              min={1}
-              max={500}
-              suffix="份"
-              onCommit={(v) => patch({ autoKeep: v })}
-            />
-          </Row>
+      <Tabs
+        value={tab}
+        onChange={setTab}
+        items={[
+          { id: "general", label: "外观与热键", icon: <Palette size={13} /> },
+          { id: "behavior", label: "快照与恢复", icon: <Camera size={13} /> },
+          { id: "storage", label: "存储与目录", icon: <HardDrive size={13} /> },
+          { id: "adapters", label: "应用适配 (L2)", icon: <Cpu size={13} /> },
+          { id: "about", label: "关于", icon: <Info size={13} /> },
+        ]}
+      />
 
-          <Row label="最小间隔" hint="两次自动快照之间的最短时间，避免拖动窗口时连续写入">
-            <NumberInput
-              value={draft.autoMinIntervalSecs}
-              min={10}
-              max={86400}
-              suffix="秒"
-              onCommit={(v) => patch({ autoMinIntervalSecs: v })}
-            />
-          </Row>
-        </Card>
-      </section>
-
-      <section>
-        <SectionTitle title="启动" hint="开机启动写入当前用户的注册表 Run 项，不需要管理员权限" />
-        <Card className="flex flex-col gap-4">
-          <Row label="开机启动" hint="登录 Windows 后自动启动 WorkScene（最小化到托盘）">
-            <Toggle
-              checked={draft.autostart}
-              onChange={(v) => patch({ autostart: v })}
-            />
-          </Row>
-          {save.isError ? (
-            <p className="text-[11px] text-danger">
-              开机启动写入失败：{String((save.error as Error).message)}
-            </p>
-          ) : null}
-        </Card>
-      </section>
-
-      <section>
-        <SectionTitle title="快捷键" hint="改完立即生效，不需要重启" />
-        <Card className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-6">
-            <div>
-              <p className="flex items-center gap-2 text-body">
-                <Keyboard size={15} className="text-ink-3" />
-                唤起主窗口
-              </p>
-              <p className="mt-0.5 text-[11px] text-ink-3">
-                注册失败会被其它程序占用，界面会提示；选「关闭」则不注册任何热键
-              </p>
+      {/* Tab 1: 外观、开机启动与热键 */}
+      {tab === "general" ? (
+        <div className="flex flex-col gap-3.5">
+          <Card className="flex flex-col gap-3">
+            <p className="text-body font-medium text-ink">主题外观</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { id: "dark", label: "深色主题", desc: "低饱和深石墨色", icon: Moon },
+                  { id: "light", label: "浅色主题", desc: "明亮办公环境", icon: Sun },
+                  { id: "system", label: "跟随系统", desc: "同步 Windows 设置", icon: Monitor },
+                ] as { id: ThemeMode; label: string; desc: string; icon: typeof Moon }[]
+              ).map(({ id, label, desc, icon: Icon }) => {
+                const selected = themeMode === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      setThemeMode(id);
+                      toast.info(`已切换为${label}`);
+                    }}
+                    className={`flex cursor-pointer flex-col gap-1 rounded-md border p-2.5 text-left transition-colors ${
+                      selected
+                        ? "border-accent bg-accent/10"
+                        : "border-line bg-canvas/50 hover:border-line-strong"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <Icon size={14} className={selected ? "text-accent" : "text-ink-3"} />
+                      {selected ? <Badge tone="accent">当前</Badge> : null}
+                    </div>
+                    <p className="text-body font-medium text-ink">{label}</p>
+                    <p className="text-[11px] text-ink-3">{desc}</p>
+                  </button>
+                );
+              })}
             </div>
-            <select
-              value={draft.hotkey}
-              onChange={(e) => patch({ hotkey: e.target.value })}
-              className="h-8 rounded-sm border border-line-strong bg-canvas px-2 text-aux text-ink-2 outline-none focus:border-accent"
+          </Card>
+
+          <Card className="flex flex-col gap-3.5">
+            <Row
+              label="随 Windows 开机启动"
+              hint="写入当前用户注册表 HKCU\Run，启动后最小化到系统托盘"
             >
-              <option value="Ctrl+Alt+W">Ctrl + Alt + W</option>
-              <option value="Ctrl+Shift+W">Ctrl + Shift + W</option>
-              <option value="Ctrl+Alt+Space">Ctrl + Alt + Space</option>
-              <option value="">关闭</option>
-            </select>
-          </div>
-        </Card>
-      </section>
+              <Switch
+                checked={draft.autostart}
+                onChange={(v) => patch({ autostart: v })}
+                ariaLabel="开机启动"
+              />
+            </Row>
 
-      <section>
-        <SectionTitle title="恢复" hint="恢复过程不会关闭你已打开的应用" />
-        <Card className="flex flex-col gap-4">
-          <Row label="默认自动启动缺失的应用" hint="恢复前仍可在预览页逐次关闭">
-            <Toggle
-              checked={draft.restoreRelaunchDefault}
-              onChange={(v) => patch({ restoreRelaunchDefault: v })}
-            />
-          </Row>
-        </Card>
-      </section>
+            <Row
+              label="全局唤起主窗口热键"
+              hint="修改后立即生效；若被其他程序占用会提示冲突"
+            >
+              <div className="flex items-center gap-2">
+                <Keyboard size={14} className="text-ink-3" />
+                <select
+                  value={draft.hotkey}
+                  onChange={(e) => patch({ hotkey: e.target.value })}
+                  className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+                >
+                  <option value="Ctrl+Alt+W">Ctrl + Alt + W</option>
+                  <option value="Ctrl+Shift+W">Ctrl + Shift + W</option>
+                  <option value="Ctrl+Alt+Space">Ctrl + Alt + Space</option>
+                  <option value="">关闭</option>
+                </select>
+              </div>
+            </Row>
+          </Card>
 
-      <section>
-        <SectionTitle title="存储" hint="快照是不可变文件，数据库只存索引与报告" />
+          <Card className="flex flex-col gap-2">
+            <p className="text-body font-medium text-ink">应用内快捷键</p>
+            <div className="grid gap-1.5 text-aux sm:grid-cols-2">
+              {[
+                ["Ctrl + K", "打开快捷命令面板"],
+                ["Ctrl + S", "保存布局画布修改"],
+                ["方向键 / Shift+方向键", "布局画布微调窗口位置 (1% / 5%)"],
+                ["Ctrl + Z / Ctrl + Y", "布局画布撤销 / 重做"],
+                ["Esc", "关闭弹窗或取消当前选中"],
+              ].map(([k, desc]) => (
+                <div
+                  key={k}
+                  className="flex items-center justify-between gap-2 rounded-md border border-line/70 bg-canvas/45 px-2.5 py-1.5"
+                >
+                  <span className="text-ink-2">{desc}</span>
+                  <kbd className="shrink-0 rounded-sm border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink">
+                    {k}
+                  </kbd>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Tab 2: 自动快照与恢复行为 */}
+      {tab === "behavior" ? (
+        <div className="flex flex-col gap-3.5">
+          <Card className="flex flex-col gap-3.5">
+            <p className="text-body font-medium text-ink">自动快照策略</p>
+            <Row
+              label="启用后台自动快照"
+              hint="按桌面指纹去重与节流；手动快照与恢复前保护快照不受此开关影响"
+            >
+              <Switch
+                checked={draft.autoSnapshotEnabled}
+                onChange={(v) => patch({ autoSnapshotEnabled: v })}
+                ariaLabel="启用自动快照"
+              />
+            </Row>
+            <Row label="每空间保留份数" hint="仅淘汰最旧自动快照，手动与保护快照永不删除">
+              <NumberInput
+                value={draft.autoKeep}
+                min={1}
+                max={500}
+                suffix="份"
+                onCommit={(v) => patch({ autoKeep: v })}
+              />
+            </Row>
+            <Row label="最小采样间隔" hint="避免拖动窗口时连续落盘">
+              <NumberInput
+                value={draft.autoMinIntervalSecs}
+                min={10}
+                max={86400}
+                suffix="秒"
+                onCommit={(v) => patch({ autoMinIntervalSecs: v })}
+              />
+            </Row>
+          </Card>
+
+          <Card className="flex flex-col gap-3">
+            <p className="text-body font-medium text-ink">恢复默认行为</p>
+            <Row
+              label="默认自动启动未运行的应用"
+              hint="恢复预览弹窗的默认勾选状态，每次恢复前仍可临时切换"
+            >
+              <Switch
+                checked={draft.restoreRelaunchDefault}
+                onChange={(v) => patch({ restoreRelaunchDefault: v })}
+                ariaLabel="默认自动启动未运行的应用"
+              />
+            </Row>
+            <div className="flex items-start gap-2 rounded-md border border-line bg-canvas/55 px-3 py-2 text-aux text-ink-3">
+              <ShieldCheck size={14} className="mt-0.5 shrink-0 text-success" />
+              恢复前始终自动生成保护快照；绝不静默关闭已打开应用；窗口匹配歧义时宁可跳过不误移。
+            </div>
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Tab 3: 存储与目录 */}
+      {tab === "storage" ? (
         <Card className="flex flex-col gap-4">
-          <div className="grid grid-cols-2 gap-4 text-aux md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             <Stat label="数据库" value={formatBytes(stats.data?.dbBytes ?? 0)} />
             <Stat label="快照文件" value={`${stats.data?.snapshotCount ?? 0} 个`} />
             <Stat label="快照占用" value={formatBytes(stats.data?.snapshotBytes ?? 0)} />
             <Stat label="恢复报告" value={`${stats.data?.runCount ?? 0} 条`} />
           </div>
 
+          <div className="flex flex-col gap-1.5 border-t border-line pt-3">
+            <span className="text-aux text-ink-3">本机数据目录</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="selectable min-w-0 flex-1 truncate rounded-md border border-line bg-canvas px-2.5 py-1.5 font-mono text-[11px] text-ink-2">
+                {stats.data?.dataDir ?? info.data?.dataDir ?? "—"}
+              </code>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  api
+                    .systemOpenDataDir()
+                    .catch((e) => toast.danger("打开目录失败", String((e as Error).message)))
+                }
+              >
+                <FolderOpen size={13} /> 打开目录
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={async () => {
+                  const dir = stats.data?.dataDir ?? info.data?.dataDir ?? "";
+                  if (!dir) return;
+                  await navigator.clipboard.writeText(dir).catch(() => undefined);
+                  toast.success("已复制目录路径");
+                }}
+              >
+                <Copy size={13} /> 复制
+              </Button>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
-            <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3">
-              <HardDrive size={12} className="mr-1 inline" />
-              {stats.data?.dataDir ?? "—"}
-            </p>
+            <div>
+              <p className="text-body font-medium text-ink">按保留策略清理旧自动快照</p>
+              <p className="text-aux text-ink-3">
+                每个工作空间保留最近 {draft.autoKeep} 份自动快照
+              </p>
+            </div>
             <Button
               size="sm"
               variant="secondary"
               disabled={cleanup.isPending}
-              onClick={() => {
-                if (confirm(`按保留策略清理旧自动快照（每空间保留 ${draft.autoKeep} 份）？`))
-                  cleanup.mutate();
+              onClick={async () => {
+                const ok = await confirmAction({
+                  title: "清理全部工作空间的旧自动快照？",
+                  description: `每空间保留最近 ${draft.autoKeep} 份自动快照，手动与保护快照不动。`,
+                  confirmLabel: "开始清理",
+                });
+                if (ok) cleanup.mutate();
               }}
             >
-              <Sparkles size={13} /> 清理旧自动快照
+              <Sparkles size={13} /> 立即清理
             </Button>
           </div>
-          {cleanup.isSuccess ? (
-            <p className="text-[11px] text-success">已清理 {cleanup.data} 份自动快照</p>
-          ) : null}
         </Card>
-      </section>
+      ) : null}
 
+      {/* Tab 4: 内置 L2 应用适配（不再单独占一个一级导航） */}
+      {tab === "adapters" ? (
+        <div className="flex flex-col gap-3.5">
+          <div className="grid gap-2.5 md:grid-cols-2">
+            {BUILTIN_ADAPTERS.map((ad) => {
+              const Icon = ad.icon;
+              return (
+                <Card key={ad.id} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 text-body font-semibold text-ink">
+                      <Icon size={14} className="text-accent" /> {ad.name}
+                    </span>
+                    <Badge tone="accent">L2 参数适配</Badge>
+                  </div>
+                  <p className="font-mono text-[11px] text-ink-3">{ad.exes}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {ad.supported.map((s) => (
+                      <Badge key={s} tone="success">
+                        <CheckCircle2 size={10} /> {s}
+                      </Badge>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-ink-3">边界：{ad.limit}</p>
+                </Card>
+              );
+            })}
+          </div>
 
-      <section>
-        <SectionTitle title="关于" />
+          <Card className="flex flex-col gap-2.5">
+            <p className="text-body font-medium text-ink">L2 启动参数建议检测（无副作用）</p>
+            <div className="grid gap-2 sm:grid-cols-[160px_1fr_auto]">
+              <input
+                value={testExe}
+                onChange={(e) => setTestExe(e.target.value)}
+                placeholder="Code.exe"
+                className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+              />
+              <input
+                value={testTarget}
+                onChange={(e) => setTestTarget(e.target.value)}
+                placeholder="D:\Projects\App 或 https://example.com"
+                className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={testSuggest.isPending || !testExe.trim()}
+                onClick={() => testSuggest.mutate()}
+              >
+                <Wrench size={13} /> 检测
+              </Button>
+            </div>
+            {testRes ? (
+              <p className="rounded-md border border-line bg-canvas/55 px-3 py-2 font-mono text-[11px] text-ink-2">
+                类型：{testRes.kind} ·{" "}
+                {testRes.args ? `建议参数：${testRes.args}` : "按 L1 通用启动与窗口定位处理"}
+              </p>
+            ) : null}
+          </Card>
+        </div>
+      ) : null}
+
+      {/* Tab 5: 关于 */}
+      {tab === "about" ? (
         <Card className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Info size={15} className="text-ink-3" />
-            <span className="text-body">WorkScene {info.data?.version ?? "0.1.0"}</span>
-            <Badge>Tauri {info.data?.tauriVersion ?? "2"}</Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-card font-semibold text-ink">
+              WorkScene v{info.data?.version ?? "0.1.0"}
+            </span>
+            <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
           </div>
-          <p className="text-[11px] leading-relaxed text-ink-3">
-            所有数据保存在本机，不上传任何桌面信息。不支持 UWP 打包应用的窗口恢复；最小化窗口会还原为普通窗口并在报告里注明。
-          </p>
-          <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={() => qc.invalidateQueries()}>
-              <RotateCcw size={13} /> 刷新
-            </Button>
+          <ul className="flex flex-col gap-1 text-aux text-ink-3">
+            <li>· 本地优先、离线可用：所有数据保存在本机，不上传任何桌面信息。</li>
+            <li>· 权限边界：受 Windows UIPI 限制，普通权限下无法移动管理员提权窗口。</li>
+            <li>· 能力边界：不支持 UWP 打包应用窗口恢复；不读取浏览器密码/Cookie 或应用内存缓冲区。</li>
+          </ul>
+          <div>
             <Button
               size="sm"
-              variant="ghost"
+              variant="secondary"
               onClick={() => {
-                if (confirm("打开数据目录？")) {
-                  // 不引入 shell 插件：交给前端下载链接之外的方式展示路径即可
-                  navigator.clipboard.writeText(stats.data?.dataDir ?? "").catch(() => undefined);
-                }
+                qc.invalidateQueries();
+                toast.success("已刷新缓存");
               }}
-              title="复制数据目录路径"
             >
-              <Trash2 size={13} /> 复制数据目录
+              <RefreshCw size={13} /> 刷新本地缓存
             </Button>
           </div>
         </Card>
-      </section>
+      ) : null}
     </div>
   );
 }
@@ -223,33 +490,13 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-6">
+    <div className="flex items-start justify-between gap-6 border-t border-line/60 pt-3 first:border-0 first:pt-0">
       <div className="min-w-0">
-        <p className="text-body">{label}</p>
+        <p className="text-body font-medium text-ink">{label}</p>
         {hint ? <p className="mt-0.5 text-[11px] text-ink-3">{hint}</p> : null}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
-  );
-}
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative h-6 w-11 rounded-full border transition-colors ${
-        checked ? "border-accent bg-accent/80" : "border-line-strong bg-canvas"
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 size-4.5 rounded-full bg-ink transition-[left] ${
-          checked ? "left-[22px]" : "left-0.5"
-        }`}
-        style={{ width: 18, height: 18 }}
-      />
-    </button>
   );
 }
 
@@ -269,21 +516,28 @@ function NumberInput({
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
 
+  const commit = () => {
+    const n = Number(text);
+    if (!Number.isFinite(n)) {
+      setText(String(value));
+      return;
+    }
+    const next = Math.min(Math.max(Math.round(n), min), max);
+    setText(String(next));
+    if (next !== value) onCommit(next);
+  };
+
   return (
-    <span className="flex items-center gap-2">
+    <span className="flex items-center gap-1.5">
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onBlur={() => {
-          const n = Number(text);
-          if (!Number.isFinite(n)) {
-            setText(String(value));
-            return;
-          }
-          onCommit(Math.min(Math.max(Math.round(n), min), max));
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
         }}
         inputMode="numeric"
-        className="h-8 w-20 rounded-sm border border-line-strong bg-canvas px-2 text-right text-body tabnum outline-none focus:border-accent"
+        className="tabnum h-8 w-18 rounded-md border border-line-strong/80 bg-canvas px-2 text-right font-mono text-body text-ink outline-none focus:border-accent"
       />
       <span className="text-aux text-ink-3">{suffix}</span>
     </span>
@@ -292,9 +546,9 @@ function NumberInput({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div>
+    <div className="rounded-md border border-line bg-canvas/55 px-3 py-2">
       <p className="text-[11px] text-ink-3">{label}</p>
-      <p className="tabnum mt-0.5 text-card text-ink">{value}</p>
+      <p className="tabnum mt-0.5 text-card font-semibold text-ink">{value}</p>
     </div>
   );
 }

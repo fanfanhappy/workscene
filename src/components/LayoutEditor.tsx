@@ -1,19 +1,46 @@
-import { useMemo, useRef, useState } from "react";
-import { Maximize2, RotateCcw, Save, Trash2 } from "lucide-react";
-import type { DisplayInfo, LayoutUpdate, WorkspaceWindow } from "@/types/contract";
-import { Button, Card } from "@/components/ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Grid3X3,
+  Layers,
+  Magnet,
+  Maximize2,
+  Minimize2,
+  Redo2,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+  Trash2,
+  Undo2,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import type { DisplayInfo, LayoutUpdate, ShowState, WorkspaceWindow } from "@/types/contract";
+import { Badge, Button, Card } from "@/components/ui";
+
+interface DragState {
+  id: string;
+  mode: "move" | "resize";
+  startX: number;
+  startY: number;
+  origin: WorkspaceWindow;
+  scale: number;
+  workW: number;
+  workH: number;
+  snapshotBefore: WorkspaceWindow[];
+}
 
 /**
- * 可编辑的窗口布局画布（UI 规范 §7.4 / UI-06b）。
+ * Visual Workspace Map 可编辑画布 + Inspector 工作台（UI 规范 §7.3–7.6 & 评审 U5/U6）。
  *
  * 坐标模型：
- * - 每个窗口的比例坐标相对它所属显示器的**工作区**（与 Rust 侧一致）；
- * - 画布用显示屏的物理矩形拼出世界坐标，再整体缩放到容器里；
- * - 拖动时把像素位移换算回「该显示器工作区」的比例增量，因此跨屏拖动仍然正确。
+ * - 每个窗口的比例坐标相对它所属显示器的工作区（与 Rust 侧一致）；
+ * - 支持拖拽移动/缩放、边缘吸附、网格辅助、缩放视图、撤销/重做、方向键微调，
+ *   以及右侧 Inspector 精确数值双向编辑（无障碍键盘替代）。
  */
 export function LayoutEditor({
   displays,
   windows,
+  dirty,
   onChange,
   onSave,
   onReset,
@@ -21,23 +48,65 @@ export function LayoutEditor({
 }: {
   displays: DisplayInfo[];
   windows: WorkspaceWindow[];
+  dirty: boolean;
   onChange: (next: WorkspaceWindow[]) => void;
   onSave: () => void;
   onReset: () => void;
   saving?: boolean;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{
-    id: string;
-    mode: "move" | "resize";
-    startX: number;
-    startY: number;
-    origin: WorkspaceWindow;
-    scale: number;
-    workW: number;
-    workH: number;
-  } | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [undoStack, setUndoStack] = useState<WorkspaceWindow[][]>([]);
+  const [redoStack, setRedoStack] = useState<WorkspaceWindow[][]>([]);
+
+  // 如果当前选中的窗口被外部删除，清空选中
+  useEffect(() => {
+    if (selectedId && !windows.some((w) => w.id === selectedId)) {
+      setSelectedId(null);
+    }
+  }, [selectedId, windows]);
+
+  // 外部重置或切换工作空间后清空撤销栈
+  useEffect(() => {
+    if (!dirty) {
+      setUndoStack([]);
+      setRedoStack([]);
+    }
+  }, [dirty]);
+
+  const commitChange = useCallback(
+    (next: WorkspaceWindow[], prevSnapshot?: WorkspaceWindow[]) => {
+      setUndoStack((s) => [...s.slice(-29), prevSnapshot ?? windows]);
+      setRedoStack([]);
+      onChange(next);
+    },
+    [onChange, windows],
+  );
+
+  const handleUndo = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1]!;
+      setRedoStack((r) => [...r.slice(-29), windows]);
+      onChange(last);
+      return prev.slice(0, -1);
+    });
+  }, [onChange, windows]);
+
+  const handleRedo = useCallback(() => {
+    setRedoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const next = prev[prev.length - 1]!;
+      setUndoStack((u) => [...u.slice(-29), windows]);
+      onChange(next);
+      return prev.slice(0, -1);
+    });
+  }, [onChange, windows]);
 
   const bounds = useMemo(() => {
     if (displays.length === 0) return { x: 0, y: 0, w: 1, h: 1 };
@@ -45,15 +114,113 @@ export function LayoutEditor({
     const minY = Math.min(...displays.map((d) => d.y));
     const maxX = Math.max(...displays.map((d) => d.x + d.width));
     const maxY = Math.max(...displays.map((d) => d.y + d.height));
-    return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
+    return {
+      x: minX,
+      y: minY,
+      w: Math.max(1, maxX - minX),
+      h: Math.max(1, maxY - minY),
+    };
   }, [displays]);
 
-  const monitorOf = (key: string): DisplayInfo | undefined =>
-    displays.find((d) => d.monitorKey === key) ??
-    displays.find((d) => d.isPrimary) ??
-    displays[0];
+  const monitorOf = useCallback(
+    (key: string): DisplayInfo | undefined =>
+      displays.find((d) => d.monitorKey === key) ??
+      displays.find((d) => d.isPrimary) ??
+      displays[0],
+    [displays],
+  );
 
-  const toPct = (w: WorkspaceWindow): { left: string; top: string; width: string; height: string } => {
+  const selectedWindow = useMemo(
+    () => windows.find((w) => w.id === selectedId) ?? null,
+    [windows, selectedId],
+  );
+
+  const selectedMonitorMissing = Boolean(
+    selectedWindow &&
+      selectedWindow.monitorKey &&
+      !displays.some((d) => d.monitorKey === selectedWindow.monitorKey),
+  );
+
+  const updateWindow = useCallback(
+    (id: string, patch: Partial<WorkspaceWindow>, recordUndo = true) => {
+      const next = windows.map((w) => (w.id === id ? { ...w, ...patch } : w));
+      if (recordUndo) commitChange(next);
+      else onChange(next);
+    },
+    [commitChange, onChange, windows],
+  );
+
+  const removeWindow = useCallback(
+    (id: string) => {
+      commitChange(windows.filter((w) => w.id !== id));
+      if (selectedId === id) setSelectedId(null);
+    },
+    [commitChange, selectedId, windows],
+  );
+
+  // 键盘编辑支持：方向键微调、Shift+方向键 5% 步进、Ctrl+Z/Y 撤销重做、Esc 取消选中
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT")
+      ) {
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (drag) {
+          onChange(drag.snapshotBefore);
+          setDrag(null);
+        } else {
+          setSelectedId(null);
+        }
+        return;
+      }
+      if (!selectedWindow) return;
+
+      const step = e.shiftKey ? 0.05 : 0.01;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        updateWindow(selectedWindow.id, {
+          xRatio: clamp(selectedWindow.xRatio - step, 0, 1 - selectedWindow.widthRatio),
+        });
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        updateWindow(selectedWindow.id, {
+          xRatio: clamp(selectedWindow.xRatio + step, 0, 1 - selectedWindow.widthRatio),
+        });
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        updateWindow(selectedWindow.id, {
+          yRatio: clamp(selectedWindow.yRatio - step, 0, 1 - selectedWindow.heightRatio),
+        });
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        updateWindow(selectedWindow.id, {
+          yRatio: clamp(selectedWindow.yRatio + step, 0, 1 - selectedWindow.heightRatio),
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drag, handleRedo, handleUndo, onChange, selectedWindow, updateWindow]);
+
+  const toPct = (w: WorkspaceWindow) => {
     const m = monitorOf(w.monitorKey);
     if (!m) return { left: "0%", top: "0%", width: "0%", height: "0%" };
     const absX = m.workX + w.xRatio * m.workWidth;
@@ -68,6 +235,15 @@ export function LayoutEditor({
     };
   };
 
+  const snapRatio = (v: number, snapPoints: number[]) => {
+    if (!snapEnabled) return v;
+    const threshold = 0.015;
+    for (const p of snapPoints) {
+      if (Math.abs(v - p) <= threshold) return p;
+    }
+    return v;
+  };
+
   const beginDrag = (
     e: React.PointerEvent,
     w: WorkspaceWindow,
@@ -77,18 +253,18 @@ export function LayoutEditor({
     if (!rect) return;
     const m = monitorOf(w.monitorKey);
     if (!m) return;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    setSelected(w.id);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    setSelectedId(w.id);
     setDrag({
       id: w.id,
       mode,
       startX: e.clientX,
       startY: e.clientY,
       origin: w,
-      // 世界像素 / 容器像素
       scale: bounds.w / rect.width,
       workW: m.workWidth,
       workH: m.workHeight,
+      snapshotBefore: windows,
     });
   };
 
@@ -103,148 +279,607 @@ export function LayoutEditor({
     const next = windows.map((w) => {
       if (w.id !== drag.id) return w;
       if (drag.mode === "move") {
-        const x = clamp(drag.origin.xRatio + dxRatio, 0, 1 - drag.origin.widthRatio);
-        const y = clamp(drag.origin.yRatio + dyRatio, 0, 1 - drag.origin.heightRatio);
-        return { ...w, xRatio: x, yRatio: y };
+        let x = clamp(drag.origin.xRatio + dxRatio, 0, 1 - drag.origin.widthRatio);
+        let y = clamp(drag.origin.yRatio + dyRatio, 0, 1 - drag.origin.heightRatio);
+        x = snapRatio(x, [0, 0.25, 0.5, 1 - drag.origin.widthRatio]);
+        y = snapRatio(y, [0, 0.25, 0.5, 1 - drag.origin.heightRatio]);
+        return { ...w, xRatio: round4(x), yRatio: round4(y) };
       }
-      const width = clamp(
+      let width = clamp(
         drag.origin.widthRatio + dxRatio,
         minRatio,
         1 - drag.origin.xRatio,
       );
-      const height = clamp(
+      let height = clamp(
         drag.origin.heightRatio + dyRatio,
         minRatio,
         1 - drag.origin.yRatio,
       );
-      return { ...w, widthRatio: width, heightRatio: height };
+      width = snapRatio(width, [0.3333, 0.5, 0.6667, 1 - drag.origin.xRatio]);
+      height = snapRatio(height, [0.5, 1 - drag.origin.yRatio]);
+      return { ...w, widthRatio: round4(width), heightRatio: round4(height) };
     });
     onChange(next);
   };
 
-  const endDrag = () => setDrag(null);
+  const endDrag = () => {
+    if (!drag) return;
+    const cur = windows.find((w) => w.id === drag.id);
+    const changed =
+      cur &&
+      (cur.xRatio !== drag.origin.xRatio ||
+        cur.yRatio !== drag.origin.yRatio ||
+        cur.widthRatio !== drag.origin.widthRatio ||
+        cur.heightRatio !== drag.origin.heightRatio);
+    if (changed) {
+      setUndoStack((s) => [...s.slice(-29), drag.snapshotBefore]);
+      setRedoStack([]);
+    }
+    setDrag(null);
+  };
+
+  // 将选中/悬停窗口放在最上层渲染，解决重叠窗口遮挡和文字糊成一团的问题
+  const renderOrder = useMemo(() => {
+    return [...windows].sort((a, b) => {
+      const score = (w: WorkspaceWindow) =>
+        w.id === selectedId ? 3 : w.id === hoveredId ? 2 : 1;
+      return score(a) - score(b);
+    });
+  }, [windows, selectedId, hoveredId]);
+
+  const applyPreset = (xRatio: number, yRatio: number, widthRatio: number, heightRatio: number) => {
+    if (!selectedWindow) return;
+    updateWindow(selectedWindow.id, { xRatio, yRatio, widthRatio, heightRatio });
+  };
 
   return (
-    <Card className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-body font-medium">窗口布局</p>
-          <p className="mt-0.5 text-[11px] text-ink-3">
-            拖动窗口调整位置，拖右下角改尺寸；坐标按显示器工作区比例保存
-          </p>
-        </div>
+    <Card padded={false} className="overflow-hidden">
+      {/* 工具栏 */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-sidebar/60 px-4 py-2.5">
         <div className="flex items-center gap-2">
-          {selected ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              title="从工作空间中移除该窗口"
-              onClick={() => {
-                onChange(windows.filter((w) => w.id !== selected));
-                setSelected(null);
-              }}
-            >
-              <Trash2 size={13} /> 移除窗口
-            </Button>
-          ) : null}
-          <Button size="sm" variant="primary" disabled={saving} onClick={onSave}>
-            <Save size={13} /> 保存布局
+          <span className="text-body font-medium text-ink">Visual Workspace Map</span>
+          <Badge tone={dirty ? "warning" : "neutral"}>
+            {dirty ? "未保存修改" : `${windows.length} 个窗口`}
+          </Badge>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={undoStack.length === 0}
+            onClick={handleUndo}
+            title="撤销 (Ctrl+Z)"
+          >
+            <Undo2 size={13} />
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={redoStack.length === 0}
+            onClick={handleRedo}
+            title="重做 (Ctrl+Y)"
+          >
+            <Redo2 size={13} />
+          </Button>
+
+          <span className="mx-1 h-4 w-px bg-line" />
+
+          <Button
+            size="xs"
+            variant={snapEnabled ? "secondary" : "ghost"}
+            onClick={() => setSnapEnabled((v) => !v)}
+            title="吸附显示器边缘与半屏/四分屏参考线"
+          >
+            <Magnet size={13} />
+            吸附
+          </Button>
+          <Button
+            size="xs"
+            variant={showGrid ? "secondary" : "ghost"}
+            onClick={() => setShowGrid((v) => !v)}
+            title="显示辅助网格"
+          >
+            <Grid3X3 size={13} />
+          </Button>
+
+          <span className="mx-1 h-4 w-px bg-line" />
+
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={zoom <= 0.75}
+            onClick={() => setZoom((z) => Math.max(0.75, round2(z - 0.15)))}
+            title="缩小画布"
+          >
+            <ZoomOut size={13} />
+          </Button>
+          <button
+            type="button"
+            onClick={() => setZoom(1)}
+            title="重置缩放至 100%"
+            className="tabnum cursor-pointer rounded-sm px-1.5 py-0.5 font-mono text-[11px] text-ink-2 hover:bg-raised"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={zoom >= 1.6}
+            onClick={() => setZoom((z) => Math.min(1.6, round2(z + 0.15)))}
+            title="放大画布"
+          >
+            <ZoomIn size={13} />
+          </Button>
+
+          <span className="mx-1 h-4 w-px bg-line" />
+
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!dirty || saving}
+            onClick={onReset}
+            title="放弃未保存的布局改动"
+          >
+            <RotateCcw size={13} /> 放弃
+          </Button>
+          <Button
+            size="xs"
+            variant="primary"
+            disabled={!dirty || saving}
+            onClick={onSave}
+          >
+            <Save size={13} /> {saving ? "保存中…" : "保存布局"}
           </Button>
         </div>
       </div>
 
-      <div
-        ref={boxRef}
-        className="relative w-full select-none overflow-hidden rounded-md border border-line bg-canvas"
-        style={{ aspectRatio: `${bounds.w} / ${bounds.h}`, maxHeight: 420 }}
-        onPointerMove={onMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-      >
-        {displays.map((d) => (
-          <div
-            key={d.monitorKey}
-            className="absolute rounded-sm border border-line-strong/70 bg-surface/40"
-            style={{
-              left: `${((d.x - bounds.x) / bounds.w) * 100}%`,
-              top: `${((d.y - bounds.y) / bounds.h) * 100}%`,
-              width: `${(d.width / bounds.w) * 100}%`,
-              height: `${(d.height / bounds.h) * 100}%`,
-            }}
-          >
+      {/* 主编辑区 + 右侧 Inspector */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_296px]">
+        {/* 画布容器 */}
+        <div className="flex flex-col gap-2.5 bg-canvas/70 p-4">
+          <div className="overflow-auto rounded-md border border-line bg-canvas p-3">
             <div
-              className="absolute border border-dashed border-line"
-              style={{
-                left: `${((d.workX - d.x) / d.width) * 100}%`,
-                top: `${((d.workY - d.y) / d.height) * 100}%`,
-                width: `${(d.workWidth / d.width) * 100}%`,
-                height: `${(d.workHeight / d.height) * 100}%`,
+              ref={boxRef}
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setSelectedId(null);
               }}
-            />
-            <span className="absolute left-1 top-1 font-mono text-[10px] text-ink-3">
-              {d.isPrimary ? "主屏" : "副屏"} {d.width}×{d.height}
-            </span>
-          </div>
-        ))}
-
-        {windows.map((w) => {
-          const isSel = w.id === selected;
-          return (
-            <div
-              key={w.id}
-              onPointerDown={(e) => beginDrag(e, w, "move")}
-              className={`absolute cursor-move rounded-sm border text-[10px] ${
-                isSel
-                  ? "border-accent bg-accent/25"
-                  : "border-accent/60 bg-accent/12 hover:bg-accent/20"
-              }`}
-              style={toPct(w)}
-              title={`${w.title || w.processName}\n${(w.xRatio * 100).toFixed(1)}% / ${(
-                w.yRatio * 100
-              ).toFixed(1)}% · ${(w.widthRatio * 100).toFixed(1)}% × ${(
-                w.heightRatio * 100
-              ).toFixed(1)}%`}
+              className="relative mx-auto select-none overflow-hidden rounded-sm"
+              style={{
+                width: `${zoom * 100}%`,
+                aspectRatio: `${bounds.w} / ${bounds.h}`,
+                maxHeight: zoom === 1 ? 430 : undefined,
+              }}
+              onPointerMove={onMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
             >
-              <span className="pointer-events-none block truncate px-1 pt-0.5 text-ink-2">
-                {w.title || w.processName}
-              </span>
-              {w.showState === "maximized" ? (
-                <Maximize2
-                  size={10}
-                  className="pointer-events-none absolute right-1 top-1 text-ink-3"
-                />
-              ) : null}
-              <span
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  beginDrag(e, w, "resize");
-                }}
-                className="absolute -bottom-1 -right-1 size-2.5 cursor-nwse-resize rounded-sm border border-accent bg-accent/70"
-                aria-label="调整大小"
-              />
-            </div>
-          );
-        })}
-      </div>
+              {displays.map((d) => (
+                <div
+                  key={d.monitorKey}
+                  className="pointer-events-none absolute rounded-sm border border-line-strong/80 bg-surface/55"
+                  style={{
+                    left: `${((d.x - bounds.x) / bounds.w) * 100}%`,
+                    top: `${((d.y - bounds.y) / bounds.h) * 100}%`,
+                    width: `${(d.width / bounds.w) * 100}%`,
+                    height: `${(d.height / bounds.h) * 100}%`,
+                  }}
+                >
+                  {/* 工作区虚线框 */}
+                  <div
+                    className="absolute border border-dashed border-line/90"
+                    style={{
+                      left: `${((d.workX - d.x) / d.width) * 100}%`,
+                      top: `${((d.workY - d.y) / d.height) * 100}%`,
+                      width: `${(d.workWidth / d.width) * 100}%`,
+                      height: `${(d.workHeight / d.height) * 100}%`,
+                      backgroundImage: showGrid
+                        ? "linear-gradient(to right, rgba(130,143,163,0.12) 1px, transparent 1px), linear-gradient(to bottom, rgba(130,143,163,0.12) 1px, transparent 1px)"
+                        : undefined,
+                      backgroundSize: showGrid ? "10% 10%" : undefined,
+                    }}
+                  />
+                  <span className="absolute bottom-1.5 right-2 rounded-sm bg-canvas/75 px-1.5 py-0.5 font-mono text-[10px] text-ink-3">
+                    {d.isPrimary ? "主屏" : "副屏"} {d.width}×{d.height} ·{" "}
+                    {Math.round(d.scaleFactor * 100)}%
+                  </span>
+                </div>
+              ))}
 
-      <div className="flex items-center justify-between text-[11px] text-ink-3">
-        <span>{windows.length} 个窗口 · 拖动后记得保存</span>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onReset}
-          title="放弃未保存的改动"
-        >
-          <RotateCcw size={12} /> 放弃改动
-        </Button>
+              {renderOrder.map((w) => {
+                const isSel = w.id === selectedId;
+                const isHover = w.id === hoveredId;
+                const active = isSel || isHover;
+                const dimmed = Boolean(selectedId && !isSel && !isHover);
+                return (
+                  <div
+                    key={w.id}
+                    onPointerDown={(e) => beginDrag(e, w, "move")}
+                    onMouseEnter={() => setHoveredId(w.id)}
+                    onMouseLeave={() => setHoveredId((cur) => (cur === w.id ? null : cur))}
+                    className={`absolute cursor-move overflow-hidden rounded-[6px] border transition-colors duration-100 ${
+                      isSel
+                        ? "border-accent bg-accent/22 shadow-[0_0_0_1px_var(--color-accent),0_6px_16px_rgba(0,0,0,0.22)]"
+                        : isHover
+                          ? "border-accent/80 bg-accent/14"
+                          : dimmed
+                            ? "border-line-strong/45 bg-surface/55 opacity-60"
+                            : "border-accent/45 bg-surface/85"
+                    }`}
+                    style={toPct(w)}
+                  >
+                    {/* macOS 风格窗口模拟标题栏 */}
+                    <div
+                      className={`pointer-events-none flex h-5 items-center gap-1 border-b px-1.5 text-[10px] ${
+                        isSel
+                          ? "border-accent/35 bg-accent/20 text-ink"
+                          : "border-line bg-raised/75 text-ink-2"
+                      }`}
+                    >
+                      {isSel ? (
+                        <span className="mr-0.5 flex items-center gap-0.5">
+                          <span className="size-1.5 rounded-full bg-[#ff5f57]" />
+                          <span className="size-1.5 rounded-full bg-[#febc2e]" />
+                          <span className="size-1.5 rounded-full bg-[#28c840]" />
+                        </span>
+                      ) : null}
+                      <span className="truncate font-medium">
+                        {w.processName.replace(/\.exe$/i, "")}
+                      </span>
+                      {active && w.title ? (
+                        <span className="truncate text-ink-3">· {w.title}</span>
+                      ) : null}
+                      {w.showState === "maximized" ? (
+                        <Maximize2 size={9} className="ml-auto shrink-0 text-ink-3" />
+                      ) : w.showState === "minimized" ? (
+                        <Minimize2 size={9} className="ml-auto shrink-0 text-ink-3" />
+                      ) : null}
+                    </div>
+
+                    {/* 拖动/选中时在矩形内部显示精确坐标 HUD */}
+                    {isSel ? (
+                      <div className="pointer-events-none px-1.5 pt-1 font-mono text-[10px] text-ink-2">
+                        {Math.round(w.xRatio * 100)}%, {Math.round(w.yRatio * 100)}% ·{" "}
+                        {Math.round(w.widthRatio * 100)}%×{Math.round(w.heightRatio * 100)}%
+                      </div>
+                    ) : null}
+
+                    {/* 仅对选中或悬停窗口显示缩放手柄，避免满屏蓝点 */}
+                    {active ? (
+                      <span
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          beginDrag(e, w, "resize");
+                        }}
+                        className="absolute bottom-0 right-0 size-3 cursor-nwse-resize rounded-tl-sm border-l border-t border-accent bg-accent/80"
+                        aria-label="调整窗口大小"
+                        title="拖动调整窗口大小"
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-ink-3">
+            <span>
+              点击窗口选中并在右侧微调；支持方向键微调（Shift 5%）、Esc 取消、Ctrl+Z 撤销
+            </span>
+            <span>画布仅编辑工作空间布局，不改变系统显示器物理排列</span>
+          </div>
+        </div>
+
+        {/* 右侧 Inspector 面板 */}
+        <aside className="flex flex-col border-t border-line bg-surface lg:border-l lg:border-t-0">
+          <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+            <span className="flex items-center gap-1.5 text-aux font-medium text-ink">
+              <Layers size={14} className="text-ink-3" />
+              {selectedWindow ? "窗口属性 Inspector" : "窗口图层列表"}
+            </span>
+            {selectedWindow ? (
+              <button
+                type="button"
+                onClick={() => setSelectedId(null)}
+                className="cursor-pointer text-[11px] text-accent hover:underline"
+              >
+                返回列表
+              </button>
+            ) : (
+              <span className="tabnum text-[11px] text-ink-3">{windows.length} 项</span>
+            )}
+          </div>
+
+          {selectedWindow ? (
+            <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
+              <div>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="truncate text-body font-semibold text-ink">
+                    {selectedWindow.title || selectedWindow.processName}
+                  </p>
+                  <Badge
+                    tone={
+                      selectedWindow.showState === "maximized"
+                        ? "accent"
+                        : selectedWindow.showState === "minimized"
+                          ? "warning"
+                          : "neutral"
+                    }
+                  >
+                    {selectedWindow.showState === "maximized"
+                      ? "最大化"
+                      : selectedWindow.showState === "minimized"
+                        ? "最小化"
+                        : "普通"}
+                  </Badge>
+                </div>
+                <p className="mt-1 font-mono text-[11px] text-ink-3">
+                  显示器：{selectedWindow.monitorKey || "主显示器"}
+                </p>
+                {selectedMonitorMissing ? (
+                  <p className="mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1 text-[11px] text-warning">
+                    原显示器当前未连接，恢复时将按工作区比例映射到主屏。
+                  </p>
+                ) : null}
+              </div>
+
+              {/* 目标显示器与显示状态（可持久化编辑） */}
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] text-ink-3">目标显示器</span>
+                  <select
+                    value={selectedWindow.monitorKey}
+                    onChange={(e) =>
+                      updateWindow(selectedWindow.id, { monitorKey: e.target.value })
+                    }
+                    className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+                  >
+                    {displays.map((d, i) => (
+                      <option key={d.monitorKey} value={d.monitorKey}>
+                        {d.isPrimary ? `主屏 (${d.width}×${d.height})` : `副屏 ${i + 1} (${d.width}×${d.height})`}
+                      </option>
+                    ))}
+                    {selectedMonitorMissing ? (
+                      <option value={selectedWindow.monitorKey}>
+                        离线：{selectedWindow.monitorKey}
+                      </option>
+                    ) : null}
+                  </select>
+                </label>
+
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] text-ink-3">恢复显示状态</span>
+                  <select
+                    value={selectedWindow.showState}
+                    onChange={(e) =>
+                      updateWindow(selectedWindow.id, {
+                        showState: e.target.value as ShowState,
+                      })
+                    }
+                    className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+                  >
+                    <option value="normal">普通窗口</option>
+                    <option value="maximized">最大化</option>
+                    <option value="minimized">最小化</option>
+                  </select>
+                </label>
+              </div>
+
+              {/* 位置与尺寸数值输入（与画布双向同步） */}
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-ink-3">
+                  工作区比例坐标 (%)
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <PercentField
+                    label="X 左边距"
+                    value={selectedWindow.xRatio}
+                    max={1 - selectedWindow.widthRatio}
+                    onCommit={(v) => updateWindow(selectedWindow.id, { xRatio: v })}
+                  />
+                  <PercentField
+                    label="Y 顶边距"
+                    value={selectedWindow.yRatio}
+                    max={1 - selectedWindow.heightRatio}
+                    onCommit={(v) => updateWindow(selectedWindow.id, { yRatio: v })}
+                  />
+                  <PercentField
+                    label="宽度"
+                    value={selectedWindow.widthRatio}
+                    min={0.08}
+                    max={1 - selectedWindow.xRatio}
+                    onCommit={(v) => updateWindow(selectedWindow.id, { widthRatio: v })}
+                  />
+                  <PercentField
+                    label="高度"
+                    value={selectedWindow.heightRatio}
+                    min={0.08}
+                    max={1 - selectedWindow.yRatio}
+                    onCommit={(v) => updateWindow(selectedWindow.id, { heightRatio: v })}
+                  />
+                </div>
+              </div>
+
+              {/* 快捷对齐预设 */}
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-ink-3">
+                  快捷排版
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <Button size="xs" variant="secondary" onClick={() => applyPreset(0, 0, 0.5, 1)}>
+                    左半屏
+                  </Button>
+                  <Button size="xs" variant="secondary" onClick={() => applyPreset(0.5, 0, 0.5, 1)}>
+                    右半屏
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="secondary"
+                    onClick={() => applyPreset(0.1, 0.08, 0.8, 0.84)}
+                  >
+                    居中 80%
+                  </Button>
+                  <Button size="xs" variant="secondary" onClick={() => applyPreset(0, 0, 1, 1)}>
+                    铺满工作区
+                  </Button>
+                </div>
+              </div>
+
+              {/* 只读识别依据卡片（评审 U6） */}
+              <div className="rounded-md border border-line bg-canvas/60 p-3">
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-ink-2">
+                  <ShieldCheck size={13} className="text-accent" />
+                  窗口识别依据（只读）
+                </p>
+                <dl className="mt-2 flex flex-col gap-1.5 font-mono text-[11px]">
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-ink-3">进程</dt>
+                    <dd className="truncate text-ink-2">{selectedWindow.processName}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="text-ink-3">类名</dt>
+                    <dd className="truncate text-ink-2">{selectedWindow.className}</dd>
+                  </div>
+                  {selectedWindow.processPath ? (
+                    <div>
+                      <dt className="text-ink-3">路径</dt>
+                      <dd
+                        className="selectable mt-0.5 truncate text-ink-3"
+                        title={selectedWindow.processPath}
+                      >
+                        {selectedWindow.processPath}
+                      </dd>
+                    </div>
+                  ) : null}
+                </dl>
+              </div>
+
+              <div className="mt-auto border-t border-line pt-3">
+                <Button
+                  size="sm"
+                  variant="danger"
+                  className="w-full"
+                  onClick={() => removeWindow(selectedWindow.id)}
+                >
+                  <Trash2 size={13} /> 从工作空间移除该窗口
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex max-h-[450px] flex-1 flex-col overflow-y-auto p-2">
+              {windows.length === 0 ? (
+                <p className="px-3 py-8 text-center text-aux text-ink-3">
+                  当前没有窗口布局项
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-1">
+                  {windows.map((w) => (
+                    <li key={w.id}>
+                      <button
+                        type="button"
+                        onMouseEnter={() => setHoveredId(w.id)}
+                        onMouseLeave={() => setHoveredId((c) => (c === w.id ? null : c))}
+                        onClick={() => setSelectedId(w.id)}
+                        className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-left transition-colors ${
+                          hoveredId === w.id
+                            ? "bg-raised text-ink"
+                            : "text-ink-2 hover:bg-raised/60"
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-aux font-medium text-ink">
+                            {w.title || w.processName}
+                          </p>
+                          <p className="tabnum mt-0.5 truncate font-mono text-[10px] text-ink-3">
+                            {w.processName} · {Math.round(w.widthRatio * 100)}%×
+                            {Math.round(w.heightRatio * 100)}%
+                          </p>
+                        </div>
+                        {w.showState !== "normal" ? (
+                          <Badge>{w.showState === "maximized" ? "最大" : "最小"}</Badge>
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </aside>
       </div>
     </Card>
+  );
+}
+
+function PercentField({
+  label,
+  value,
+  min = 0,
+  max = 1,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  onCommit: (next: number) => void;
+}) {
+  const pct = (value * 100).toFixed(1);
+  const [text, setText] = useState(pct);
+
+  useEffect(() => {
+    setText((value * 100).toFixed(1));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed)) {
+      setText(pct);
+      return;
+    }
+    const clamped = round4(clamp(parsed / 100, min, max));
+    if (Math.abs(clamped - value) > 0.0001) {
+      onCommit(clamped);
+    } else {
+      setText((clamped * 100).toFixed(1));
+    }
+  };
+
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] text-ink-3">{label}</span>
+      <div className="relative flex items-center">
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            }
+          }}
+          inputMode="decimal"
+          className="tabnum h-8 w-full rounded-md border border-line-strong/80 bg-canvas pl-2.5 pr-6 font-mono text-aux text-ink outline-none focus:border-accent"
+        />
+        <span className="pointer-events-none absolute right-2 font-mono text-[11px] text-ink-3">
+          %
+        </span>
+      </div>
+    </label>
   );
 }
 
 function clamp(v: number, min: number, max: number): number {
   if (!Number.isFinite(v)) return min;
   return Math.min(Math.max(v, min), Math.max(min, max));
+}
+
+function round4(v: number): number {
+  return Math.round(v * 10000) / 10000;
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
 }
 
 export function toLayoutUpdates(windows: WorkspaceWindow[]): LayoutUpdate[] {
@@ -254,5 +889,7 @@ export function toLayoutUpdates(windows: WorkspaceWindow[]): LayoutUpdate[] {
     yRatio: w.yRatio,
     widthRatio: w.widthRatio,
     heightRatio: w.heightRatio,
+    monitorKey: w.monitorKey,
+    showState: w.showState,
   }));
 }

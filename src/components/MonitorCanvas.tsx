@@ -1,23 +1,31 @@
+import { useState } from "react";
 import type { DisplayInfo, WindowInfo } from "@/types/contract";
 
 /**
- * 只读可视化画布：把显示器与窗口矩形按真实相对位置绘制。
- * 与 UI 规范 §7.4 对应；M1 只做只读（编辑能力见评审 UI-06b）。
+ * 只读可视化画布（UI 规范 §7.4 / UI-06a）：
+ * 按真实物理相对位置绘制显示器、工作区与窗口矩形；
+ * 支持悬停高亮与可选点击选中，解决多窗口重叠时看不清的问题。
  */
 export function MonitorCanvas({
   displays,
   windows,
-  height = 200,
+  height = 210,
   highlightMonitor,
+  selectedHwnd,
+  onSelectWindow,
 }: {
   displays: DisplayInfo[];
   windows: WindowInfo[];
   height?: number;
   highlightMonitor?: string | null;
+  selectedHwnd?: number | null;
+  onSelectWindow?: (w: WindowInfo) => void;
 }) {
+  const [hoveredHwnd, setHoveredHwnd] = useState<number | null>(null);
+
   if (displays.length === 0) {
     return (
-      <div className="grid h-[120px] place-items-center rounded-md border border-dashed border-line text-aux text-ink-3">
+      <div className="grid h-[140px] place-items-center rounded-md border border-dashed border-line bg-canvas/50 text-aux text-ink-3">
         无显示器信息
       </div>
     );
@@ -28,74 +36,123 @@ export function MonitorCanvas({
   const maxX = Math.max(...displays.map((d) => d.x + d.width));
   const maxY = Math.max(...displays.map((d) => d.y + d.height));
 
-  const pad = 8;
+  const pad = Math.max(24, (maxX - minX) * 0.02);
   const vbX = minX - pad;
   const vbY = minY - pad;
-  const vbW = maxX - minX + pad * 2;
-  const vbH = maxY - minY + pad * 2;
-  const fontSize = Math.max(10, vbW / 46);
+  const vbW = Math.max(1, maxX - minX + pad * 2);
+  const vbH = Math.max(1, maxY - minY + pad * 2);
+  const fontSize = Math.max(12, vbW / 44);
+  const activeHwnd = hoveredHwnd ?? selectedHwnd ?? null;
+
+  // 把激活窗口排到最后绘制，避免被其他窗口遮挡
+  const orderedWindows = [...windows].sort((a, b) => {
+    const aActive = a.hwnd === activeHwnd ? 1 : 0;
+    const bActive = b.hwnd === activeHwnd ? 1 : 0;
+    return aActive - bActive;
+  });
+
+  const inspected = windows.find((w) => w.hwnd === activeHwnd) ?? null;
 
   return (
-    <svg
-      viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`}
-      style={{ width: "100%", height }}
-      preserveAspectRatio="xMidYMid meet"
-      role="img"
-      aria-label="显示器与窗口布局预览"
-    >
-      {displays.map((d) => {
-        const active = highlightMonitor === d.monitorKey;
-        return (
-          <g key={d.monitorKey}>
-            <rect
-              x={d.x}
-              y={d.y}
-              width={d.width}
-              height={d.height}
-              rx={vbW / 200}
-              fill="var(--color-surface)"
-              stroke={active ? "var(--color-accent)" : "var(--color-line-strong)"}
-              strokeWidth={vbW / 400}
-            />
-            <rect
-              x={d.workX}
-              y={d.workY}
-              width={d.workWidth}
-              height={d.workHeight}
-              fill="none"
-              stroke="var(--color-line)"
-              strokeDasharray={`${vbW / 200} ${vbW / 200}`}
-              strokeWidth={vbW / 800}
-            />
-            <text
-              x={d.x + fontSize}
-              y={d.y + fontSize * 1.5}
-              fill="var(--color-ink-3)"
-              fontSize={fontSize}
-              fontFamily="var(--font-mono)"
-            >
-              {d.isPrimary ? "主屏" : "副屏"} {d.width}×{d.height}
-            </text>
-          </g>
-        );
-      })}
-
-      {windows.map((w, i) => (
-        <rect
-          key={`${w.hwnd}-${i}`}
-          x={w.x}
-          y={w.y}
-          width={w.width}
-          height={w.height}
-          rx={vbW / 400}
-          fill="var(--color-accent)"
-          fillOpacity={0.16}
-          stroke="var(--color-accent)"
-          strokeWidth={vbW / 700}
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className="overflow-hidden rounded-md border border-line bg-canvas/80 p-2">
+        <svg
+          viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`}
+          style={{ width: "100%", height }}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-label="显示器与窗口布局预览"
         >
-          <title>{w.title || w.processName}</title>
-        </rect>
-      ))}
-    </svg>
+          {displays.map((d) => {
+            const active = highlightMonitor === d.monitorKey;
+            return (
+              <g key={d.monitorKey}>
+                <rect
+                  x={d.x}
+                  y={d.y}
+                  width={d.width}
+                  height={d.height}
+                  rx={vbW / 180}
+                  fill="var(--color-surface)"
+                  stroke={active ? "var(--color-accent)" : "var(--color-line-strong)"}
+                  strokeWidth={vbW / 380}
+                />
+                <rect
+                  x={d.workX}
+                  y={d.workY}
+                  width={d.workWidth}
+                  height={d.workHeight}
+                  fill="none"
+                  stroke="var(--color-line)"
+                  strokeDasharray={`${vbW / 180} ${vbW / 180}`}
+                  strokeWidth={vbW / 700}
+                />
+                <text
+                  x={d.x + fontSize * 0.9}
+                  y={d.y + fontSize * 1.45}
+                  fill="var(--color-ink-3)"
+                  fontSize={fontSize}
+                  fontFamily="var(--font-mono)"
+                >
+                  {d.isPrimary ? "主屏" : "副屏"} {d.width}×{d.height} ·{" "}
+                  {Math.round(d.scaleFactor * 100)}%
+                </text>
+              </g>
+            );
+          })}
+
+          {orderedWindows.map((w, i) => {
+            const isSel = w.hwnd === selectedHwnd;
+            const isHover = w.hwnd === hoveredHwnd;
+            const highlighted = isSel || isHover;
+            return (
+              <g
+                key={`${w.hwnd}-${i}`}
+                onMouseEnter={() => setHoveredHwnd(w.hwnd)}
+                onMouseLeave={() => setHoveredHwnd((cur) => (cur === w.hwnd ? null : cur))}
+                onClick={() => onSelectWindow?.(w)}
+                className={onSelectWindow ? "cursor-pointer" : undefined}
+              >
+                <rect
+                  x={w.x}
+                  y={w.y}
+                  width={Math.max(40, w.width)}
+                  height={Math.max(30, w.height)}
+                  rx={vbW / 320}
+                  fill="var(--color-accent)"
+                  fillOpacity={highlighted ? 0.34 : 0.13}
+                  stroke={highlighted ? "var(--color-accent)" : "var(--color-accent)"}
+                  strokeOpacity={highlighted ? 1 : 0.55}
+                  strokeWidth={highlighted ? vbW / 320 : vbW / 700}
+                >
+                  <title>{`${w.title || w.processName} (${w.width}×${w.height})`}</title>
+                </rect>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      <div className="flex min-h-6 min-w-0 items-center justify-between gap-3 overflow-hidden px-0.5 text-aux text-ink-3">
+        {inspected ? (
+          <>
+            <span className="min-w-0 flex-1 truncate text-ink-2">
+              <span className="font-medium text-ink">
+                {inspected.title || inspected.processName}
+              </span>{" "}
+              <span className="text-ink-3">({inspected.processName})</span>
+            </span>
+            <span className="tabnum shrink-0 font-mono text-[11px] text-ink-3">
+              ({inspected.x}, {inspected.y}) · {inspected.width}×{inspected.height}
+              {inspected.isMaximized ? " · 最大化" : inspected.isMinimized ? " · 最小化" : ""}
+            </span>
+          </>
+        ) : (
+          <span className="min-w-0 flex-1 truncate">
+            悬停窗口矩形查看详情 · 共 {displays.length} 台显示器、{windows.length} 个窗口
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

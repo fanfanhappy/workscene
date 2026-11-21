@@ -11,6 +11,7 @@ import type {
   RestoreReport,
   RunStepRow,
   RunSummary,
+  SceneFile,
   SceneHealth,
   SnapshotDiff,
   SnapshotSummary,
@@ -51,6 +52,7 @@ export const api = {
   getDisplays: () => call<DisplayInfo[]>("system_get_displays"),
   captureStart: () => call<CaptureResult>("capture_start"),
   sceneHealth: () => call<SceneHealth>("scene_health"),
+  windowSetTheme: (theme: "light" | "dark") => call<void>("window_set_theme", { theme }),
 
   workspaceList: () => call<WorkspaceSummary[]>("workspace_list"),
   workspaceGet: (id: string) => call<WorkspaceDetail>("workspace_get", { id }),
@@ -58,6 +60,28 @@ export const api = {
     call<WorkspaceSummary>("workspace_create", { name, capture }),
   workspaceRename: (id: string, name: string) =>
     call<void>("workspace_rename", { id, name }),
+  workspaceSetFavorite: (id: string, isFavorite: boolean) =>
+    call<void>("workspace_set_favorite", { id, isFavorite }),
+  workspaceUpdateMeta: (
+    id: string,
+    name: string,
+    description: string | null,
+    autoSnapshotEnabled: boolean,
+  ) =>
+    call<void>("workspace_update_meta", {
+      id,
+      name,
+      description,
+      autoSnapshotEnabled,
+    }),
+  workspaceDuplicate: (id: string, newName: string) =>
+    call<WorkspaceSummary>("workspace_duplicate", { id, newName }),
+  workspaceExport: (id: string) => call<string>("workspace_export", { id }),
+  workspaceImport: (json: string) => call<WorkspaceSummary>("workspace_import", { json }),
+  workspaceRecapture: (id: string) =>
+    call<WorkspaceDetail>("workspace_recapture", { id }),
+  workspaceUpdateFromCapture: (id: string, capture: CaptureResult) =>
+    call<WorkspaceDetail>("workspace_update_from_capture", { id, capture }),
   workspaceDelete: (id: string) => call<void>("workspace_delete", { id }),
   workspaceItemUpdate: (
     itemId: string,
@@ -71,7 +95,18 @@ export const api = {
       launchArgs,
       enabled,
     }),
+  workspaceItemRelocate: (workspaceId: string, itemId: string, newPath: string) =>
+    call<WorkspaceItem>("workspace_item_relocate", {
+      workspaceId,
+      itemId,
+      newPath,
+    }),
   restoreIsBusy: () => call<boolean>("restore_is_busy"),
+  restoreCancel: () => call<boolean>("restore_cancel"),
+  systemOpenDataDir: () => call<void>("system_open_data_dir"),
+  dialogPickFile: (exeOnly = false) =>
+    call<string | null>("dialog_pick_file", { exeOnly }),
+  dialogPickFolder: () => call<string | null>("dialog_pick_folder"),
 
   workspaceLayoutUpdate: (workspaceId: string, updates: LayoutUpdate[]) =>
     call<void>("workspace_layout_update", { workspaceId, updates }),
@@ -94,6 +129,7 @@ export const api = {
 
   snapshotList: (workspaceId: string, limit = 50) =>
     call<SnapshotSummary[]>("snapshot_list", { workspaceId, limit }),
+  snapshotGet: (id: string) => call<SceneFile>("snapshot_get", { id }),
   snapshotCreate: (workspaceId: string, name: string) =>
     call<SnapshotSummary>("snapshot_create", { workspaceId, name }),
   snapshotDelete: (id: string) => call<void>("snapshot_delete", { id }),
@@ -114,6 +150,16 @@ export const api = {
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),
+  workspaceRestoreRetry: (
+    id: string,
+    relaunchMissing: boolean,
+    targetNames: string[],
+  ) =>
+    call<RestoreReport>("workspace_restore_retry", {
+      id,
+      relaunchMissing,
+      targetNames,
+    }),
 
   /** 按快照恢复：撤销这次恢复、历史回退都用它 */
   snapshotRestore: (id: string, relaunchMissing: boolean) =>

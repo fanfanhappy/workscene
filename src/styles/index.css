@@ -1,63 +1,65 @@
 @import "tailwindcss";
 
 /*
- * WorkScene 设计令牌
- * 依据：前端 UI/UX 规范 v1.0 §15，并按评审 U3 修正了三处对比度：
- *  - Primary 按钮文字改用深色（#101318 on #6C8FF5 = 6.10:1）
- *  - Text Muted 提到 #828FA3（on Surface = 4.88:1）
- *  - 控件边框拆出 line-strong #6B7482（vs Surface = 3.39:1），line 只作装饰分隔
+ * WorkScene · Apple macOS (HIG) Design System
+ * 深浅双主题严格遵循 Apple System Colors 与对比度规范：
+ *  - Dark:  #1C1C1E 画布 / #232326 侧栏 / #2C2C2E 分组卡片 / #0071E3 Apple Blue
+ *  - Light: #F5F5F7 画布 / #ECECEF 侧栏 / #FFFFFF 卡片 / #0071E3 Apple Blue
+ *  - 细微发丝边框 + 柔和 Apple 层次阴影 + Segmented Control + macOS 绿开关
  */
 @theme {
-  --color-canvas: #101318;
-  --color-sidebar: #151a21;
-  --color-surface: #1b222c;
-  --color-raised: #252e3a;
-  --color-line: #303a47;
-  --color-line-strong: #6b7482;
+  --color-canvas: #1c1c1e;
+  --color-sidebar: #232326;
+  --color-surface: #2c2c2e;
+  --color-raised: #3a3a3c;
+  --color-line: rgba(255, 255, 255, 0.09);
+  --color-line-strong: rgba(255, 255, 255, 0.22);
 
-  --color-accent: #6c8ff5;
-  --color-accent-ink: #101318;
-  --color-success: #45b58b;
-  --color-warning: #e8ad57;
-  --color-danger: #e46c72;
+  --color-accent: #0a84ff;
+  --color-accent-solid: #0071e3;
+  --color-accent-ink: #ffffff;
+  --color-success: #30d158;
+  --color-warning: #ff9f0a;
+  --color-danger: #ff453a;
 
-  --color-ink: #edf1f7;
-  --color-ink-2: #98a4b4;
-  --color-ink-3: #828fa3;
+  --color-ink: #f5f5f7;
+  --color-ink-2: #aeaeb2;
+  --color-ink-3: #8e8e93;
 
-  --font-sans: Inter, "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
 
-  --radius-sm: 6px;
-  --radius-md: 8px;
+  --radius-sm: 7px;
+  --radius-md: 9px;
   --radius-lg: 12px;
 
-  --text-title: 24px;
-  --text-module: 18px;
-  --text-card: 15px;
+  --text-title: 22px;
+  --text-module: 17px;
+  --text-card: 14px;
   --text-body: 13px;
   --text-aux: 12px;
   --text-aux-en: 11px;
 }
 
-/* 浅色主题：同一组变量名，utility 自动跟随 */
+/* Apple macOS Sequoia Light Theme */
 :root[data-theme="light"] {
-  --color-canvas: #f6f7f9;
-  --color-sidebar: #ffffff;
+  --color-canvas: #f5f5f7;
+  --color-sidebar: #ececef;
   --color-surface: #ffffff;
-  --color-raised: #eef1f5;
-  --color-line: #d8dee7;
-  --color-line-strong: #6e7683;
+  --color-raised: #e5e5ea;
+  --color-line: rgba(0, 0, 0, 0.08);
+  --color-line-strong: rgba(0, 0, 0, 0.20);
 
-  --color-accent: #3b5bdb;
+  --color-accent: #0071e3;
+  --color-accent-solid: #0071e3;
   --color-accent-ink: #ffffff;
-  --color-success: #1f7a5a;
-  --color-warning: #96601a;
-  --color-danger: #b0363c;
+  --color-success: #248a3d;
+  --color-warning: #c96a00;
+  --color-danger: #d70015;
 
-  --color-ink: #11151b;
-  --color-ink-2: #4a5566;
-  --color-ink-3: #5a6678;
+  --color-ink: #1d1d1f;
+  --color-ink-2: #515154;
+  --color-ink-3: #6e6e73;
 }
 
 @layer base {
@@ -77,15 +79,23 @@
     color: var(--color-ink);
     font-family: var(--font-sans);
     font-size: var(--text-body);
-    line-height: 1.55;
+    line-height: 1.48;
+    letter-spacing: -0.008em;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
-  }
-
-  /* 桌面应用：界面文字不可选中，路径/日志等可选区域单独开启 */
-  body {
     user-select: none;
     cursor: default;
+  }
+
+  input,
+  textarea,
+  select {
+    color: var(--color-ink);
+  }
+
+  select option {
+    background-color: var(--color-surface);
+    color: var(--color-ink);
   }
 
   .selectable {
@@ -94,30 +104,29 @@
   }
 
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-line);
+    background: var(--color-line-strong);
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: content-box;
+    opacity: 0.6;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--color-line-strong);
+    background: var(--color-ink-3);
     background-clip: content-box;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  /* 焦点环：规范要求 2px 可见焦点环（§15.4） */
   :focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
+    outline: 2.5px solid var(--color-accent);
+    outline-offset: 1px;
   }
 
-  /* 尊重系统「减少动画」（评审 S2） */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -129,8 +138,80 @@
   }
 }
 
+@keyframes apple-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes apple-sheet-in {
+  from {
+    opacity: 0;
+    transform: scale(0.965) translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 @layer utilities {
   .tabnum {
     font-variant-numeric: tabular-nums;
+  }
+  .animate-page {
+    animation: apple-fade-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  .animate-dialog {
+    animation: apple-sheet-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .apple-card {
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.06),
+      0 1px 2px rgba(0, 0, 0, 0.22);
+  }
+  :root[data-theme="light"] .apple-card {
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.04),
+      0 2px 8px -2px rgba(0, 0, 0, 0.04);
+  }
+  .apple-btn-primary {
+    background-color: var(--color-accent-solid);
+    color: var(--color-accent-ink);
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.26),
+      0 1px 2px rgba(0, 113, 227, 0.3);
+  }
+  .apple-btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .apple-btn-primary:active:not(:disabled) {
+    filter: brightness(0.95);
+    transform: scale(0.985);
+  }
+  .apple-segment-active {
+    background-color: var(--color-surface);
+    color: var(--color-ink);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.14),
+      0 0 0 0.5px var(--color-line);
+  }
+  :root[data-theme="dark"] .apple-segment-active {
+    background-color: #48484a;
+  }
+  .shadow-overlay {
+    box-shadow:
+      0 22px 48px -12px rgba(0, 0, 0, 0.45),
+      0 0 0 0.5px var(--color-line-strong);
+  }
+  :root[data-theme="light"] .shadow-overlay {
+    box-shadow:
+      0 20px 44px -12px rgba(0, 0, 0, 0.18),
+      0 0 0 0.5px rgba(0, 0, 0, 0.1);
   }
 }

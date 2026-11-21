@@ -1,92 +1,182 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft,
+  AlertTriangle,
   Check,
   ChevronDown,
-  MonitorSmartphone,
+  Minus,
+  RefreshCw,
   ScanLine,
   ShieldCheck,
 } from "lucide-react";
 import { api } from "@/services/api";
-import type { CaptureResult, WindowInfo } from "@/types/contract";
-import { Badge, Button, Card, EmptyState, ErrorNote, Spinner } from "@/components/ui";
+import type { CaptureResult, WindowInfo, WorkspaceSummary } from "@/types/contract";
+import { toast } from "@/stores/ui.store";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorNote,
+  SearchInput,
+  Spinner,
+} from "@/components/ui";
 import { MonitorCanvas } from "@/components/MonitorCanvas";
-
-type Step = 1 | 2 | 3;
-
-const STEPS: { id: Step; label: string }[] = [
-  { id: 1, label: "扫描桌面" },
-  { id: 2, label: "选择对象" },
-  { id: 3, label: "保存现场" },
-];
 
 export function CapturePage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const [step, setStep] = useState<Step>(1);
   const [result, setResult] = useState<CaptureResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [search, setSearch] = useState("");
+  const [saveMode, setSaveMode] = useState<"new" | "update">("new");
+  const [targetWsId, setTargetWsId] = useState<string>("");
   const [name, setName] = useState("");
   const [showExcluded, setShowExcluded] = useState(false);
+  const [highlightedHwnd, setHighlightedHwnd] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const workspaces = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: api.workspaceList,
+    staleTime: 5_000,
+  });
+
+  useEffect(() => {
+    const list = workspaces.data ?? [];
+    if (list.length === 0) {
+      if (targetWsId) setTargetWsId("");
+      if (saveMode === "update") setSaveMode("new");
+      return;
+    }
+    if (!targetWsId || !list.some((w) => w.id === targetWsId)) {
+      setTargetWsId(list[0]!.id);
+    }
+  }, [workspaces.data, targetWsId, saveMode]);
+
+  const scannedOnce = useRef(false);
 
   const scan = useMutation({
     mutationFn: api.captureStart,
     onMutate: () => {
       setError(null);
-      setResult(null);
+      setHighlightedHwnd(null);
     },
     onSuccess: (data) => {
+      qc.setQueryData(["capture"], data);
       setResult(data);
-      // 默认全选：符合「捕获当前现场」的直觉，用户再取消不要的窗口
       setSelected(new Set(data.windows.map((w) => w.hwnd)));
       const d = new Date();
       setName(
-        `工作现场 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
+        `工作现场 ${String(d.getHours()).padStart(2, "0")}:${String(
+          d.getMinutes(),
+        ).padStart(2, "0")}`,
       );
-      setStep(2);
     },
-    onError: (e) => setError(String((e as Error).message)),
+    onError: (e) => {
+      const msg = String((e as Error).message);
+      setError(msg);
+      toast.danger("扫描桌面失败", msg);
+    },
   });
 
   useEffect(() => {
+    if (scannedOnce.current) return;
+    scannedOnce.current = true;
     scan.mutate();
-    // 只扫描一次，重扫由用户点击触发
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const save = useMutation({
     mutationFn: async () => {
-      if (!result) throw new Error("没有可保存的捕获结果");
+      if (!result) throw new Error("没有可保存的扫描结果");
       const subset: CaptureResult = {
         ...result,
         windows: result.windows.filter((w) => selected.has(w.hwnd)),
       };
-      if (subset.windows.length === 0) throw new Error("请至少选择一个窗口");
-      return api.workspaceCreate(name, subset);
+      if (subset.windows.length === 0) throw new Error("请至少勾选一个窗口");
+
+      if (saveMode === "update") {
+        if (!targetWsId) throw new Error("请选择要更新的工作空间");
+        const updated = await api.workspaceUpdateFromCapture(targetWsId, subset);
+        return {
+          id: updated.id,
+          name: updated.name,
+          updated: true,
+          count: updated.windows.length,
+          createdSummary: null as WorkspaceSummary | null,
+        };
+      }
+
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("请给工作空间起个名字");
+      const created = await api.workspaceCreate(trimmed, subset);
+      return {
+        id: created.id,
+        name: created.name,
+        updated: false,
+        count: created.windowCount,
+        createdSummary: created,
+      };
     },
-    onSuccess: (scene) => {
-      qc.invalidateQueries({ queryKey: ["workspaces"] });
-      navigate(`/workspaces?id=${scene.id}`);
+    onSuccess: (res) => {
+      if (res.createdSummary) {
+        const created = res.createdSummary;
+        qc.setQueryData<WorkspaceSummary[]>(["workspaces"], (prev) =>
+          prev ? [created, ...prev.filter((w) => w.id !== created.id)] : [created],
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["workspace", res.id] });
+      qc.invalidateQueries({ queryKey: ["snapshots", res.id] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      if (res.updated) {
+        toast.success(
+          `已更新「${res.name}」的窗口摆法`,
+          `同步 ${res.count} 个窗口，原文件和网址已保留，并自动备份了旧版本`,
+        );
+      } else {
+        toast.success(`已保存工作空间「${res.name}」`, `记录了 ${res.count} 个窗口`);
+      }
+      navigate(`/workspaces?id=${res.id}`);
     },
-    onError: (e) => setError(String((e as Error).message)),
+    onError: (e) => {
+      const msg = String((e as Error).message);
+      setError(msg);
+      toast.danger("保存失败", msg);
+    },
   });
 
   const groups = useMemo(() => {
+    const q = search.trim().toLowerCase();
     const map = new Map<string, WindowInfo[]>();
     for (const w of result?.windows ?? []) {
-      const key = w.processName || "未知进程";
+      if (
+        q &&
+        !w.title.toLowerCase().includes(q) &&
+        !w.processName.toLowerCase().includes(q)
+      ) {
+        continue;
+      }
+      const key = w.processName.replace(/\.exe$/i, "") || "未知程序";
       const list = map.get(key) ?? [];
       list.push(w);
       map.set(key, list);
     }
     return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
-  }, [result]);
+  }, [result, search]);
 
-  const selectedWindows = (result?.windows ?? []).filter((w) => selected.has(w.hwnd));
+  const selectedWindows = useMemo(
+    () => (result?.windows ?? []).filter((w) => selected.has(w.hwnd)),
+    [result, selected],
+  );
+
+  const uncertainCount = useMemo(
+    () => selectedWindows.filter((w) => !w.processPath).length,
+    [selectedWindows],
+  );
 
   const toggle = (hwnd: number) => {
     setSelected((prev) => {
@@ -97,254 +187,291 @@ export function CapturePage() {
     });
   };
 
+  const toggleGroup = (wins: WindowInfo[]) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const all = wins.every((w) => next.has(w.hwnd));
+      for (const w of wins) {
+        if (all) next.delete(w.hwnd);
+        else next.add(w.hwnd);
+      }
+      return next;
+    });
+  };
+
+  const hasExisting = (workspaces.data ?? []).length > 0;
+
   return (
-    <div className="mx-auto flex max-w-[1100px] flex-col gap-5">
-      <StepBar current={step} />
+    <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
+      {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
 
-      {error ? <ErrorNote message={error} /> : null}
-
-      {step === 1 ? (
-        <Card className="flex flex-col items-center gap-4 py-14 text-center">
-          {scan.isPending ? (
-            <>
-              <ScanLine size={26} className="animate-pulse text-accent" />
-              <p className="text-card font-medium">正在枚举窗口、进程与显示器…</p>
-              <p className="text-aux text-ink-3">只读取窗口元数据，不读取文件内容、不截屏</p>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  scan.reset();
-                  navigate("/");
-                }}
-              >
-                取消
-              </Button>
-            </>
-          ) : (
-            <>
-              <ScanLine size={26} className="text-ink-3" />
-              <p className="text-card font-medium">扫描未完成</p>
-              <Button variant="primary" onClick={() => scan.mutate()}>
-                重新扫描
-              </Button>
-            </>
-          )}
+      {scan.isPending && !result ? (
+        <Card className="flex flex-col items-center gap-3 py-14 text-center">
+          <ScanLine size={24} className="animate-pulse text-accent" />
+          <p className="text-card font-semibold text-ink">正在扫描你当前打开的窗口…</p>
+          <p className="text-aux text-ink-3">仅记录窗口位置和软件名称，不截屏、不读密码</p>
         </Card>
-      ) : null}
-
-      {step === 2 && result ? (
-        <>
-          <Card padded={false} className="overflow-hidden">
-            <div className="flex items-center justify-between border-b border-line px-5 py-3">
-              <div className="flex items-center gap-3">
-                <p className="text-body font-medium">选择要保存的窗口</p>
-                <Badge tone="accent">{selected.size} / {result.windows.length}</Badge>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setSelected(new Set(result.windows.map((w) => w.hwnd)))}
-                >
-                  全选
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
-                  清空
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => scan.mutate()}>
-                  重新扫描
-                </Button>
-              </div>
-            </div>
-
-            <div className="max-h-[380px] overflow-y-auto">
-              {groups.map(([app, wins]) => (
-                <div key={app} className="border-b border-line/60 last:border-0">
-                  <div className="flex items-center justify-between bg-surface/60 px-5 py-2">
-                    <span className="text-aux font-medium text-ink-2">{app}</span>
-                    <span className="text-[11px] text-ink-3">{wins.length} 个窗口</span>
-                  </div>
-                  <ul>
-                    {wins.map((w) => {
-                      const on = selected.has(w.hwnd);
-                      return (
-                        <li key={w.hwnd}>
-                          <button
-                            onClick={() => toggle(w.hwnd)}
-                            className="flex w-full items-center gap-3 px-5 py-2 text-left hover:bg-raised/50"
-                          >
-                            <span
-                              className={`grid size-4 shrink-0 place-items-center rounded-sm border ${
-                                on
-                                  ? "border-accent bg-accent text-accent-ink"
-                                  : "border-line-strong"
-                              }`}
-                              aria-hidden
-                            >
-                              {on ? <Check size={11} strokeWidth={3} /> : null}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-body">
-                                {w.title || "（无标题窗口）"}
-                              </span>
-                              <span className="mt-0.5 block font-mono text-[11px] text-ink-3">
-                                {w.width}×{w.height} · {w.className} · PID {w.processId}
-                                {w.dpi !== 96 ? ` · ${Math.round((w.dpi / 96) * 100)}%` : ""}
-                              </span>
-                            </span>
-                            {w.isMaximized ? <Badge>最大化</Badge> : null}
-                            {w.isMinimized ? <Badge>最小化</Badge> : null}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          {result.excluded.length > 0 ? (
-            <Card padded={false}>
-              <button
-                onClick={() => setShowExcluded((v) => !v)}
-                className="flex w-full items-center justify-between px-5 py-3 text-left"
-              >
-                <span className="flex items-center gap-2 text-aux text-ink-2">
-                  <ShieldCheck size={14} className="text-ink-3" />
-                  已自动排除 {result.excluded.length} 个系统/工具窗口
-                </span>
-                <ChevronDown
-                  size={14}
-                  className={`text-ink-3 transition-transform ${showExcluded ? "rotate-180" : ""}`}
-                />
-              </button>
-              {showExcluded ? (
-                <ul className="max-h-44 overflow-y-auto border-t border-line px-5 py-2">
-                  {result.excluded.map((e, i) => (
-                    <li key={`${e.className}-${i}`} className="flex gap-3 py-1 text-[11px]">
-                      <span className="w-40 shrink-0 truncate font-mono text-ink-3">
-                        {e.className}
-                      </span>
-                      <span className="w-32 shrink-0 truncate text-ink-3">{e.processName}</span>
-                      <span className="w-48 shrink-0 truncate text-ink-2">{e.title}</span>
-                      <span className="text-warning">{e.reason}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </Card>
-          ) : null}
-
-          <Card>
-            <div className="mb-2 flex items-center gap-2 text-aux text-ink-3">
-              <MonitorSmartphone size={14} /> 布局预览（{selectedWindows.length} 个窗口）
-            </div>
-            <MonitorCanvas displays={result.displays} windows={selectedWindows} height={200} />
-          </Card>
-
-          <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={() => navigate("/")}>
-              <ArrowLeft size={15} /> 取消
-            </Button>
-            <Button
-              variant="primary"
-              disabled={selected.size === 0}
-              onClick={() => setStep(3)}
-            >
-              下一步：保存
-            </Button>
-          </div>
-        </>
-      ) : null}
-
-      {step === 3 && result ? (
-        <>
-          <Card className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-aux text-ink-2">工作空间名称</span>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                maxLength={80}
-                className="h-9 rounded-md border border-line-strong bg-canvas px-3 text-body outline-none focus:border-accent"
-                placeholder="例如：前端开发"
-              />
-            </label>
-
-            <dl className="grid grid-cols-3 gap-3 border-t border-line pt-4 text-aux">
-              <div>
-                <dt className="text-ink-3">窗口</dt>
-                <dd className="tabnum mt-0.5 text-card text-ink">{selected.size}</dd>
-              </div>
-              <div>
-                <dt className="text-ink-3">显示器</dt>
-                <dd className="tabnum mt-0.5 text-card text-ink">{result.displays.length}</dd>
-              </div>
-              <div>
-                <dt className="text-ink-3">识别不确定项</dt>
-                <dd className="tabnum mt-0.5 text-card text-ink">
-                  {result.windows.filter((w) => !w.processPath).length}
-                </dd>
-              </div>
-            </dl>
-
-            <div className="rounded-md border border-line bg-canvas/60 px-3 py-2 text-[11px] leading-relaxed text-ink-3">
-              保存的内容可能包含应用名称、窗口标题、项目路径与显示器配置。
-              本产品不读取密码、Cookie、键盘输入，也不会截图或上传任何数据；
-              快照默认保存在本机的 {`%LOCALAPPDATA%\\WorkScene\\snapshots`}。
-            </div>
-          </Card>
-
-          {save.isError ? <ErrorNote message={String(save.error.message)} /> : null}
-
-          <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={() => setStep(2)}>
-              <ArrowLeft size={15} /> 返回选择
-            </Button>
-            <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? <Spinner /> : <Check size={15} />}
-              保存为工作空间
-            </Button>
-          </div>
-        </>
-      ) : null}
-
-      {step === 2 && result && result.windows.length === 0 ? (
+      ) : result && result.windows.length === 0 ? (
         <EmptyState
-          title="当前没有可保存的窗口"
-          description="请先打开需要记录的应用，再点击「重新扫描」。"
-          action={<Button onClick={() => scan.mutate()}>重新扫描</Button>}
+          title="没有发现可记录的窗口"
+          description="请先打开需要保存的软件窗口，再点击重新扫描。"
+          action={
+            <Button variant="primary" onClick={() => scan.mutate()}>
+              <RefreshCw size={13} /> 重新扫描
+            </Button>
+          }
         />
+      ) : result ? (
+        <div className="grid gap-3.5 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+          {/* 左列：勾选要记住的窗口 */}
+          <Card padded={false} className="flex min-w-0 flex-col overflow-hidden">
+            <div className="flex flex-wrap items-center gap-2 border-b border-line px-3.5 py-2.5">
+              <SearchInput
+                value={search}
+                onChange={setSearch}
+                placeholder="筛选软件或窗口标题…"
+                className="flex-1"
+              />
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => setSelected(new Set(result.windows.map((w) => w.hwnd)))}
+              >
+                全选
+              </Button>
+              <Button size="xs" variant="ghost" onClick={() => setSelected(new Set())}>
+                清空
+              </Button>
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={scan.isPending}
+                onClick={() => scan.mutate()}
+                title="重新扫描当前桌面"
+              >
+                <RefreshCw size={12} className={scan.isPending ? "animate-spin" : ""} />
+              </Button>
+            </div>
+
+            <div className="max-h-[430px] flex-1 overflow-y-auto">
+              {groups.map(([app, wins]) => {
+                const checked = wins.filter((w) => selected.has(w.hwnd)).length;
+                const all = checked === wins.length;
+                const some = checked > 0 && !all;
+                return (
+                  <div key={app} className="border-b border-line last:border-0">
+                    <button
+                      type="button"
+                      onClick={() => toggleGroup(wins)}
+                      className="flex w-full cursor-pointer items-center justify-between bg-canvas/55 px-3.5 py-2 text-left"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={`grid size-4 place-items-center rounded-[4px] border ${
+                            all || some
+                              ? "border-accent bg-accent text-white"
+                              : "border-line-strong"
+                          }`}
+                        >
+                          {all ? (
+                            <Check size={10} strokeWidth={3} />
+                          ) : some ? (
+                            <Minus size={10} strokeWidth={3} />
+                          ) : null}
+                        </span>
+                        <span className="text-aux font-semibold text-ink">{app}</span>
+                      </span>
+                      <span className="tabnum text-[11px] text-ink-3">
+                        已选 {checked}/{wins.length}
+                      </span>
+                    </button>
+                    <ul className="divide-y divide-line/60">
+                      {wins.map((w) => {
+                        const on = selected.has(w.hwnd);
+                        return (
+                          <li key={w.hwnd}>
+                            <button
+                              type="button"
+                              title={`${w.processName} · ${w.width}×${w.height}`}
+                              onMouseEnter={() => setHighlightedHwnd(w.hwnd)}
+                              onMouseLeave={() =>
+                                setHighlightedHwnd((c) => (c === w.hwnd ? null : c))
+                              }
+                              onClick={() => toggle(w.hwnd)}
+                              className={`flex w-full cursor-pointer items-center gap-2.5 px-3.5 py-2 pl-7 text-left transition-colors ${
+                                highlightedHwnd === w.hwnd
+                                  ? "bg-accent/10"
+                                  : "hover:bg-raised/45"
+                              }`}
+                            >
+                              <span
+                                className={`grid size-4 shrink-0 place-items-center rounded-[4px] border ${
+                                  on
+                                    ? "border-accent bg-accent text-white"
+                                    : "border-line-strong"
+                                }`}
+                              >
+                                {on ? <Check size={10} strokeWidth={3} /> : null}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-body text-ink">
+                                {w.title || `${app} 窗口`}
+                              </span>
+                              {!w.processPath ? <Badge tone="warning">权限受限</Badge> : null}
+                              {w.isMaximized ? <Badge tone="accent">最大化</Badge> : null}
+                              {w.isMinimized ? <Badge tone="warning">最小化</Badge> : null}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+
+            {result.excluded.length > 0 ? (
+              <div className="border-t border-line bg-canvas/45">
+                <button
+                  type="button"
+                  onClick={() => setShowExcluded((v) => !v)}
+                  className="flex w-full cursor-pointer items-center justify-between px-3.5 py-2 text-[11px] text-ink-3 hover:text-ink-2"
+                >
+                  <span>已自动跳过 {result.excluded.length} 个系统后台窗口</span>
+                  <ChevronDown
+                    size={13}
+                    className={`transition-transform ${showExcluded ? "rotate-180" : ""}`}
+                  />
+                </button>
+                {showExcluded ? (
+                  <ul className="max-h-28 overflow-y-auto border-t border-line px-3.5 py-1.5 text-[11px]">
+                    {result.excluded.slice(0, 25).map((e, i) => (
+                      <li key={i} className="flex justify-between gap-2 py-0.5 text-ink-3">
+                        <span className="truncate font-mono">
+                          {e.processName || e.className}
+                        </span>
+                        <span className="shrink-0 text-warning">{e.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+          </Card>
+
+          {/* 右列：保存方式（新建 or 覆盖更新已有）+ 实时布局预览 */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              save.mutate();
+            }}
+            className="flex min-w-0 flex-col gap-3.5"
+          >
+            <Card className="flex flex-col gap-3">
+              {hasExisting ? (
+                <div className="grid grid-cols-2 rounded-[8px] bg-raised/70 p-0.5 text-aux">
+                  <button
+                    type="button"
+                    onClick={() => setSaveMode("new")}
+                    className={`h-7 cursor-pointer rounded-[6px] font-medium transition-all ${
+                      saveMode === "new" ? "apple-segment-active" : "text-ink-3"
+                    }`}
+                  >
+                    存为新工作空间
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSaveMode("update")}
+                    className={`h-7 cursor-pointer rounded-[6px] font-medium transition-all ${
+                      saveMode === "update" ? "apple-segment-active" : "text-ink-3"
+                    }`}
+                  >
+                    更新已有工作空间
+                  </button>
+                </div>
+              ) : null}
+
+              {saveMode === "new" ? (
+                <label className="flex flex-col gap-1">
+                  <span className="text-aux font-medium text-ink">给这个桌面方案起个名字</span>
+                  <input
+                    autoFocus
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    maxLength={80}
+                    placeholder="例如：日常办公、写代码、看论文"
+                    className="h-9 rounded-[8px] border border-line-strong/80 bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
+                  />
+                </label>
+              ) : (
+                <label className="flex flex-col gap-1">
+                  <span className="text-aux font-medium text-ink">选择要更新的工作空间</span>
+                  <select
+                    value={targetWsId}
+                    onChange={(e) => setTargetWsId(e.target.value)}
+                    className="h-9 rounded-[8px] border border-line-strong/80 bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
+                  >
+                    {(workspaces.data ?? []).map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}（当前 {w.windowCount} 窗口）
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[11px] text-ink-3">
+                    会自动保留你添加的文件与网址，更新前还会自动备份旧版本。
+                  </span>
+                </label>
+              )}
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between text-[11px] text-ink-3">
+                  <span>窗口摆法预览</span>
+                  <span className="tabnum">
+                    已选 {selectedWindows.length} 窗口 · {result.displays.length} 屏 · 耗时{" "}
+                    {result.durationMs} ms
+                  </span>
+                </div>
+                <MonitorCanvas
+                  displays={result.displays}
+                  windows={selectedWindows}
+                  height={190}
+                  selectedHwnd={highlightedHwnd}
+                  onSelectWindow={(w) => setHighlightedHwnd(w.hwnd)}
+                />
+              </div>
+
+              {uncertainCount > 0 ? (
+                <div className="flex items-start gap-2 rounded-[9px] border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                  <span>
+                    有 {uncertainCount} 个窗口受系统权限限制，恢复时如果未打开可能无法自动启动。
+                  </span>
+                </div>
+              ) : null}
+
+              <div className="flex items-start gap-2 rounded-[9px] bg-canvas/70 px-3 py-2 text-[11px] text-ink-3">
+                <ShieldCheck size={13} className="mt-0.5 shrink-0 text-success" />
+                <span>数据全部保存在你自己的电脑里，不截屏、不读密码、不上传。</span>
+              </div>
+
+              <Button
+                type="submit"
+                variant="primary"
+                className="w-full"
+                disabled={
+                  save.isPending ||
+                  selectedWindows.length === 0 ||
+                  (saveMode === "new" ? name.trim() === "" : !targetWsId)
+                }
+              >
+                {save.isPending ? <Spinner /> : <Check size={14} />}
+                {saveMode === "update"
+                  ? `更新所选工作空间 (${selectedWindows.length} 窗口)`
+                  : `保存为工作空间 (${selectedWindows.length} 窗口)`}
+              </Button>
+            </Card>
+          </form>
+        </div>
       ) : null}
     </div>
-  );
-}
-
-function StepBar({ current }: { current: Step }) {
-  return (
-    <ol className="flex items-center gap-3">
-      {STEPS.map((s, i) => {
-        const done = s.id < current;
-        const active = s.id === current;
-        return (
-          <li key={s.id} className="flex items-center gap-3">
-            <span
-              className={`grid size-5 place-items-center rounded-full text-[11px] font-semibold ${
-                active
-                  ? "bg-accent text-accent-ink"
-                  : done
-                    ? "bg-success/20 text-success"
-                    : "bg-raised text-ink-3"
-              }`}
-            >
-              {done ? <Check size={11} strokeWidth={3} /> : s.id}
-            </span>
-            <span className={`text-aux ${active ? "text-ink" : "text-ink-3"}`}>{s.label}</span>
-            {i < STEPS.length - 1 ? <span className="h-px w-8 bg-line" /> : null}
-          </li>
-        );
-      })}
-    </ol>
   );
 }

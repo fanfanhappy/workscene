@@ -25,19 +25,61 @@ pub struct RawWindow {
 }
 
 /// 返回值顺序即 z-order（最上层在前），调用方据此写入 snapshot 的 zOrder。
+/// 仅枚举可见顶层窗口（跳过约 95% 的隐藏后台窗口），大幅降低扫描耗时。
 pub fn enumerate_raw() -> Vec<RawWindow> {
-    let mut out: Vec<RawWindow> = Vec::with_capacity(64);
-    let ptr = &mut out as *mut Vec<RawWindow> as LPARAM;
+    enumerate_visible(None).0
+}
+
+struct EnumContext {
+    out: Vec<RawWindow>,
+    skip_pid: Option<u32>,
+    skipped: usize,
+}
+
+/// 快速枚举可见顶层窗口，返回 `(可见窗口列表, 前置跳过数)`。
+/// - 优先判断 `IsWindowVisible`：跳过海量隐藏系统/后台窗口，避免无谓的 `GetWindowTextW` / `GetWindowPlacement`。
+/// - 若传入 `skip_pid`（正常捕获传自身 PID），直接跳过自身窗口，避免在工作线程对自身 WebView2 窗口触发同步 `WM_GETTEXT`。
+/// - 对非最小化且零尺寸的窗口提前跳过。
+pub fn enumerate_visible(skip_pid: Option<u32>) -> (Vec<RawWindow>, usize) {
+    let mut ctx = EnumContext {
+        out: Vec::with_capacity(48),
+        skip_pid,
+        skipped: 0,
+    };
+    let ptr = &mut ctx as *mut EnumContext as LPARAM;
 
     unsafe {
         EnumWindows(Some(enum_proc), ptr);
     }
 
-    out
+    (ctx.out, ctx.skipped)
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
-    let out = &mut *(lparam as *mut Vec<RawWindow>);
+    let ctx = &mut *(lparam as *mut EnumContext);
+
+    // 1. 绝大多数顶层窗口是不可见的系统/后台消息窗口，第一时间跳过
+    if IsWindowVisible(hwnd) == 0 {
+        ctx.skipped += 1;
+        return TRUE;
+    }
+
+    // 2. 提前拿到 PID：正常捕获时直接跳过 WorkScene 自身窗口，避免对同进程 UI 线程发送 WM_GETTEXT
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    if ctx.skip_pid == Some(pid) {
+        ctx.skipped += 1;
+        return TRUE;
+    }
+
+    // 3. 提前过滤非最小化的零尺寸窗口
+    let mut rect: RECT = std::mem::zeroed();
+    GetWindowRect(hwnd, &mut rect);
+    let iconic = IsIconic(hwnd) != 0;
+    if !iconic && (rect.right <= rect.left || rect.bottom <= rect.top) {
+        ctx.skipped += 1;
+        return TRUE;
+    }
 
     let mut title_buf = [0u16; 512];
     GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
@@ -47,39 +89,27 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
     let class_name = from_wide(&class_buf);
 
-    let mut pid: u32 = 0;
-    GetWindowThreadProcessId(hwnd, &mut pid);
-
-    let mut rect: RECT = std::mem::zeroed();
-    GetWindowRect(hwnd, &mut rect);
-
     let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
     wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
     let placement_ok = GetWindowPlacement(hwnd, &mut wp) != 0;
 
-    let show_state = if !placement_ok {
-        ShowState::Normal
+    // 优先用 IsIconic / IsZoomed 判定当前真实状态（兼容 SW_MINIMIZE / SW_SHOWMINNOACTIVE 等变体）
+    let show_state = if iconic {
+        ShowState::Minimized
+    } else if IsZoomed(hwnd) != 0 {
+        ShowState::Maximized
+    } else if placement_ok && wp.showCmd == SW_SHOWMAXIMIZED as u32 {
+        ShowState::Maximized
+    } else if placement_ok && wp.showCmd == SW_SHOWMINIMIZED as u32 {
+        ShowState::Minimized
     } else {
-        let cmd = wp.showCmd;
-        if cmd == SW_SHOWMAXIMIZED as u32 {
-            ShowState::Maximized
-        } else if cmd == SW_SHOWMINIMIZED as u32 {
-            ShowState::Minimized
-        } else if cmd == SW_SHOWNORMAL as u32 {
-            ShowState::Normal
-        } else if IsZoomed(hwnd) != 0 {
-            ShowState::Maximized
-        } else if IsIconic(hwnd) != 0 {
-            ShowState::Minimized
-        } else {
-            ShowState::Normal
-        }
+        ShowState::Normal
     };
 
     let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     let owner = GetWindow(hwnd, GW_OWNER);
 
-    out.push(RawWindow {
+    ctx.out.push(RawWindow {
         hwnd,
         pid,
         title,
@@ -87,7 +117,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         rect,
         restored_rect: if placement_ok { wp.rcNormalPosition } else { rect },
         show_state,
-        is_visible: IsWindowVisible(hwnd) != 0,
+        is_visible: true,
         is_tool_window: ex_style & WS_EX_TOOLWINDOW != 0,
         has_owner: !owner.is_null(),
     });

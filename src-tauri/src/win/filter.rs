@@ -1,4 +1,5 @@
 use super::window::RawWindow;
+use crate::core::models::ShowState;
 
 /// 系统 Shell / 系统 UI 窗口类名：这些不是用户的「工作窗口」。
 /// 文档 §3.2 要求「过滤系统窗口并标记不确定项」，规则集中在此处便于调整。
@@ -35,8 +36,16 @@ pub fn exclude_reason(w: &RawWindow, self_process_id: u32, allow_self_window: bo
         return Some("不可见窗口".into());
     }
 
-    let width = w.rect.right - w.rect.left;
-    let height = w.rect.bottom - w.rect.top;
+    // 最小化窗口的 GetWindowRect 会变成 (-32000,-32000) 尺寸约 160x28，
+    // 必须使用 WINDOWPLACEMENT.rcNormalPosition 判定真实尺寸，否则所有最小化的浏览器/软件都会被误杀
+    let effective = if w.show_state == ShowState::Minimized {
+        w.restored_rect
+    } else {
+        w.rect
+    };
+
+    let width = effective.right - effective.left;
+    let height = effective.bottom - effective.top;
 
     if width <= 0 || height <= 0 {
         return Some("零尺寸窗口".into());
@@ -129,5 +138,27 @@ mod tests {
         assert!(exclude_reason(&w, 7, false).is_some());
         assert!(exclude_reason(&w, 7, true).is_none(), "自检模式应允许同进程测试窗口");
         assert!(exclude_reason(&win("SomeClass", "tip", 60, 40), 7, false).is_some());
+    }
+
+    #[test]
+    fn keeps_minimized_browser_window() {
+        let mut w = win("Chrome_WidgetWin_1", "Google Chrome", 160, 28);
+        w.rect = RECT {
+            left: -32000,
+            top: -32000,
+            right: -31840,
+            bottom: -31972,
+        };
+        w.restored_rect = RECT {
+            left: 100,
+            top: 80,
+            right: 1500,
+            bottom: 980,
+        };
+        w.show_state = ShowState::Minimized;
+        assert!(
+            exclude_reason(&w, 7, false).is_none(),
+            "最小化浏览器窗口应按 rcNormalPosition 判定并被正常捕获"
+        );
     }
 }

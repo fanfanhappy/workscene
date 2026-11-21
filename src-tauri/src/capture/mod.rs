@@ -4,6 +4,37 @@ use crate::core::models::{
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
 use crate::win::{display, dpi, filter, process, window};
+use std::collections::HashMap;
+
+/// 仅枚举显示器拓扑，不扫描窗口与进程（毫秒级返回）。
+pub fn displays() -> AppResult<Vec<DisplayInfo>> {
+    let monitors = display::enumerate();
+    if monitors.is_empty() {
+        return Err(AppError::msg("未检测到显示器"));
+    }
+    Ok(monitors_to_info(&monitors))
+}
+
+fn monitors_to_info(monitors: &[display::RawMonitor]) -> Vec<DisplayInfo> {
+    monitors
+        .iter()
+        .map(|m| DisplayInfo {
+            monitor_key: m.key.clone(),
+            device_name: m.device_name.clone(),
+            x: m.rect.left,
+            y: m.rect.top,
+            width: m.rect.right - m.rect.left,
+            height: m.rect.bottom - m.rect.top,
+            work_x: m.work.left,
+            work_y: m.work.top,
+            work_width: m.work.right - m.work.left,
+            work_height: m.work.bottom - m.work.top,
+            dpi: m.dpi,
+            scale_factor: display::scale_factor(m.dpi),
+            is_primary: m.is_primary,
+        })
+        .collect()
+}
 
 /// 扫描当前桌面：显示器 + 可捕获窗口 + 排除项诊断。
 /// 纯采集，不写入任何存储；用户确认后才保存为快照（文档 §3.2）。
@@ -25,46 +56,38 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         return Err(AppError::msg("未检测到显示器，无法捕获桌面"));
     }
 
-    let displays: Vec<DisplayInfo> = monitors
-        .iter()
-        .map(|m| DisplayInfo {
-            monitor_key: m.key.clone(),
-            device_name: m.device_name.clone(),
-            x: m.rect.left,
-            y: m.rect.top,
-            width: m.rect.right - m.rect.left,
-            height: m.rect.bottom - m.rect.top,
-            work_x: m.work.left,
-            work_y: m.work.top,
-            work_width: m.work.right - m.work.left,
-            work_height: m.work.bottom - m.work.top,
-            dpi: m.dpi,
-            scale_factor: display::scale_factor(m.dpi),
-            is_primary: m.is_primary,
-        })
-        .collect();
+    let displays = monitors_to_info(&monitors);
 
-    let mut windows: Vec<WindowInfo> = Vec::with_capacity(48);
-    let mut excluded: Vec<ExcludedWindow> = Vec::with_capacity(64);
-    let mut excluded_total = 0usize;
+    let (raw_windows, fast_skipped) =
+        window::enumerate_visible(if allow_self_window { None } else { Some(self_pid) });
+
+    let mut windows: Vec<WindowInfo> = Vec::with_capacity(raw_windows.len());
+    let mut excluded: Vec<ExcludedWindow> = Vec::with_capacity(24);
+    let mut excluded_total = fast_skipped;
     let mut protected_processes = 0usize;
+    let mut pid_cache: HashMap<u32, process::ProcessInfo> = HashMap::with_capacity(32);
 
-    for raw in window::enumerate_raw() {
-        let pinfo = process::info(raw.pid);
-
+    for raw in raw_windows {
         if let Some(reason) = filter::exclude_reason(&raw, self_pid, allow_self_window) {
             excluded_total += 1;
-            // 只保留有标题的排除项，避免把上百个不可见窗口塞给用户
+            // 只保留有标题的可见排除项，且复用 PID 缓存避免重复 OpenProcess
             if excluded.len() < 120 && !raw.title.trim().is_empty() {
+                let pinfo = pid_cache
+                    .entry(raw.pid)
+                    .or_insert_with(|| process::info(raw.pid));
                 excluded.push(ExcludedWindow {
-                    title: raw.title.clone(),
-                    class_name: raw.class_name.clone(),
+                    title: raw.title,
+                    class_name: raw.class_name,
                     process_name: pinfo.name.clone(),
                     reason,
                 });
             }
             continue;
         }
+
+        let pinfo = pid_cache
+            .entry(raw.pid)
+            .or_insert_with(|| process::info(raw.pid));
 
         // 最小化窗口的 GetWindowRect 不可用，必须用 rcNormalPosition（评审 R2-4）
         let effective = if raw.show_state == ShowState::Minimized {
@@ -83,8 +106,8 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         windows.push(WindowInfo {
             hwnd: raw.hwnd as usize,
             process_id: raw.pid,
-            process_path: pinfo.path,
-            process_name: pinfo.name,
+            process_path: pinfo.path.clone(),
+            process_name: pinfo.name.clone(),
             process_started_at: pinfo.started_at,
             title: raw.title,
             class_name: raw.class_name,

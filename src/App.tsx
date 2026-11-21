@@ -1,9 +1,9 @@
-import { HashRouter, Outlet, Route, Routes } from "react-router-dom";
+import { HashRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { OverviewPage } from "@/pages/Overview";
+import { WorkspacesPage } from "@/pages/Workspaces";
 import { CapturePage } from "@/pages/Capture";
 import { RestorePage } from "@/pages/Restore";
-import { WorkspacesPage } from "@/pages/Workspaces";
 import { HistoryPage } from "@/pages/History";
 import { SettingsPage } from "@/pages/Settings";
 
@@ -26,6 +26,7 @@ export default function App() {
           <Route path="/restore" element={<RestorePage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </HashRouter>

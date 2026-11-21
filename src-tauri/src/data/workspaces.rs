@@ -537,7 +537,97 @@ pub async fn update_item(
     Ok(())
 }
 
-/// 布局编辑：一次提交多个窗口的新比例坐标（整体一个事务）
+/// 重新定位应用可执行路径（软件重装、换盘符或导入他人工作空间后快速修复）
+pub async fn relocate_item(
+    db: &Db,
+    workspace_id: &str,
+    item_id: &str,
+    new_path: &str,
+) -> AppResult<WorkspaceItem> {
+    let trimmed = new_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::msg("程序路径不能为空"));
+    }
+    if !std::path::Path::new(trimmed).is_file() {
+        return Err(AppError::msg(format!("找不到文件：{trimmed}")));
+    }
+
+    let row = sqlx::query(
+        "SELECT i.item_type, i.display_name, i.target_kind, i.enabled,
+                COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
+                c.launch_args_json
+         FROM workspace_items i
+         LEFT JOIN app_configs c ON c.item_id = i.id
+         WHERE i.id = ? AND i.workspace_id = ?",
+    )
+    .bind(item_id)
+    .bind(workspace_id)
+    .fetch_optional(&db.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("应用项不存在或不属于该工作空间"))?;
+
+    let item_type: String = row.get("item_type");
+    if item_type != "application" {
+        return Err(AppError::msg("只能为应用程序重新定位可执行路径"));
+    }
+
+    let new_identity = trimmed.to_lowercase();
+    let conflict: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM workspace_items
+         WHERE workspace_id = ? AND item_type = 'application' AND identity_key = ? AND id <> ?",
+    )
+    .bind(workspace_id)
+    .bind(&new_identity)
+    .bind(item_id)
+    .fetch_optional(&db.pool)
+    .await?;
+    if conflict.is_some() {
+        return Err(AppError::msg("工作空间中已存在指向同一程序的应用项"));
+    }
+
+    let display_name = std::path::Path::new(trimmed)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| row.get("display_name"));
+
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+    sqlx::query(
+        "UPDATE workspace_items
+         SET target = ?, identity_key = ?, display_name = ?, updated_at = ?
+         WHERE id = ? AND workspace_id = ?",
+    )
+    .bind(trimmed)
+    .bind(&new_identity)
+    .bind(&display_name)
+    .bind(now)
+    .bind(item_id)
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(WorkspaceItem {
+        id: item_id.to_string(),
+        item_type,
+        display_name,
+        target: Some(trimmed.to_string()),
+        target_kind: row.get("target_kind"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        reuse_policy: row.get("reuse_policy"),
+        launch_args: row.get("launch_args_json"),
+    })
+}
+
+/// 布局编辑：一次提交多个窗口的新比例坐标，可选同步修改目标显示器与显示状态（整体一个事务）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutUpdate {
@@ -546,6 +636,10 @@ pub struct LayoutUpdate {
     pub y_ratio: f64,
     pub width_ratio: f64,
     pub height_ratio: f64,
+    #[serde(default)]
+    pub monitor_key: Option<String>,
+    #[serde(default)]
+    pub show_state: Option<ShowState>,
 }
 
 /// 最小可编辑尺寸，防止把窗口拖成一条线（与 layout 保持一致）
@@ -582,15 +676,26 @@ pub async fn update_layouts(
 
     for u in updates {
         let (x, y, w, h) = sanitize_layout(u);
+        let state_str = u.show_state.map(state_to_str);
+        let monitor = u
+            .monitor_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
         let affected = sqlx::query(
             "UPDATE window_layouts
-             SET x_ratio = ?, y_ratio = ?, width_ratio = ?, height_ratio = ?
+             SET x_ratio = ?, y_ratio = ?, width_ratio = ?, height_ratio = ?,
+                 monitor_key = COALESCE(?, monitor_key),
+                 show_state = COALESCE(?, show_state)
              WHERE id = ? AND workspace_id = ?",
         )
         .bind(x)
         .bind(y)
         .bind(w)
         .bind(h)
+        .bind(monitor)
+        .bind(state_str)
         .bind(&u.window_id)
         .bind(workspace_id)
         .execute(&mut *tx)
@@ -785,9 +890,18 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
         })
         .collect();
 
-    let windows = detail
+    let windows: Vec<SceneWindow> = detail
         .windows
         .iter()
+        .filter(|w| {
+            // 仅恢复已启用应用所属的窗口（尊重 workspace_items.enabled）
+            detail
+                .items
+                .iter()
+                .find(|i| i.id == w.item_id)
+                .map(|i| i.enabled)
+                .unwrap_or(true)
+        })
         .map(|w| {
             // 每个窗口带上所属应用的复用策略与启动参数（M3）
             let item = detail.items.iter().find(|i| i.id == w.item_id);
@@ -816,6 +930,10 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
         })
         .collect();
 
+    if windows.is_empty() && resources.is_empty() {
+        return Err(AppError::msg("该工作空间没有已启用的窗口或资源可恢复"));
+    }
+
     Ok(SceneFile {
         schema_version: storage::SCHEMA_VERSION,
         id: detail.id.clone(),
@@ -825,6 +943,890 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
         windows,
         resources,
     })
+}
+
+pub async fn set_favorite(db: &Db, id: &str, is_favorite: bool) -> AppResult<()> {
+    let affected = sqlx::query(
+        "UPDATE workspaces SET is_favorite = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(if is_favorite { 1 } else { 0 })
+    .bind(now_ms())
+    .bind(id)
+    .execute(&db.pool)
+    .await?
+    .rows_affected();
+    if affected == 0 {
+        return Err(AppError::msg(format!("工作空间不存在：{id}")));
+    }
+    Ok(())
+}
+
+pub async fn update_meta(
+    db: &Db,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    auto_snapshot_enabled: bool,
+) -> AppResult<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::msg("名称不能为空"));
+    }
+    let desc = description
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let affected = sqlx::query(
+        "UPDATE workspaces
+         SET name = ?, description = ?, auto_snapshot_enabled = ?, updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(name)
+    .bind(desc)
+    .bind(if auto_snapshot_enabled { 1 } else { 0 })
+    .bind(now_ms())
+    .bind(id)
+    .execute(&db.pool)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::msg(format!("工作空间不存在：{id}")));
+    }
+    Ok(())
+}
+
+/// 进程内唯一 ID 序号，避免同毫秒操作产生主键冲突
+static WS_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_ws_id(now: i64) -> String {
+    format!(
+        "ws-{:x}-{}",
+        now,
+        WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// 复制工作空间：完整克隆工作空间配置、应用项、启动参数、资源清单与窗口布局
+pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<WorkspaceSummary> {
+    let src = get(db, source_id).await?;
+    let name = new_name.trim();
+    let name = if name.is_empty() {
+        format!("{}（副本）", src.name)
+    } else {
+        name.to_string()
+    };
+
+    let now = now_ms();
+    let new_ws_id = next_ws_id(now);
+    let mut tx = db.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO workspaces (id, name, description, color, icon, is_favorite, sort_order,
+            auto_snapshot_enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+    )
+    .bind(&new_ws_id)
+    .bind(&name)
+    .bind(&src.description)
+    .bind(&src.color)
+    .bind(&src.icon)
+    .bind(if src.auto_snapshot_enabled { 1 } else { 0 })
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut id_map: Vec<(String, String)> = Vec::new();
+    let mut app_count = 0i64;
+    let mut res_count = 0i64;
+
+    for (idx, item) in src.items.iter().enumerate() {
+        let new_item_id = format!(
+            "it-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        let identity = if item.item_type == "application" {
+            identity_of(&item.target, &item.display_name)
+        } else {
+            item.target.clone().unwrap_or_default().to_lowercase()
+        };
+
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&new_item_id)
+        .bind(&new_ws_id)
+        .bind(&item.item_type)
+        .bind(&item.display_name)
+        .bind(&identity)
+        .bind(&item.target)
+        .bind(&item.target_kind)
+        .bind(if item.enabled { 1 } else { 0 })
+        .bind(idx as i64)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        if item.item_type == "application" {
+            app_count += 1;
+            sqlx::query(
+                "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+                 VALUES (?, ?, ?, 8000)",
+            )
+            .bind(&new_item_id)
+            .bind(&item.reuse_policy)
+            .bind(&item.launch_args)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            res_count += 1;
+        }
+
+        id_map.push((item.id.clone(), new_item_id));
+    }
+
+    for (idx, w) in src.windows.iter().enumerate() {
+        let Some((_, new_item_id)) = id_map.iter().find(|(old, _)| old == &w.item_id) else {
+            continue;
+        };
+        let new_win_id = format!(
+            "wl-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        sqlx::query(
+            "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
+                x_ratio, y_ratio, width_ratio, height_ratio, source_dpi,
+                show_state, z_order, title, class_name, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&new_win_id)
+        .bind(&new_ws_id)
+        .bind(new_item_id)
+        .bind(&w.monitor_key)
+        .bind(w.x_ratio)
+        .bind(w.y_ratio)
+        .bind(w.width_ratio)
+        .bind(w.height_ratio)
+        .bind(w.source_dpi)
+        .bind(state_to_str(w.show_state))
+        .bind(w.z_order)
+        .bind(&w.title)
+        .bind(&w.class_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    Ok(WorkspaceSummary {
+        id: new_ws_id,
+        name,
+        description: src.description,
+        is_favorite: false,
+        item_count: app_count,
+        resource_count: res_count,
+        window_count: src.windows.len() as i64,
+        created_at: now,
+        updated_at: now,
+        last_restored_at: None,
+    })
+}
+
+/// 可移植的工作空间导出格式（PRD §19 导入导出）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceExport {
+    pub schema_version: u32,
+    pub exported_at: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub auto_snapshot_enabled: bool,
+    pub apps: Vec<ExportApp>,
+    pub resources: Vec<ExportResource>,
+    pub windows: Vec<ExportWindow>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportApp {
+    pub display_name: String,
+    pub target: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_reuse_policy")]
+    pub reuse_policy: String,
+    #[serde(default)]
+    pub launch_args: Option<String>,
+}
+
+fn default_reuse_policy() -> String {
+    "reuse_or_launch".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResource {
+    pub item_type: String,
+    pub display_name: String,
+    pub target: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportWindow {
+    pub app_index: usize,
+    pub title: String,
+    pub class_name: String,
+    pub monitor_key: String,
+    pub x_ratio: f64,
+    pub y_ratio: f64,
+    pub width_ratio: f64,
+    pub height_ratio: f64,
+    #[serde(default)]
+    pub source_dpi: Option<i64>,
+    #[serde(default)]
+    pub show_state: ShowState,
+    #[serde(default)]
+    pub z_order: i64,
+}
+
+pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
+    let detail = get(db, id).await?;
+    let app_items: Vec<&WorkspaceItem> = detail
+        .items
+        .iter()
+        .filter(|i| i.item_type == "application")
+        .collect();
+
+    let apps: Vec<ExportApp> = app_items
+        .iter()
+        .map(|a| ExportApp {
+            display_name: a.display_name.clone(),
+            target: a.target.clone(),
+            enabled: a.enabled,
+            reuse_policy: a.reuse_policy.clone(),
+            launch_args: a.launch_args.clone(),
+        })
+        .collect();
+
+    let resources: Vec<ExportResource> = detail
+        .items
+        .iter()
+        .filter(|i| matches!(i.item_type.as_str(), "file" | "folder" | "url"))
+        .filter_map(|r| {
+            let target = r.target.clone()?;
+            Some(ExportResource {
+                item_type: r.item_type.clone(),
+                display_name: r.display_name.clone(),
+                target,
+                enabled: r.enabled,
+            })
+        })
+        .collect();
+
+    let windows: Vec<ExportWindow> = detail
+        .windows
+        .iter()
+        .filter_map(|w| {
+            let app_index = app_items.iter().position(|a| a.id == w.item_id)?;
+            Some(ExportWindow {
+                app_index,
+                title: w.title.clone(),
+                class_name: w.class_name.clone(),
+                monitor_key: w.monitor_key.clone(),
+                x_ratio: w.x_ratio,
+                y_ratio: w.y_ratio,
+                width_ratio: w.width_ratio,
+                height_ratio: w.height_ratio,
+                source_dpi: w.source_dpi,
+                show_state: w.show_state,
+                z_order: w.z_order,
+            })
+        })
+        .collect();
+
+    let payload = WorkspaceExport {
+        schema_version: 1,
+        exported_at: now_ms(),
+        name: detail.name,
+        description: detail.description,
+        auto_snapshot_enabled: detail.auto_snapshot_enabled,
+        apps,
+        resources,
+        windows,
+    };
+
+    Ok(serde_json::to_string_pretty(&payload)?)
+}
+
+/// 导入时对可执行文件目标的信任评估。
+///
+/// 工作空间 JSON 可能来自外部（同事分享、网盘下载），其中 `target` 与
+/// `launch_args` 都是"要执行的指令"。因此导入必须做三件事：
+/// 1. 不认识的路径不自动启用；
+/// 2. 启动参数默认剥离（用户确认后再手动加）；
+/// 3. 把风险写回工作空间描述，让用户在界面上看得见。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetRisk {
+    Ok,
+    Empty,
+    Missing,
+    /// UNC 路径（\\server\share）——可能指向别人机器上的程序
+    Network,
+}
+
+pub fn classify_target(target: &str) -> TargetRisk {
+    let t = target.trim();
+    if t.is_empty() {
+        return TargetRisk::Empty;
+    }
+    if t.starts_with(r"\\") {
+        return TargetRisk::Network;
+    }
+    let p = std::path::Path::new(t);
+    if !p.is_file() {
+        return TargetRisk::Missing;
+    }
+    TargetRisk::Ok
+}
+
+/// 导入预览（供 UI 展示"这份文件会启动什么"，目前仅后端可用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub name: String,
+    pub app_count: usize,
+    pub resource_count: usize,
+    /// 会因路径不存在/网络位置而被停用的应用
+    pub disabled_apps: Vec<String>,
+    /// 原始文件里带启动参数的应用名（导入时会被剥离）
+    pub apps_with_args: Vec<String>,
+}
+
+pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
+    if raw_json.len() > 2 * 1024 * 1024 {
+        return Err(AppError::msg("导入文件过大（上限 2 MB）"));
+    }
+    let parsed: WorkspaceExport = serde_json::from_str(raw_json)
+        .map_err(|e| AppError::msg(format!("无效的工作空间 JSON 文件：{e}")))?;
+
+    let disabled_apps = parsed
+        .apps
+        .iter()
+        .filter(|a| classify_target(a.target.as_deref().unwrap_or("")) != TargetRisk::Ok)
+        .map(|a| a.display_name.clone())
+        .collect();
+
+    let apps_with_args = parsed
+        .apps
+        .iter()
+        .filter(|a| a.launch_args.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+        .map(|a| a.display_name.clone())
+        .collect();
+
+    Ok(ImportPreview {
+        name: parsed.name.clone(),
+        app_count: parsed.apps.len(),
+        resource_count: parsed.resources.len(),
+        disabled_apps,
+        apps_with_args,
+    })
+}
+
+pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary> {
+    if raw_json.len() > 2 * 1024 * 1024 {
+        return Err(AppError::msg("导入文件过大（上限 2 MB）"));
+    }
+    let parsed: WorkspaceExport = serde_json::from_str(raw_json)
+        .map_err(|e| AppError::msg(format!("无效的工作空间 JSON 文件：{e}")))?;
+
+    if parsed.schema_version == 0 || parsed.schema_version > 1 {
+        return Err(AppError::msg(format!(
+            "不支持的工作空间导入版本（schemaVersion = {}）",
+            parsed.schema_version
+        )));
+    }
+    let name = parsed.name.trim();
+    if name.is_empty() {
+        return Err(AppError::msg("导入文件中的工作空间名称不能为空"));
+    }
+    if parsed.apps.is_empty() && parsed.resources.is_empty() {
+        return Err(AppError::msg("导入文件不包含任何应用或资源"));
+    }
+
+    let now = now_ms();
+    let ws_id = next_ws_id(now);
+    let mut tx = db.pool.begin().await?;
+
+    // 先把每个应用的信任状态算出来，才能把风险写进工作空间描述
+    let app_risks: Vec<TargetRisk> = parsed
+        .apps
+        .iter()
+        .map(|a| classify_target(a.target.as_deref().unwrap_or("")))
+        .collect();
+    let mut disabled_apps: Vec<String> = Vec::new();
+    let mut stripped_args = 0usize;
+    for (app, risk) in parsed.apps.iter().zip(app_risks.iter()) {
+        if *risk != TargetRisk::Ok {
+            disabled_apps.push(app.display_name.clone());
+        }
+        if app
+            .launch_args
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            stripped_args += 1;
+        }
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if !disabled_apps.is_empty() {
+        notes.push(format!(
+            "{} 个应用的路径不存在或位于网络位置，已停用：{}",
+            disabled_apps.len(),
+            disabled_apps.join("、")
+        ));
+    }
+    if stripped_args > 0 {
+        notes.push(format!(
+            "{stripped_args} 个应用的启动参数已在导入时剥离，需要时请手动重新填写"
+        ));
+    }
+    let description = match notes.is_empty() {
+        true => parsed
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        false => {
+            let base = parsed
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{s}\n\n"))
+                .unwrap_or_default();
+            Some(format!("{base}[导入提示] {}", notes.join("；")))
+        }
+    };
+
+    sqlx::query(
+        "INSERT INTO workspaces (id, name, description, is_favorite, sort_order,
+            auto_snapshot_enabled, created_at, updated_at)
+         VALUES (?, ?, ?, 0, 0, ?, ?, ?)",
+    )
+    .bind(&ws_id)
+    .bind(name)
+    .bind(description.as_deref())
+    .bind(if parsed.auto_snapshot_enabled { 1 } else { 0 })
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut app_ids: Vec<String> = Vec::with_capacity(parsed.apps.len());
+    let mut seen_app_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut app_count = 0i64;
+
+    for (idx, app) in parsed.apps.iter().enumerate() {
+        let display = app.display_name.trim();
+        let display = if display.is_empty() { "未命名应用" } else { display };
+        let identity = identity_of(&app.target, display);
+        if !seen_app_keys.insert(identity.clone()) {
+            // 重复应用项合并映射到已创建项
+            let existing_pos = parsed
+                .apps
+                .iter()
+                .take(idx)
+                .position(|a| {
+                    let d = a.display_name.trim();
+                    let d = if d.is_empty() { "未命名应用" } else { d };
+                    identity_of(&a.target, d) == identity
+                })
+                .unwrap_or(0);
+            app_ids.push(app_ids[existing_pos].clone());
+            continue;
+        }
+
+        let item_id = format!(
+            "it-{:x}-{}-a{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        let policy = match app.reuse_policy.as_str() {
+            "reuse_if_matched" | "always_launch" | "reuse_or_launch" => app.reuse_policy.as_str(),
+            _ => "reuse_or_launch",
+        };
+
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', ?, ?, ?, ?)",
+        )
+        .bind(&item_id)
+        .bind(&ws_id)
+        .bind(display)
+        .bind(&identity)
+        .bind(&app.target)
+        // 路径不可信的应用一律停用：用户确认后再手动启用
+        .bind(if app.enabled && app_risks[idx] == TargetRisk::Ok {
+            1
+        } else {
+            0
+        })
+        .bind(app_count)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+             VALUES (?, ?, NULL, 8000)",
+        )
+        .bind(&item_id)
+        .bind(policy)
+        .execute(&mut *tx)
+        .await?;
+
+        app_ids.push(item_id);
+        app_count += 1;
+    }
+
+    let mut res_count = 0i64;
+    let mut seen_res: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (idx, r) in parsed.resources.iter().enumerate() {
+        if !matches!(r.item_type.as_str(), "file" | "folder" | "url") {
+            return Err(AppError::msg(format!("导入文件包含不支持的资源类型：{}", r.item_type)));
+        }
+        let target = r.target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        if r.item_type == "url"
+            && !(target.starts_with("http://") || target.starts_with("https://"))
+        {
+            return Err(AppError::msg(format!("导入文件中的网址不合法：{target}")));
+        }
+        let key = (r.item_type.clone(), target.to_lowercase());
+        if !seen_res.insert(key) {
+            continue;
+        }
+
+        let item_id = format!(
+            "it-{:x}-{}-r{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        let display = if r.display_name.trim().is_empty() {
+            default_display_name(&r.item_type, target)
+        } else {
+            r.display_name.trim().to_string()
+        };
+
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&item_id)
+        .bind(&ws_id)
+        .bind(&r.item_type)
+        .bind(&display)
+        .bind(target.to_lowercase())
+        .bind(target)
+        .bind(&r.item_type)
+        .bind(if r.enabled { 1 } else { 0 })
+        .bind(app_count + res_count)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        res_count += 1;
+    }
+
+    let mut win_count = 0i64;
+    for (idx, w) in parsed.windows.iter().enumerate() {
+        let Some(item_id) = app_ids.get(w.app_index) else {
+            continue;
+        };
+        let (xr, yr, wr, hr) = sanitize_layout(&LayoutUpdate {
+            window_id: String::new(),
+            x_ratio: w.x_ratio,
+            y_ratio: w.y_ratio,
+            width_ratio: w.width_ratio,
+            height_ratio: w.height_ratio,
+            monitor_key: None,
+            show_state: None,
+        });
+        let win_id = format!(
+            "wl-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        sqlx::query(
+            "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
+                x_ratio, y_ratio, width_ratio, height_ratio, source_dpi,
+                show_state, z_order, title, class_name, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&win_id)
+        .bind(&ws_id)
+        .bind(item_id)
+        .bind(&w.monitor_key)
+        .bind(xr)
+        .bind(yr)
+        .bind(wr)
+        .bind(hr)
+        .bind(w.source_dpi)
+        .bind(state_to_str(w.show_state))
+        .bind(w.z_order)
+        .bind(&w.title)
+        .bind(&w.class_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        win_count += 1;
+    }
+
+    tx.commit().await?;
+
+    Ok(WorkspaceSummary {
+        id: ws_id,
+        name: name.to_string(),
+        description: parsed.description,
+        is_favorite: false,
+        item_count: app_count,
+        resource_count: res_count,
+        window_count: win_count,
+        created_at: now,
+        updated_at: now,
+        last_restored_at: None,
+    })
+}
+
+/// 重新捕获当前桌面并更新该工作空间的应用清单与窗口布局：
+/// 1. 覆盖前先为旧配置创建受保护快照（UI 规范 §16.3）；
+/// 2. 保留已有资源（文件/文件夹/网址）及同名应用的复用策略与启动参数；
+/// 3. 写入新窗口布局并追加一份手动快照。
+pub async fn recapture(
+    db: &Db,
+    workspace_id: &str,
+    capture: &CaptureResult,
+) -> AppResult<WorkspaceDetail> {
+    if capture.windows.is_empty() {
+        return Err(AppError::msg("当前没有可捕获的桌面窗口，未修改工作空间"));
+    }
+
+    let prev = get(db, workspace_id).await?;
+
+    // 保留已有应用的复用策略与启动参数（按 identity_key 匹配）
+    let mut prev_configs: std::collections::HashMap<String, (String, Option<String>, bool)> =
+        std::collections::HashMap::new();
+    for it in prev.items.iter().filter(|i| i.item_type == "application") {
+        let key = identity_of(&it.target, &it.display_name);
+        prev_configs.insert(
+            key,
+            (it.reuse_policy.clone(), it.launch_args.clone(), it.enabled),
+        );
+    }
+
+    // 覆盖前先生成一份受保护快照，避免配置丢失
+    if let Ok(prev_scene) = to_scene(db, workspace_id).await {
+        if let Ok(saved) = storage::save_scene_file("重新捕获前保护", prev_scene) {
+            let _ = sqlx::query(
+                "INSERT INTO snapshots (id, workspace_id, name, snapshot_type, trigger_type,
+                    captured_at, window_count, display_count, payload_path,
+                    payload_version, is_protected)
+                 VALUES (?, ?, ?, 'protection', 'recapture', ?, ?, ?, ?, 1, 1)",
+            )
+            .bind(&saved.id)
+            .bind(workspace_id)
+            .bind(&saved.name)
+            .bind(saved.captured_at)
+            .bind(saved.window_count as i64)
+            .bind(saved.display_count as i64)
+            .bind(&saved.path)
+            .execute(&db.pool)
+            .await;
+        }
+    }
+
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+
+    // 仅清理应用项与窗口布局，保留用户手动维护的资源（file / folder / url）
+    sqlx::query("DELETE FROM window_layouts WHERE workspace_id = ?")
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM workspace_items WHERE workspace_id = ? AND item_type = 'application'",
+    )
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut item_ids: Vec<(String, String)> = Vec::new();
+    for w in &capture.windows {
+        let identity = identity_of(&w.process_path, &w.process_name);
+        if item_ids.iter().any(|(k, _)| *k == identity) {
+            continue;
+        }
+        let item_id = format!(
+            "it-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            item_ids.len()
+        );
+        let display_name = if w.process_name.is_empty() {
+            w.title.clone()
+        } else {
+            w.process_name.clone()
+        };
+        let (policy, args, enabled) = prev_configs
+            .get(&identity)
+            .cloned()
+            .unwrap_or_else(|| ("reuse_or_launch".to_string(), None, true));
+
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', ?, ?, ?, ?)",
+        )
+        .bind(&item_id)
+        .bind(workspace_id)
+        .bind(&display_name)
+        .bind(&identity)
+        .bind(&w.process_path)
+        .bind(if enabled { 1 } else { 0 })
+        .bind(item_ids.len() as i64)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+             VALUES (?, ?, ?, 8000)",
+        )
+        .bind(&item_id)
+        .bind(&policy)
+        .bind(&args)
+        .execute(&mut *tx)
+        .await?;
+
+        item_ids.push((identity, item_id));
+    }
+
+    for (idx, w) in capture.windows.iter().enumerate() {
+        let identity = identity_of(&w.process_path, &w.process_name);
+        let item_id = item_ids
+            .iter()
+            .find(|(k, _)| *k == identity)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| AppError::msg("内部错误：窗口找不到对应应用项"))?;
+
+        let monitor_key = w.monitor_key.clone().unwrap_or_default();
+        let work = capture
+            .displays
+            .iter()
+            .find(|d| d.monitor_key == monitor_key)
+            .or_else(|| capture.displays.iter().find(|d| d.is_primary))
+            .or_else(|| capture.displays.first());
+
+        let (xr, yr, wr, hr) = match work {
+            Some(d) => crate::restore::layout::normalize_ratios(to_ratios(
+                Area::new(w.x as f64, w.y as f64, w.width as f64, w.height as f64),
+                Area::new(
+                    d.work_x as f64,
+                    d.work_y as f64,
+                    d.work_width as f64,
+                    d.work_height as f64,
+                ),
+            )),
+            None => (0.0, 0.0, 1.0, 1.0),
+        };
+
+        sqlx::query(
+            "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
+                x_ratio, y_ratio, width_ratio, height_ratio,
+                original_x, original_y, original_width, original_height, source_dpi,
+                show_state, z_order, title, class_name, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(format!(
+            "wl-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        ))
+        .bind(workspace_id)
+        .bind(&item_id)
+        .bind(&monitor_key)
+        .bind(xr)
+        .bind(yr)
+        .bind(wr)
+        .bind(hr)
+        .bind(w.x as i64)
+        .bind(w.y as i64)
+        .bind(w.width as i64)
+        .bind(w.height as i64)
+        .bind(w.dpi as i64)
+        .bind(state_to_str(w.show_state))
+        .bind(idx as i64)
+        .bind(&w.title)
+        .bind(&w.class_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    let _ = add_snapshot(
+        db,
+        workspace_id,
+        "重新捕获更新",
+        "manual",
+        "recapture",
+        capture,
+        true,
+    )
+    .await;
+
+    get(db, workspace_id).await
 }
 
 pub async fn mark_restored(db: &Db, id: &str) -> AppResult<()> {
@@ -1009,6 +2011,8 @@ mod tests {
             y_ratio: 1.4,
             width_ratio: 0.02,
             height_ratio: 5.0,
+            monitor_key: None,
+            show_state: None,
         });
         assert_eq!((x, y), (0.0, 1.0 - MIN_RATIO));
         assert!(w >= MIN_RATIO && w <= (1.0 - x) + 1e-9);
@@ -1021,6 +2025,8 @@ mod tests {
             y_ratio: 0.0,
             width_ratio: f64::NAN,
             height_ratio: 0.2,
+            monitor_key: None,
+            show_state: None,
         });
         assert_eq!(x, 0.0);
         assert!(w >= MIN_RATIO);
@@ -1042,6 +2048,8 @@ mod tests {
                 y_ratio: 0.25,
                 width_ratio: 0.5,
                 height_ratio: 0.5,
+                monitor_key: Some("M2".into()),
+                show_state: Some(ShowState::Maximized),
             }],
         )
         .await
@@ -1050,6 +2058,8 @@ mod tests {
         let after = get(&db, &s.id).await.unwrap();
         let updated = after.windows.iter().find(|w| w.id == first.id).unwrap();
         assert!((updated.x_ratio - 0.25).abs() < 1e-9);
+        assert_eq!(updated.monitor_key, "M2");
+        assert_eq!(updated.show_state, ShowState::Maximized);
 
         let err = update_layouts(
             &db,
@@ -1060,10 +2070,120 @@ mod tests {
                 y_ratio: 0.1,
                 width_ratio: 0.2,
                 height_ratio: 0.2,
+                monitor_key: None,
+                show_state: None,
             }],
         )
         .await;
         assert!(err.is_err(), "不属于该工作空间的布局必须被拒绝");
+    }
+
+    #[tokio::test]
+    async fn disabled_application_is_excluded_from_scene() {
+        let db = db().await;
+        let s = create_from_capture(&db, "禁用应用", &capture()).await.unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let first_app = detail
+            .items
+            .iter()
+            .find(|i| i.item_type == "application")
+            .unwrap();
+        let owned = detail
+            .windows
+            .iter()
+            .filter(|w| w.item_id == first_app.id)
+            .count();
+
+        update_item(&db, &first_app.id, "reuse_or_launch", None, false)
+            .await
+            .unwrap();
+
+        let scene = to_scene(&db, &s.id).await.unwrap();
+        assert_eq!(scene.windows.len(), detail.windows.len() - owned);
+    }
+
+    #[tokio::test]
+    async fn favorite_meta_duplicate_and_export_import_roundtrip() {
+        let db = db().await;
+        let s = create_from_capture(&db, "原始空间", &capture()).await.unwrap();
+        add_item(&db, &s.id, "url", "https://example.com", Some("示例"))
+            .await
+            .unwrap();
+
+        set_favorite(&db, &s.id, true).await.unwrap();
+        update_meta(&db, &s.id, "开发主空间", Some("主力开发环境"), false)
+            .await
+            .unwrap();
+
+        let detail = get(&db, &s.id).await.unwrap();
+        assert!(detail.is_favorite);
+        assert_eq!(detail.name, "开发主空间");
+        assert_eq!(detail.description.as_deref(), Some("主力开发环境"));
+        assert!(!detail.auto_snapshot_enabled);
+
+        let dup = duplicate(&db, &s.id, "开发备份").await.unwrap();
+        assert_ne!(dup.id, s.id);
+        assert_eq!(dup.name, "开发备份");
+        assert_eq!(dup.item_count, 2);
+        assert_eq!(dup.resource_count, 1);
+        assert_eq!(dup.window_count, 3);
+
+        let exported = export_json(&db, &s.id).await.unwrap();
+        let imported = import_json(&db, &exported).await.unwrap();
+        assert_ne!(imported.id, s.id);
+        assert_eq!(imported.item_count, 2);
+        assert_eq!(imported.resource_count, 1);
+        assert_eq!(imported.window_count, 3);
+
+        assert!(import_json(&db, "{bad json").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn recapture_preserves_resources_and_creates_protection_snapshot() {
+        let db = db().await;
+        let s = create_from_capture(&db, "重捕测试", &capture()).await.unwrap();
+        add_item(&db, &s.id, "folder", r"D:\Work", None).await.unwrap();
+
+        let mut next_cap = capture();
+        next_cap.windows.truncate(1);
+        let updated = recapture(&db, &s.id, &next_cap).await.unwrap();
+
+        assert_eq!(updated.windows.len(), 1);
+        assert!(
+            updated.items.iter().any(|i| i.item_type == "folder"),
+            "重新捕获必须保留用户添加的资源"
+        );
+        let snaps: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ? AND snapshot_type = 'protection'",
+        )
+        .bind(&s.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(snaps >= 1, "覆盖前必须自动留存保护快照");
+    }
+
+    #[tokio::test]
+    async fn relocate_item_updates_path_and_rejects_missing_file() {
+        let db = db().await;
+        let s = create_from_capture(&db, "重定位", &capture()).await.unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let app = detail
+            .items
+            .iter()
+            .find(|i| i.item_type == "application")
+            .unwrap();
+
+        // 不存在的文件必须拒绝
+        assert!(relocate_item(&db, &s.id, &app.id, r"Z:\nonexistent\foo.exe")
+            .await
+            .is_err());
+
+        // 用真实存在的当前测试可执行文件验证重定位
+        let exe = std::env::current_exe().unwrap();
+        let exe_str = exe.to_string_lossy().to_string();
+        let updated = relocate_item(&db, &s.id, &app.id, &exe_str).await.unwrap();
+        assert_eq!(updated.target.as_deref(), Some(exe_str.as_str()));
     }
 
     #[tokio::test]
@@ -1090,6 +2210,78 @@ mod tests {
         let scene = to_scene(&db, &s.id).await.unwrap();
         assert_eq!(scene.resources.len(), 3);
         assert!(scene.resources.iter().any(|r| r.item_type == "url"));
+    }
+
+    #[tokio::test]
+    async fn import_disables_untrusted_apps_and_strips_launch_args() {
+        let db = db().await;
+        let real_exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "exportedAt": 0,
+            "name": "外部导入",
+            "description": "来自同事",
+            "autoSnapshotEnabled": true,
+            "apps": [
+                { "displayName": "可信应用", "target": real_exe, "enabled": true,
+                  "reusePolicy": "reuse_or_launch", "launchArgs": "--danger" },
+                { "displayName": "缺失应用", "target": "Z:\\nowhere\\missing.exe", "enabled": true },
+                { "displayName": "网络应用", "target": "\\\\server\\share\\tool.exe", "enabled": true }
+            ],
+            "resources": [],
+            "windows": []
+        })
+        .to_string();
+
+        let summary = import_json(&db, &json).await.unwrap();
+        let detail = get(&db, &summary.id).await.unwrap();
+
+        let by_name = |n: &str| detail.items.iter().find(|i| i.display_name == n).unwrap();
+
+        // 真实存在的 exe 保持启用，但启动参数必须被剥离
+        assert!(by_name("可信应用").enabled, "存在的 exe 不应被停用");
+        assert!(
+            by_name("可信应用").launch_args.is_none(),
+            "导入时启动参数必须被剥离"
+        );
+
+        // 不存在 / UNC 路径的应用一律停用
+        assert!(!by_name("缺失应用").enabled);
+        assert!(!by_name("网络应用").enabled);
+
+        // 风险要写进描述，界面上看得见
+        let desc = detail.description.unwrap_or_default();
+        assert!(desc.contains("[导入提示]"), "描述里应有导入提示：{desc}");
+        assert!(desc.contains("2 个应用的路径"), "应说明停用数量：{desc}");
+        assert!(desc.contains("启动参数已在导入时剥离"), "应说明参数被剥离：{desc}");
+        assert!(desc.starts_with("来自同事"), "不应丢掉原描述：{desc}");
+    }
+
+    #[tokio::test]
+    async fn import_preview_lists_risky_apps_without_writing() {
+        let real_exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "exportedAt": 0,
+            "name": "预览",
+            "apps": [
+                { "displayName": "好应用", "target": real_exe },
+                { "displayName": "坏应用", "target": "Q:\\no.exe", "launchArgs": "-x" }
+            ],
+            "resources": [],
+            "windows": []
+        })
+        .to_string();
+
+        let preview = import_preview(&json).unwrap();
+        assert_eq!(preview.app_count, 2);
+        assert_eq!(preview.disabled_apps, vec!["坏应用".to_string()]);
+        assert_eq!(preview.apps_with_args, vec!["坏应用".to_string()]);
     }
 
     #[tokio::test]

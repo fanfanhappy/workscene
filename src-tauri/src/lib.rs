@@ -46,10 +46,9 @@ pub fn run() {
             let mut builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                     .title("WorkScene")
-                    .inner_size(1280.0, 840.0)
-                    .min_inner_size(1000.0, 640.0)
-                    .center()
-                    .theme(Some(tauri::Theme::Dark));
+                    .inner_size(1040.0, 680.0)
+                    .min_inner_size(860.0, 560.0)
+                    .center();
 
             #[cfg(target_os = "windows")]
             {
@@ -93,24 +92,37 @@ pub fn run() {
             commands::system_get_displays,
             commands::capture_start,
             commands::scene_health,
+            commands::window_set_theme,
             commands::workspace_list,
             commands::workspace_get,
             commands::workspace_create,
             commands::workspace_rename,
+            commands::workspace_set_favorite,
+            commands::workspace_update_meta,
+            commands::workspace_duplicate,
+            commands::workspace_export,
+            commands::workspace_import,
+            commands::workspace_import_preview,
+            commands::workspace_recapture,
+            commands::workspace_update_from_capture,
             commands::workspace_delete,
             commands::workspace_item_update,
+            commands::workspace_item_relocate,
             commands::workspace_layout_update,
             commands::workspace_window_delete,
             commands::workspace_item_delete,
             commands::workspace_item_add,
             commands::workspace_preview,
             commands::workspace_restore,
+            commands::workspace_restore_retry,
             commands::snapshot_restore,
             commands::run_list,
             commands::run_steps,
             commands::run_error_stats,
             commands::restore_is_busy,
+            commands::restore_cancel,
             commands::snapshot_list,
+            commands::snapshot_get,
             commands::snapshot_create,
             commands::snapshot_delete,
             commands::snapshot_diff,
@@ -122,9 +134,19 @@ pub fn run() {
             commands::settings_set,
             commands::storage_stats,
             commands::storage_cleanup,
+            commands::system_open_data_dir,
+            commands::dialog_pick_file,
+            commands::dialog_pick_folder,
         ])
         .build(tauri::generate_context!())
-        .expect("WorkScene 构建失败")
+        .unwrap_or_else(|e| {
+            // release 版没有控制台：启动失败必须弹窗，否则用户看到的是"点了没反应"
+            win::dialog::error(
+                "WorkScene 启动失败",
+                &format!("{e}\n\n如果反复出现，请把这段信息发给我们。"),
+            );
+            std::process::exit(1);
+        })
         .run(|_app, event| {
             // 正常退出时把会话标记改成 clean，下次启动就不会误报"异常退出"
             if matches!(
@@ -846,13 +868,17 @@ pub fn baseline(iterations: usize) {
 /// 自动快照后台任务：只在存在"当前激活工作空间"且其开关打开时工作。
 /// 每分钟看一次桌面，指纹不变就不写库（红线二：不能每次窗口变化都落库）。
 fn spawn_auto_snapshot(app: tauri::AppHandle) {
+    use tauri::Emitter;
     std::thread::spawn(move || {
         // 启动后先等一会，避免与应用启动抢资源
         std::thread::sleep(Duration::from_secs(40));
         loop {
             let db = app.state::<data::Db>().inner().clone();
             match tauri::async_runtime::block_on(auto_snapshot_once(&db)) {
-                Ok(()) => {}
+                Ok(Some(ws_id)) => {
+                    let _ = app.emit("snapshot:auto_created", ws_id);
+                }
+                Ok(None) => {}
                 Err(e) => eprintln!("自动快照失败：{e}"),
             }
             std::thread::sleep(Duration::from_secs(60));
@@ -860,14 +886,14 @@ fn spawn_auto_snapshot(app: tauri::AppHandle) {
     });
 }
 
-async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
+async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
     let settings = data::settings::get(db).await?;
     if !settings.auto_snapshot_enabled {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(ws) = data::snapshots::active_workspace(db).await? else {
-        return Ok(());
+        return Ok(None);
     };
 
     let enabled: Option<i64> = sqlx::query_scalar(
@@ -878,7 +904,7 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
     .await?;
 
     if enabled.unwrap_or(0) == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let capture = capture::scan()?;
@@ -893,8 +919,9 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
     {
         // 新写入后才需要按保留策略清理
         let _ = data::snapshots::prune(db, &ws, settings.auto_keep as usize).await;
+        return Ok(Some(ws));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// M5 自检：Hybrid 快照。

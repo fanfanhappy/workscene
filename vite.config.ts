@@ -13,7 +13,17 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    watch: { ignored: ["**/src-tauri/**"] },
+    watch: {
+      ignored: [
+        "**/src-tauri/**",
+        "**/.devdata/**",
+        "**/.testdata/**",
+        "**/dist-portable/**",
+        "**/*.tmpdir/**",
+        "**/*.tmpdir",
+        "**/*.tmp",
+      ],
+    },
   },
   build: {
     target: "chrome110",

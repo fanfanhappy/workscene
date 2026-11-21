@@ -29,7 +29,14 @@ pub async fn save(
     snapshot_id: Option<&str>,
     trigger: &str,
 ) -> AppResult<()> {
-    let status = if report.failed > 0 {
+    let cancelled = report
+        .steps
+        .iter()
+        .any(|s| s.code.as_deref() == Some("cancelled"));
+
+    let status = if cancelled {
+        "cancelled"
+    } else if report.failed > 0 {
         if report.succeeded > 0 {
             "partial"
         } else {

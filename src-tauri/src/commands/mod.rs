@@ -24,20 +24,41 @@ pub fn system_get_info() -> AppInfo {
     }
 }
 
+async fn scan_blocking() -> AppResult<CaptureResult> {
+    tauri::async_runtime::spawn_blocking(capture::scan)
+        .await
+        .map_err(|e| AppError::msg(format!("扫描桌面任务异常：{e}")))?
+}
+
 #[tauri::command]
 pub fn system_get_displays() -> AppResult<Vec<DisplayInfo>> {
-    let capture = capture::scan()?;
-    Ok(capture.displays)
+    capture::displays()
 }
 
 #[tauri::command]
-pub fn capture_start() -> AppResult<CaptureResult> {
-    capture::scan()
+pub async fn capture_start() -> AppResult<CaptureResult> {
+    scan_blocking().await
 }
 
 #[tauri::command]
-pub fn scene_health() -> AppResult<storage::SceneHealth> {
-    storage::scene_health()
+pub async fn scene_health() -> AppResult<storage::SceneHealth> {
+    tauri::async_runtime::spawn_blocking(storage::scene_health)
+        .await
+        .map_err(|e| AppError::msg(format!("快照健康检查异常：{e}")))?
+}
+
+/// 同步 Windows 原生窗口标题栏深浅色，避免浅色主题顶着黑色标题栏
+#[tauri::command]
+pub fn window_set_theme(app: tauri::AppHandle, theme: String) {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        let target = match theme.as_str() {
+            "light" => Some(tauri::Theme::Light),
+            "dark" => Some(tauri::Theme::Dark),
+            _ => None,
+        };
+        let _ = win.set_theme(target);
+    }
 }
 
 #[tauri::command]
@@ -52,21 +73,128 @@ pub async fn workspace_get(db: State<'_, Db>, id: String) -> AppResult<Workspace
 
 #[tauri::command]
 pub async fn workspace_create(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     name: String,
     capture: CaptureResult,
 ) -> AppResult<WorkspaceSummary> {
-    workspaces::create_from_capture(&db, &name, &capture).await
+    let ws = workspaces::create_from_capture(&db, &name, &capture).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(ws)
 }
 
 #[tauri::command]
-pub async fn workspace_rename(db: State<'_, Db>, id: String, name: String) -> AppResult<()> {
-    workspaces::rename(&db, &id, &name).await
+pub async fn workspace_rename(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    name: String,
+) -> AppResult<()> {
+    workspaces::rename(&db, &id, &name).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn workspace_delete(db: State<'_, Db>, id: String) -> AppResult<()> {
-    workspaces::delete(&db, &id).await
+pub async fn workspace_set_favorite(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    is_favorite: bool,
+) -> AppResult<()> {
+    workspaces::set_favorite(&db, &id, is_favorite).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_update_meta(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    name: String,
+    description: Option<String>,
+    auto_snapshot_enabled: bool,
+) -> AppResult<()> {
+    workspaces::update_meta(&db, &id, &name, description.as_deref(), auto_snapshot_enabled)
+        .await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_duplicate(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    new_name: String,
+) -> AppResult<WorkspaceSummary> {
+    let ws = workspaces::duplicate(&db, &id, &new_name).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(ws)
+}
+
+#[tauri::command]
+pub async fn workspace_export(db: State<'_, Db>, id: String) -> AppResult<String> {
+    workspaces::export_json(&db, &id).await
+}
+
+#[tauri::command]
+pub async fn workspace_import(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    json: String,
+) -> AppResult<WorkspaceSummary> {
+    let ws = workspaces::import_json(&db, &json).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(ws)
+}
+
+#[tauri::command]
+pub async fn workspace_recapture(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+) -> AppResult<WorkspaceDetail> {
+    let capture = scan_blocking().await?;
+    let detail = workspaces::recapture(&db, &id, &capture).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(detail)
+}
+
+/// 用用户在捕获页勾选的窗口子集更新已有工作空间（保留原资源与同名应用启动参数，覆盖前自动备份）
+#[tauri::command]
+pub async fn workspace_update_from_capture(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    capture: CaptureResult,
+) -> AppResult<WorkspaceDetail> {
+    let detail = workspaces::recapture(&db, &id, &capture).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(detail)
+}
+
+#[tauri::command]
+pub async fn workspace_delete(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+) -> AppResult<()> {
+    workspaces::delete(&db, &id).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(())
+}
+
+/// 重新定位应用可执行路径
+#[tauri::command]
+pub async fn workspace_item_relocate(
+    db: State<'_, Db>,
+    workspace_id: String,
+    item_id: String,
+    new_path: String,
+) -> AppResult<workspaces::WorkspaceItem> {
+    workspaces::relocate_item(&db, &workspace_id, &item_id, &new_path).await
 }
 
 /// 更新单个应用项：复用策略 / 启动参数 / 启用状态
@@ -121,10 +249,20 @@ pub async fn workspace_item_add(
     workspaces::add_item(&db, &workspace_id, &item_type, &target, display_name.as_deref()).await
 }
 
+/// 导入前预检：只看不写，供 UI 提示"这份文件会启动什么"
+#[tauri::command]
+pub fn workspace_import_preview(
+    raw_json: String,
+) -> AppResult<workspaces::ImportPreview> {
+    workspaces::import_preview(&raw_json)
+}
+
 #[tauri::command]
 pub async fn workspace_preview(db: State<'_, Db>, id: String) -> AppResult<RestorePreview> {
     let scene = workspaces::to_scene(&db, &id).await?;
-    crate::restore::preview(&scene)
+    tauri::async_runtime::spawn_blocking(move || crate::restore::preview(&scene))
+        .await
+        .map_err(|e| AppError::msg(format!("生成恢复预览异常：{e}")))?
 }
 
 /// 从工作空间恢复。流程与顺序即 PRD §3.3：
@@ -143,7 +281,7 @@ pub async fn workspace_restore(
     let scene = workspaces::to_scene(&db, &id).await?;
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
 
-    let pre_restore = match capture::scan() {
+    let pre_restore = match scan_blocking().await {
         Ok(current) => workspaces::add_snapshot(
             &db,
             &id,
@@ -193,7 +331,7 @@ pub async fn snapshot_restore(
     let scene: SceneFile = storage::load_scene(&id)?;
     let workspace_id = workspaces::workspace_of_snapshot(&db, &id).await?;
 
-    let pre_restore = match (&workspace_id, capture::scan()) {
+    let pre_restore = match (&workspace_id, scan_blocking().await) {
         (Some(ws), Ok(current)) => workspaces::add_snapshot(
             &db,
             ws,
@@ -257,6 +395,96 @@ pub fn restore_is_busy() -> bool {
     crate::restore::is_busy()
 }
 
+/// 请求取消正在执行的恢复任务（不强制关闭已启动的应用）
+#[tauri::command]
+pub fn restore_cancel() -> bool {
+    crate::restore::request_cancel()
+}
+
+/// 读取单份快照的完整布局与窗口内容，用于历史页可视化预览
+#[tauri::command]
+pub async fn snapshot_get(id: String) -> AppResult<SceneFile> {
+    tauri::async_runtime::spawn_blocking(move || storage::load_scene(&id))
+        .await
+        .map_err(|e| AppError::msg(format!("读取快照异常：{e}")))?
+}
+
+/// 仅重试上次恢复中失败或跳过的项，不重复移动已经恢复成功的窗口
+#[tauri::command]
+pub async fn workspace_restore_retry(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    relaunch_missing: bool,
+    target_names: Vec<String>,
+) -> AppResult<RestoreReport> {
+    let _guard = crate::restore::try_acquire()
+        .ok_or_else(|| AppError::msg("已有恢复任务在执行，请等它结束再试"))?;
+
+    let targets: std::collections::HashSet<String> = target_names.into_iter().collect();
+    if targets.is_empty() {
+        return Err(AppError::msg("没有需要重试的项目"));
+    }
+
+    let scene = workspaces::to_scene(&db, &id).await?;
+    let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
+
+    let scene_for_task = scene.clone();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        crate::restore::apply_subset(Some(&app), &scene_for_task, relaunch_missing, None, Some(&targets))
+    })
+    .await;
+
+    let report = match handle {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(AppError::msg(format!("重试任务异常终止：{e}"))),
+    };
+
+    let _ = runs::save(&db, &report, Some(&id), snapshot_id.as_deref(), "retry").await;
+    Ok(report)
+}
+
+/// 弹出 Windows 原生文件选择器（`exe_only = true` 仅筛选程序）
+#[tauri::command]
+pub async fn dialog_pick_file(exe_only: Option<bool>) -> AppResult<Option<String>> {
+    let only_exe = exe_only.unwrap_or(false);
+    let title = if only_exe {
+        "选择应用程序 (.exe)"
+    } else {
+        "选择要添加的文件"
+    };
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        crate::win::dialog::pick_file(title, only_exe)
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("文件选择框异常：{e}")))?;
+    Ok(path)
+}
+
+/// 弹出 Windows 原生文件夹选择器
+#[tauri::command]
+pub async fn dialog_pick_folder() -> AppResult<Option<String>> {
+    let path = tauri::async_runtime::spawn_blocking(|| {
+        crate::win::dialog::pick_folder("选择要添加的文件夹")
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("文件夹选择框异常：{e}")))?;
+    Ok(path)
+}
+
+/// 在资源管理器中打开本机数据目录（仅固定打开自身数据目录，不接受外部路径参数）
+#[tauri::command]
+pub fn system_open_data_dir() -> AppResult<()> {
+    storage::ensure_dirs()?;
+    let dir = storage::data_dir();
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| AppError::msg(format!("无法打开数据目录：{e}")))?;
+    Ok(())
+}
+
 // ---- 快照（M5：Hybrid） ----
 
 #[tauri::command]
@@ -271,7 +499,7 @@ pub async fn snapshot_list(
 /// 手动快照：立即捕获当前桌面并归档（永远创建，不做去重）
 #[tauri::command]
 pub async fn snapshot_create(db: State<'_, Db>, workspace_id: String, name: String) -> AppResult<SnapshotSummary> {
-    let capture = capture::scan()?;
+    let capture = scan_blocking().await?;
     let name = if name.trim().is_empty() {
         "手动快照".to_string()
     } else {
@@ -291,11 +519,15 @@ pub async fn snapshot_diff(
     id_a: String,
     id_b: String,
 ) -> AppResult<SnapshotDiff> {
-    let a = storage::load_scene(&id_a)?;
-    let b = storage::load_scene(&id_b)?;
     let _ = snapshots::get(&db, &id_a).await?;
     let _ = snapshots::get(&db, &id_b).await?;
-    Ok(snapshots::diff(&a, &b))
+    tauri::async_runtime::spawn_blocking(move || {
+        let a = storage::load_scene(&id_a)?;
+        let b = storage::load_scene(&id_b)?;
+        Ok(snapshots::diff(&a, &b))
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("快照对比异常：{e}")))?
 }
 
 #[tauri::command]

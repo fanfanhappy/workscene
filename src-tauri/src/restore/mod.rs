@@ -1,4 +1,4 @@
-﻿pub mod layout;
+pub mod layout;
 pub mod matcher;
 
 use crate::core::models::{
@@ -28,11 +28,14 @@ const MAX_LAUNCH_TOTAL: usize = 8;
 
 /// 全局恢复互斥：两个恢复任务同时跑会互相搬窗口，报告也会互相污染
 static RESTORE_BUSY: AtomicBool = AtomicBool::new(false);
+/// 取消标记：取消正在执行的恢复任务，但不强制关闭已启动的用户应用（PRD §10.3）
+static RESTORE_CANCEL: AtomicBool = AtomicBool::new(false);
 
 pub struct RestoreGuard;
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
+        RESTORE_CANCEL.store(false, Ordering::SeqCst);
         RESTORE_BUSY.store(false, Ordering::SeqCst);
     }
 }
@@ -42,6 +45,7 @@ pub fn try_acquire() -> Option<RestoreGuard> {
     if RESTORE_BUSY.swap(true, Ordering::SeqCst) {
         None
     } else {
+        RESTORE_CANCEL.store(false, Ordering::SeqCst);
         Some(RestoreGuard)
     }
 }
@@ -50,15 +54,32 @@ pub fn is_busy() -> bool {
     RESTORE_BUSY.load(Ordering::SeqCst)
 }
 
+/// 请求取消当前运行中的恢复任务；若当前无运行任务则返回 false
+pub fn request_cancel() -> bool {
+    if !RESTORE_BUSY.load(Ordering::SeqCst) {
+        return false;
+    }
+    RESTORE_CANCEL.store(true, Ordering::SeqCst);
+    true
+}
+
+fn is_cancelled() -> bool {
+    RESTORE_CANCEL.load(Ordering::SeqCst)
+}
+
 fn current_candidates(self_pid: u32) -> Vec<Candidate> {
     let mut out = Vec::with_capacity(48);
+    let mut pid_cache: std::collections::HashMap<u32, process::ProcessInfo> =
+        std::collections::HashMap::with_capacity(32);
     for raw in window::enumerate_raw() {
         // 允许同进程窗口进入候选：匹配仍要求「可执行路径 + 窗口类名」一致，
         // 因此不会误判到 WorkScene 自己的界面；模拟窗口（win::mock）也才可被恢复测试。
         if filter::exclude_reason(&raw, self_pid, true).is_some() {
             continue;
         }
-        let pinfo = process::info(raw.pid);
+        let pinfo = pid_cache
+            .entry(raw.pid)
+            .or_insert_with(|| process::info(raw.pid));
         let effective = if raw.show_state == ShowState::Minimized {
             raw.restored_rect
         } else {
@@ -67,10 +88,10 @@ fn current_candidates(self_pid: u32) -> Vec<Candidate> {
         out.push(Candidate {
             hwnd: raw.hwnd as usize,
             pid: raw.pid,
-            process_path: pinfo.path,
-            process_name: pinfo.name,
-            class_name: raw.class_name.clone(),
-            title: raw.title.clone(),
+            process_path: pinfo.path.clone(),
+            process_name: pinfo.name.clone(),
+            class_name: raw.class_name,
+            title: raw.title,
             rect: (
                 effective.left,
                 effective.top,
@@ -295,12 +316,23 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
         display_notes,
     })
 }
-/// 串行恢复：M1 只验证「识别 + 定位」的准确性，并发编排留给 M3。
+/// 串行恢复：完整恢复场景中的全部窗口与资源
 pub fn apply(
     app: Option<&AppHandle>,
     scene: &SceneFile,
     relaunch_missing: bool,
     pre_restore_scene_id: Option<String>,
+) -> AppResult<RestoreReport> {
+    apply_subset(app, scene, relaunch_missing, pre_restore_scene_id, None)
+}
+
+/// 按可选目标白名单恢复（用于「仅重试失败/未完成项」，不重复折腾已成功窗口）
+pub fn apply_subset(
+    app: Option<&AppHandle>,
+    scene: &SceneFile,
+    relaunch_missing: bool,
+    pre_restore_scene_id: Option<String>,
+    only_targets: Option<&HashSet<String>>,
 ) -> AppResult<RestoreReport> {
     let started_at = now_ms();
     let monitors = display::enumerate();
@@ -308,6 +340,34 @@ pub fn apply(
         return Err(AppError::msg("未检测到显示器"));
     }
     let self_pid = std::process::id();
+
+    let filtered_scene_storage: Option<SceneFile> = only_targets.map(|targets| {
+        let windows = scene
+            .windows
+            .iter()
+            .filter(|w| {
+                let name = if w.title.trim().is_empty() {
+                    &w.process_name
+                } else {
+                    &w.title
+                };
+                targets.contains(name)
+            })
+            .cloned()
+            .collect();
+        let resources = scene
+            .resources
+            .iter()
+            .filter(|r| targets.contains(&r.display_name))
+            .cloned()
+            .collect();
+        SceneFile {
+            windows,
+            resources,
+            ..scene.clone()
+        }
+    });
+    let scene = filtered_scene_storage.as_ref().unwrap_or(scene);
 
     let mut steps: Vec<RestoreStepResult> = Vec::with_capacity(scene.windows.len());
     let mut display_notes: Vec<String> = Vec::new();
@@ -319,14 +379,17 @@ pub fn apply(
     // always_launch 则每个窗口各启一个（评审 R1-4 的三值语义）
     if relaunch_missing {
         let mut launched_total: usize = 0;
-        for plan in plan_launches(scene, &current) {
-            if launched_total >= MAX_LAUNCH_TOTAL {
+        'launch: for plan in plan_launches(scene, &current) {
+            if is_cancelled() || launched_total >= MAX_LAUNCH_TOTAL {
                 break;
             }
             if !std::path::Path::new(&plan.exe).is_file() {
                 continue;
             }
             for _ in 0..plan.count.min(MAX_RELAUNCH_PER_EXE) {
+                if is_cancelled() {
+                    break 'launch;
+                }
                 launch_app(&plan.exe, &plan.args);
                 launched_total += 1;
                 if wait_for_process_window(&plan.exe) {
@@ -348,6 +411,26 @@ pub fn apply(
             win.title.clone()
         };
 
+        if is_cancelled() {
+            let step = RestoreStepResult {
+                step_type: "window".into(),
+                target_name,
+                status: StepStatus::Skipped,
+                message: "已取消恢复任务（不会关闭已启动的应用）".into(),
+                match_note: "用户主动取消".into(),
+                duration_ms: 0,
+                delta_x: None,
+                delta_y: None,
+                state_restored: false,
+                code: Some("cancelled".into()),
+            };
+            if let Some(app) = app {
+                let _ = app.emit("restore:step", &step);
+            }
+            steps.push(step);
+            continue;
+        }
+
         let target_info = resolve_target(win, &monitors);
         if let Some(n) = &target_info.note {
             if !display_notes.contains(n) {
@@ -355,7 +438,10 @@ pub fn apply(
             }
         }
         let rect = target_info.rect;
-        let threshold = delta_threshold(target_info.dpi);
+        // 阈值 = max(8px, 2×scale, 窗口宽度的 0.5%)：
+        // 大窗口上 8px 的绝对误差没有视觉意义，按比例算更贴近"看起来一样"
+        let threshold = delta_threshold(target_info.dpi)
+            .max(((rect.2 as f64) * 0.005).round() as i32);
 
         let pool: Vec<Candidate> = current
             .iter()
@@ -479,6 +565,25 @@ pub fn apply(
 
     // 资源恢复：窗口摆好之后再打开文件/文件夹/网址，避免被窗口抢走焦点
     for r in &scene.resources {
+        if is_cancelled() {
+            let step = RestoreStepResult {
+                step_type: "resource".into(),
+                target_name: r.display_name.clone(),
+                status: StepStatus::Skipped,
+                message: "已取消恢复任务".into(),
+                match_note: r.target.clone(),
+                duration_ms: 0,
+                delta_x: None,
+                delta_y: None,
+                state_restored: false,
+                code: Some("cancelled".into()),
+            };
+            if let Some(app) = app {
+                let _ = app.emit("restore:step", &step);
+            }
+            steps.push(step);
+            continue;
+        }
         let t0 = Instant::now();
         let ok = open_resource(scene, r);
         let step = RestoreStepResult {
@@ -716,9 +821,20 @@ fn wait_for_settle(
 ) -> (i32, i32, i32) {
     let end = Instant::now() + budget;
     let mut last = verify(hwnd, target, state);
+    let mut hits = 0;
 
-    while Instant::now() < end && last.0 > threshold {
-        std::thread::sleep(Duration::from_millis(150));
+    while Instant::now() < end {
+        if last.0 <= threshold {
+            // 连续两次都达标才算稳定：Chromium 移动窗口有动画，
+            // 单次采样可能正好落在动画中途
+            hits += 1;
+            if hits >= 2 {
+                break;
+            }
+        } else {
+            hits = 0;
+        }
+        std::thread::sleep(Duration::from_millis(120));
         last = verify(hwnd, target, state);
     }
     last
@@ -832,8 +948,9 @@ fn wait_for_process_window(exe: &str) -> bool {
     let deadline = Instant::now() + Duration::from_millis(LAUNCH_WAIT_MS);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(120));
+        let mut seen_pids = std::collections::HashSet::with_capacity(32);
         for raw in window::enumerate_raw() {
-            if !raw.is_visible {
+            if !raw.is_visible || !seen_pids.insert(raw.pid) {
                 continue;
             }
             let pinfo = process::info(raw.pid);

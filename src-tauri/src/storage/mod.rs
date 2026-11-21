@@ -6,23 +6,80 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// 同一毫秒内可能创建多份快照（并行测试、快速连续捕获），
 /// 用进程内序号保证 id 唯一，避免两个写入抢同一个 .tmp 文件。
 static SCENE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// 数据根目录。默认 %LOCALAPPDATA%\WorkScene；
-/// 可用 WORKSCENE_DATA_DIR 覆盖（便携模式、自动化测试、以及 UI 规范 §12.1 的「存储位置」设置）。
+/// 数据根目录。
+///
+/// 解析顺序（第一个真正可写的胜出）：
+/// 1. `WORKSCENE_DATA_DIR`（显式指定，不再回退——便携模式与测试都靠它）
+/// 2. `%LOCALAPPDATA%\WorkScene`
+/// 3. `%APPDATA%\WorkScene`
+/// 4. exe 同级的 `data\`
+/// 5. `%TEMP%\WorkScene`
+///
+/// 为什么要回退：默认目录在某些账户/受管环境下不可写，早期版本会直接
+/// "静默退出"（release 无控制台，用户看到的就是点了没反应）。
 pub fn data_dir() -> PathBuf {
+    DATA_DIR.get_or_init(resolve_data_dir).clone()
+}
+
+fn resolve_data_dir() -> PathBuf {
     if let Some(custom) = std::env::var_os("WORKSCENE_DATA_DIR") {
         let p = PathBuf::from(custom);
         if !p.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(&p);
             return p;
         }
     }
-    let base = std::env::var_os("LOCALAPPDATA")
+
+    for candidate in fallback_candidates() {
+        if is_writable(&candidate) {
+            return candidate;
+        }
+    }
+
+    // 全都不行时仍然返回默认路径，让上层把错误如实报出来
+    local_app_data().join("WorkScene")
+}
+
+fn fallback_candidates() -> Vec<PathBuf> {
+    let mut out = vec![local_app_data().join("WorkScene")];
+
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        out.push(PathBuf::from(appdata).join("WorkScene"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("data"));
+        }
+    }
+    out.push(std::env::temp_dir().join("WorkScene"));
+    out
+}
+
+/// 真正探测一次写入：只看目录是否存在不足以判断（ACL 可能允许读不允许写）
+fn is_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write-probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn local_app_data() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("WorkScene")
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn snapshot_dir() -> PathBuf {
@@ -141,6 +198,50 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
         window_count: scene.windows.len(),
         display_count: scene.displays.len(),
         path: scene_path(&scene.id).to_string_lossy().to_string(),
+    })
+}
+
+/// 将已构造的 SceneFile 落盘为不可变快照（用于覆盖工作空间前的自动保护）
+pub fn save_scene_file(name: &str, mut scene: SceneFile) -> AppResult<SceneSummary> {
+    ensure_dirs()?;
+    let now = crate::core::time::now_ms();
+    let trimmed = name.trim();
+    let label = if trimmed.is_empty() {
+        format!("保护快照 {}", short_time(now))
+    } else {
+        trimmed.to_string()
+    };
+
+    let mut id = format!(
+        "scene-{:x}-{:x}",
+        now,
+        SCENE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let mut n = 1;
+    while scene_path(&id).exists() {
+        id = format!(
+            "scene-{:x}-{}-{n}",
+            now,
+            SCENE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        n += 1;
+    }
+
+    scene.schema_version = SCHEMA_VERSION;
+    scene.id = id.clone();
+    scene.name = label.clone();
+    scene.captured_at = now;
+
+    let json = serde_json::to_string_pretty(&scene)?;
+    write_atomic(&scene_path(&id), &json)?;
+
+    Ok(SceneSummary {
+        id: id.clone(),
+        name: label,
+        captured_at: now,
+        window_count: scene.windows.len(),
+        display_count: scene.displays.len(),
+        path: scene_path(&id).to_string_lossy().to_string(),
     })
 }
 

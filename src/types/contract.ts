@@ -79,6 +79,12 @@ export interface SceneWindow {
   zOrder: number;
 }
 
+export interface SceneResource {
+  itemType: string;
+  target: string;
+  displayName: string;
+}
+
 export interface SceneFile {
   schemaVersion: number;
   id: string;
@@ -86,6 +92,7 @@ export interface SceneFile {
   capturedAt: number;
   displays: DisplayInfo[];
   windows: SceneWindow[];
+  resources?: SceneResource[];
 }
 
 export interface SceneSummary {
@@ -217,13 +224,15 @@ export interface WorkspaceDetail {
   windows: WorkspaceWindow[];
 }
 
-/** 布局编辑：一次提交多个窗口的新比例坐标 */
+/** 布局编辑：一次提交多个窗口的新比例坐标、可选目标显示器与显示状态 */
 export interface LayoutUpdate {
   windowId: string;
   xRatio: number;
   yRatio: number;
   widthRatio: number;
   heightRatio: number;
+  monitorKey?: string;
+  showState?: ShowState;
 }
 
 // ---- M5：Hybrid 快照 ----
