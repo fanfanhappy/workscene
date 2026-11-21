@@ -1,4 +1,4 @@
-// 发布版不弹控制台窗口；--selftest / --m1test / --capture 走 debug 构建，仍有输出
+// 发布版不弹控制台窗口；--selftest / --m1test / --m2test / --capture 走 debug 构建，仍有输出
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
@@ -10,6 +10,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "--m1test") {
         workscene_lib::m1test();
+        return;
+    }
+    if args.iter().any(|a| a == "--m2test") {
+        workscene_lib::m2test();
         return;
     }
     if let Some(pos) = args.iter().position(|a| a == "--capture") {

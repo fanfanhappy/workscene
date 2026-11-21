@@ -5,9 +5,10 @@ import type {
   DisplayInfo,
   RestorePreview,
   RestoreReport,
-  SceneFile,
+  RunSummary,
   SceneHealth,
-  SceneSummary,
+  WorkspaceDetail,
+  WorkspaceSummary,
 } from "@/types/contract";
 
 /**
@@ -25,7 +26,7 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 function normalize(raw: unknown): string {
   if (typeof raw === "string") return raw;
   if (raw && typeof raw === "object") {
-    const anyRaw = raw as { message?: unknown; code?: unknown };
+    const anyRaw = raw as { message?: unknown };
     if (typeof anyRaw.message === "string") return anyRaw.message;
     try {
       return JSON.stringify(raw);
@@ -39,19 +40,25 @@ function normalize(raw: unknown): string {
 export const api = {
   getAppInfo: () => call<AppInfo>("system_get_info"),
   getDisplays: () => call<DisplayInfo[]>("system_get_displays"),
-
   captureStart: () => call<CaptureResult>("capture_start"),
-
-  sceneList: () => call<SceneSummary[]>("scene_list"),
   sceneHealth: () => call<SceneHealth>("scene_health"),
-  sceneSave: (name: string, capture: CaptureResult) =>
-    call<SceneSummary>("scene_save", { name, capture }),
-  sceneGet: (id: string) => call<SceneFile>("scene_get", { id }),
-  sceneDelete: (id: string) => call<void>("scene_delete", { id }),
 
-  restorePreview: (id: string) => call<RestorePreview>("restore_preview", { id }),
-  restoreApply: (id: string, relaunchMissing: boolean) =>
-    call<RestoreReport>("restore_apply", { id, relaunchMissing }),
+  workspaceList: () => call<WorkspaceSummary[]>("workspace_list"),
+  workspaceGet: (id: string) => call<WorkspaceDetail>("workspace_get", { id }),
+  workspaceCreate: (name: string, capture: CaptureResult) =>
+    call<WorkspaceSummary>("workspace_create", { name, capture }),
+  workspaceRename: (id: string, name: string) =>
+    call<void>("workspace_rename", { id, name }),
+  workspaceDelete: (id: string) => call<void>("workspace_delete", { id }),
+  workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
+  workspaceRestore: (id: string, relaunchMissing: boolean) =>
+    call<RestoreReport>("workspace_restore", { id, relaunchMissing }),
+
+  /** 按快照恢复：撤销这次恢复、历史回退都用它 */
+  snapshotRestore: (id: string, relaunchMissing: boolean) =>
+    call<RestoreReport>("snapshot_restore", { id, relaunchMissing }),
+
+  runList: (limit = 20) => call<RunSummary[]>("run_list", { limit }),
 };
 
 /** 统一的时间展示，避免各页面自己格式化 */

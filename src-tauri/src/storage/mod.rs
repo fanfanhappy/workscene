@@ -1,6 +1,4 @@
-use crate::core::models::{
-    CaptureResult, RestoreReport, SceneFile, SceneSummary, SceneWindow, ShowState,
-};
+use crate::core::models::{CaptureResult, SceneFile, SceneSummary, SceneWindow, ShowState};
 use crate::core::{AppError, AppResult};
 use crate::restore::layout::{to_ratios, Area};
 use serde::{Deserialize, Serialize};
@@ -131,39 +129,6 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
     })
 }
 
-pub fn list_scenes() -> AppResult<Vec<SceneSummary>> {
-    ensure_dirs()?;
-    let mut out = Vec::new();
-
-    for entry in std::fs::read_dir(snapshot_dir())? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(scene) = serde_json::from_str::<SceneFile>(&text) else {
-            continue; // 损坏文件不阻塞列表
-        };
-        out.push(SceneSummary {
-            id: scene.id,
-            name: scene.name,
-            captured_at: scene.captured_at,
-            window_count: scene.windows.len(),
-            display_count: scene.displays.len(),
-            path: path.to_string_lossy().to_string(),
-        });
-    }
-
-    out.sort_by(|a, b| b.captured_at.cmp(&a.captured_at));
-    Ok(out)
-}
-
 pub fn load_scene(id: &str) -> AppResult<SceneFile> {
     if !valid_id(id) {
         return Err(AppError::msg("非法的快照 ID"));
@@ -255,43 +220,6 @@ pub fn scene_health() -> AppResult<SceneHealth> {
     }
 
     Ok(SceneHealth { corrupted })
-}
-
-pub fn runs_dir() -> PathBuf {
-    data_dir().join("runs")
-}
-
-/// 恢复报告落盘：关窗、刷新、崩溃后仍可回查（评审补充意见 D5）
-pub fn save_run(report: &RestoreReport) -> AppResult<()> {
-    std::fs::create_dir_all(runs_dir())?;
-    let path = runs_dir().join(format!("{}.json", report.run_id));
-    let json = serde_json::to_string_pretty(report)?;
-    write_atomic(&path, &json)?;
-    Ok(())
-}
-
-pub fn list_runs(limit: usize) -> AppResult<Vec<RestoreReport>> {
-    let dir = runs_dir();
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(report) = serde_json::from_str::<RestoreReport>(&text) {
-            out.push(report);
-        }
-    }
-    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    out.truncate(limit);
-    Ok(out)
 }
 
 fn short_time(epoch_ms: i64) -> String {

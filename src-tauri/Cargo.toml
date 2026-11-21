@@ -27,9 +27,18 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
 ] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
 [profile.dev]
 incremental = true
+
+# 本机 MSVC 14.51 编译 sqlite3.c 时，-Z7 会让 cl 报 D8050（命令行放不进调试记录）。
+# 只对这个 C 依赖关掉调试信息，不影响 Rust 侧断点。
+[profile.dev.package.libsqlite3-sys]
+debug = false
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread"] }

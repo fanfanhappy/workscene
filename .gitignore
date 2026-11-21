@@ -7,3 +7,4 @@ src-tauri/target
 .devdata
 .DS_Store
 *.log
+.testdata

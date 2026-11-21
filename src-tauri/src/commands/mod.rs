@@ -1,9 +1,13 @@
 use crate::capture;
 use crate::core::models::{
-    AppInfo, CaptureResult, DisplayInfo, RestorePreview, RestoreReport, SceneFile, SceneSummary,
+    AppInfo, CaptureResult, DisplayInfo, RestorePreview, RestoreReport, SceneFile,
 };
 use crate::core::{AppError, AppResult};
+use crate::data::runs::{self, RunSummary};
+use crate::data::workspaces::{self, WorkspaceDetail, WorkspaceSummary};
+use crate::data::Db;
 use crate::storage;
+use tauri::State;
 
 #[tauri::command]
 pub fn system_get_info() -> AppInfo {
@@ -29,68 +33,147 @@ pub fn capture_start() -> AppResult<CaptureResult> {
 }
 
 #[tauri::command]
-pub fn scene_list() -> AppResult<Vec<SceneSummary>> {
-    storage::list_scenes()
-}
-
-#[tauri::command]
-pub fn scene_save(name: String, capture: CaptureResult) -> AppResult<SceneSummary> {
-    if capture.windows.is_empty() {
-        return Err(AppError::msg("当前没有可保存的窗口，请先打开需要记录的应用"));
-    }
-    storage::save_scene(&name, &capture)
-}
-
-#[tauri::command]
-pub fn scene_get(id: String) -> AppResult<SceneFile> {
-    storage::load_scene(&id)
-}
-
-#[tauri::command]
-pub fn scene_delete(id: String) -> AppResult<()> {
-    storage::delete_scene(&id)
-}
-
-/// 损坏快照诊断：列表页据此提示「N 个快照损坏」，而不是让文件静默消失
-#[tauri::command]
 pub fn scene_health() -> AppResult<storage::SceneHealth> {
     storage::scene_health()
 }
 
 #[tauri::command]
-pub fn run_list(limit: Option<usize>) -> AppResult<Vec<RestoreReport>> {
-    storage::list_runs(limit.unwrap_or(20))
+pub async fn workspace_list(db: State<'_, Db>) -> AppResult<Vec<WorkspaceSummary>> {
+    workspaces::list(&db).await
 }
 
 #[tauri::command]
-pub fn restore_preview(id: String) -> AppResult<RestorePreview> {
-    let scene = storage::load_scene(&id)?;
+pub async fn workspace_get(db: State<'_, Db>, id: String) -> AppResult<WorkspaceDetail> {
+    workspaces::get(&db, &id).await
+}
+
+#[tauri::command]
+pub async fn workspace_create(
+    db: State<'_, Db>,
+    name: String,
+    capture: CaptureResult,
+) -> AppResult<WorkspaceSummary> {
+    workspaces::create_from_capture(&db, &name, &capture).await
+}
+
+#[tauri::command]
+pub async fn workspace_rename(db: State<'_, Db>, id: String, name: String) -> AppResult<()> {
+    workspaces::rename(&db, &id, &name).await
+}
+
+#[tauri::command]
+pub async fn workspace_delete(db: State<'_, Db>, id: String) -> AppResult<()> {
+    workspaces::delete(&db, &id).await
+}
+
+#[tauri::command]
+pub async fn workspace_preview(db: State<'_, Db>, id: String) -> AppResult<RestorePreview> {
+    let scene = workspaces::to_scene(&db, &id).await?;
     crate::restore::preview(&scene)
 }
 
-/// 恢复是阻塞型任务（需要等待窗口稳定），放进阻塞线程池，避免卡住 UI。
+/// 从工作空间恢复。流程与顺序即 PRD §3.3：
+/// 读配置 → 生成计划 → 恢复前保护快照 → 执行 → 归档报告。
 #[tauri::command]
-pub async fn restore_apply(
+pub async fn workspace_restore(
     app: tauri::AppHandle,
+    db: State<'_, Db>,
     id: String,
     relaunch_missing: bool,
 ) -> AppResult<RestoreReport> {
-    let scene = storage::load_scene(&id)?;
+    let scene = workspaces::to_scene(&db, &id).await?;
+    let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
 
-    // 恢复前自动保护快照：批量移动窗口是本产品风险最高的动作，
-    // 必须先留一份现场，用户才能一键撤销（评审补充意见 A8）
-    let pre_restore = capture::scan()
-        .and_then(|capture| storage::save_scene("恢复前自动保护", &capture))
-        .map(|summary| summary.id)
-        .ok();
+    let pre_restore = match capture::scan() {
+        Ok(current) => workspaces::add_snapshot(
+            &db,
+            &id,
+            "恢复前自动保护",
+            "protection",
+            "restore",
+            &current,
+            true,
+        )
+        .await
+        .ok(),
+        Err(_) => None,
+    };
 
+    let scene_for_task = scene.clone();
+    let pre_for_task = pre_restore.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        crate::restore::apply(Some(&app), &scene, relaunch_missing, pre_restore)
+        crate::restore::apply(Some(&app), &scene_for_task, relaunch_missing, pre_for_task)
     })
     .await;
 
-    match handle {
-        Ok(result) => result,
-        Err(e) => Err(AppError::msg(format!("恢复任务异常终止：{e}"))),
+    let report = match handle {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(AppError::msg(format!("恢复任务异常终止：{e}"))),
+    };
+
+    let _ = runs::save(&db, &report, Some(&id), snapshot_id.as_deref(), "manual").await;
+    let _ = workspaces::mark_restored(&db, &id).await;
+
+    Ok(report)
+}
+
+/// 按快照 payload 恢复（「撤销这次恢复」与历史回退都走这里）
+#[tauri::command]
+pub async fn snapshot_restore(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: String,
+    relaunch_missing: bool,
+) -> AppResult<RestoreReport> {
+    let scene: SceneFile = storage::load_scene(&id)?;
+    let workspace_id = workspaces::workspace_of_snapshot(&db, &id).await?;
+
+    let pre_restore = match (&workspace_id, capture::scan()) {
+        (Some(ws), Ok(current)) => workspaces::add_snapshot(
+            &db,
+            ws,
+            "恢复前自动保护",
+            "protection",
+            "restore",
+            &current,
+            true,
+        )
+        .await
+        .ok(),
+        _ => None,
+    };
+
+    let scene_for_task = scene.clone();
+    let pre_for_task = pre_restore.clone();
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        crate::restore::apply(Some(&app), &scene_for_task, relaunch_missing, pre_for_task)
+    })
+    .await;
+
+    let report = match handle {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(AppError::msg(format!("恢复任务异常终止：{e}"))),
+    };
+
+    if let Some(ws) = &workspace_id {
+        let _ = runs::save(&db, &report, Some(ws), Some(&id), "snapshot").await;
+        let _ = workspaces::mark_restored(&db, ws).await;
+    } else {
+        let _ = runs::save(&db, &report, None, Some(&id), "snapshot").await;
     }
+
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn run_list(db: State<'_, Db>, limit: Option<usize>) -> AppResult<Vec<RunSummary>> {
+    runs::list(&db, limit.unwrap_or(20)).await
+}
+
+/// 成功率基线：按 error_code 聚合。没有这一层，R8 的数字只能靠"跑一遍看看"。
+#[tauri::command]
+pub async fn run_error_stats(db: State<'_, Db>) -> AppResult<Vec<(String, i64)>> {
+    runs::error_code_stats(&db).await
 }

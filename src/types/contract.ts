@@ -128,8 +128,10 @@ export interface RestoreStepResult {
   durationMs: number;
   deltaX: number | null;
   deltaY: number | null;
-  /** 显示状态（最大化/最小化）是否与快照一致 */
+/** 显示状态（最大化/最小化）是否与快照一致 */
   stateRestored: boolean;
+  /** 机器可读错误码，见 docs/RESTORE_CONTRACT.md */
+  code: string | null;
 }
 
 export interface RestoreReport {
@@ -155,6 +157,76 @@ export interface CorruptedScene {
 
 export interface SceneHealth {
   corrupted: CorruptedScene[];
+}
+
+// ---- M2：工作空间（SQLite） ----
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  isFavorite: boolean;
+  itemCount: number;
+  windowCount: number;
+  createdAt: number;
+  updatedAt: number;
+  lastRestoredAt: number | null;
+}
+
+export interface WorkspaceItem {
+  id: string;
+  itemType: string;
+  displayName: string;
+  target: string | null;
+  targetKind: string;
+  enabled: boolean;
+  reusePolicy: string;
+}
+
+export interface WorkspaceWindow {
+  id: string;
+  itemId: string;
+  title: string;
+  className: string;
+  processPath: string | null;
+  processName: string;
+  monitorKey: string;
+  xRatio: number;
+  yRatio: number;
+  widthRatio: number;
+  heightRatio: number;
+  sourceDpi: number | null;
+  showState: ShowState;
+  zOrder: number;
+}
+
+export interface WorkspaceDetail {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  icon: string | null;
+  isFavorite: boolean;
+  autoSnapshotEnabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastRestoredAt: number | null;
+  items: WorkspaceItem[];
+  windows: WorkspaceWindow[];
+}
+
+export interface RunSummary {
+  id: string;
+  workspaceId: string | null;
+  snapshotId: string | null;
+  status: string;
+  triggerType: string;
+  startedAt: number;
+  finishedAt: number | null;
+  totalSteps: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
 }
 
 export interface AppInfo {

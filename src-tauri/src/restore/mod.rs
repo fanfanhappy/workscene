@@ -7,7 +7,6 @@ use crate::core::models::{
 };
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
-use crate::storage;
 use crate::win::{display, filter, process, window};
 use layout::{clamp, from_ratios, round, Area};
 use matcher::{match_window, Candidate};
@@ -330,6 +329,7 @@ pub fn apply(
                     delta_x: None,
                     delta_y: None,
                     state_restored: false,
+                    code: Some("window_control_denied".into()),
                 }
             } else {
                 // 等应用自身把窗口改回去（Chromium/Electron 常见），再判定偏差
@@ -367,6 +367,16 @@ pub fn apply(
                     format!("已恢复，位置/尺寸偏差 {}px", delta.0)
                 };
 
+                let code = if !position_ok {
+                    Some("layout_drift".to_string())
+                } else if maximized_failed {
+                    Some("state_not_restored".to_string())
+                } else if win.show_state == ShowState::Minimized {
+                    Some("state_not_restored".to_string())
+                } else {
+                    None
+                };
+
                 RestoreStepResult {
                     target_name,
                     status,
@@ -376,6 +386,7 @@ pub fn apply(
                     delta_x: Some(delta.1),
                     delta_y: Some(delta.2),
                     state_restored,
+                    code,
                 }
             }
         } else if outcome.ambiguous {
@@ -388,6 +399,7 @@ pub fn apply(
                 delta_x: None,
                 delta_y: None,
                 state_restored: false,
+                code: Some("match_ambiguous".into()),
             }
         } else {
             RestoreStepResult {
@@ -399,6 +411,7 @@ pub fn apply(
                 delta_x: None,
                 delta_y: None,
                 state_restored: false,
+                code: Some("window_not_found".into()),
             }
         };
 
@@ -431,9 +444,7 @@ pub fn apply(
         pre_restore_scene_id,
     };
 
-    // 报告落盘：关窗/崩溃后仍可回查（评审补充意见 D5）
-    let _ = storage::save_run(&report);
-
+    // 报告由调用方（命令层）写入数据库，恢复引擎只负责执行与产出报告
     Ok(report)
 }
 

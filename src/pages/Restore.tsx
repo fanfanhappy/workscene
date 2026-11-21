@@ -17,7 +17,7 @@ import { api, formatRelative, formatTime } from "@/services/api";
 import type {
   RestoreReport,
   RestoreStepResult,
-  SceneSummary,
+  WorkspaceSummary,
   StepStatus,
 } from "@/types/contract";
 import { Badge, Button, Card, EmptyState, ErrorNote, Spinner } from "@/components/ui";
@@ -36,26 +36,26 @@ const statusMeta: Record<
 export function RestorePage() {
   const [params, setParams] = useSearchParams();
   const qc = useQueryClient();
-  const sceneId = params.get("scene");
+  const workspaceId = params.get("workspace");
   const [relaunch, setRelaunch] = useState(true);
   const [liveSteps, setLiveSteps] = useState<RestoreStepResult[]>([]);
   const [report, setReport] = useState<RestoreReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const scenes = useQuery({
-    queryKey: ["scenes"],
-    queryFn: api.sceneList,
+  const workspaces = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: api.workspaceList,
     staleTime: 2_000,
   });
 
   const active = useMemo(
-    () => (scenes.data ?? []).find((s) => s.id === sceneId) ?? (scenes.data ?? [])[0],
-    [scenes.data, sceneId],
+    () => (workspaces.data ?? []).find((s) => s.id === workspaceId) ?? (workspaces.data ?? [])[0],
+    [workspaces.data, workspaceId],
   );
 
   const preview = useQuery({
     queryKey: ["preview", active?.id],
-    queryFn: () => api.restorePreview(active!.id),
+    queryFn: () => api.workspacePreview(active!.id),
     enabled: Boolean(active?.id),
     retry: 0,
   });
@@ -71,7 +71,7 @@ export function RestorePage() {
   }, []);
 
   const run = useMutation({
-    mutationFn: () => api.restoreApply(active!.id, relaunch),
+    mutationFn: () => api.workspaceRestore(active!.id, relaunch),
     onMutate: () => {
       setLiveSteps([]);
       setReport(null);
@@ -79,26 +79,26 @@ export function RestorePage() {
     },
     onSuccess: (r) => {
       setReport(r);
-      qc.invalidateQueries({ queryKey: ["scenes"] });
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
     },
     onError: (e) => setError(String((e as Error).message)),
   });
 
   // 撤销：把恢复前自动创建的保护快照再 apply 一次
   const undo = useMutation({
-    mutationFn: (preId: string) => api.restoreApply(preId, false),
+    mutationFn: (preId: string) => api.snapshotRestore(preId, false),
     onMutate: () => {
       setLiveSteps([]);
       setError(null);
     },
     onSuccess: (r) => {
       setReport(r);
-      qc.invalidateQueries({ queryKey: ["scenes"] });
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
     },
     onError: (e) => setError(String((e as Error).message)),
   });
 
-  if (scenes.isPending) {
+  if (workspaces.isPending) {
     return (
       <Card className="flex items-center gap-2 text-aux text-ink-3">
         <Spinner /> 读取快照…
@@ -106,7 +106,7 @@ export function RestorePage() {
     );
   }
 
-  if ((scenes.data ?? []).length === 0) {
+  if ((workspaces.data ?? []).length === 0) {
     return (
       <EmptyState
         title="还没有可恢复的工作现场"
@@ -125,13 +125,13 @@ export function RestorePage() {
           工作现场
         </p>
         <ul className="flex flex-col gap-1.5">
-          {(scenes.data ?? []).map((s: SceneSummary) => {
+          {(workspaces.data ?? []).map((s: WorkspaceSummary) => {
             const isActive = s.id === active?.id;
             return (
               <li key={s.id}>
                 <button
                   onClick={() => {
-                    setParams({ scene: s.id });
+                    setParams({ workspace: s.id });
                     setReport(null);
                     setLiveSteps([]);
                   }}
@@ -143,7 +143,7 @@ export function RestorePage() {
                 >
                   <p className="truncate text-body font-medium">{s.name}</p>
                   <p className="mt-0.5 text-[11px] text-ink-3">
-                    {s.windowCount} 窗口 · {formatRelative(s.capturedAt)}
+                    {s.windowCount} 窗口 · {formatRelative(s.createdAt)}
                   </p>
                 </button>
               </li>
@@ -163,7 +163,7 @@ export function RestorePage() {
                 <div>
                   <h2 className="text-module font-semibold tracking-tight">{active?.name}</h2>
                   <p className="mt-1 text-aux text-ink-3">
-                    创建于 {active ? formatTime(active.capturedAt) : ""} ·{" "}
+                    创建于 {active ? formatTime(active.createdAt) : ""} ·{" "}
                     {preview.data?.summary.total ?? active?.windowCount ?? 0} 个窗口
                   </p>
                 </div>

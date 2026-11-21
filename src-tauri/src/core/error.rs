@@ -9,6 +9,9 @@ pub enum AppError {
     #[error("数据格式错误：{0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("数据库操作失败：{0}")]
+    Db(#[from] sqlx::Error),
+
     #[error("{0}")]
     Message(String),
 

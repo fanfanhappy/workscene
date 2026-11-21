@@ -66,11 +66,11 @@ export function CapturePage() {
         windows: result.windows.filter((w) => selected.has(w.hwnd)),
       };
       if (subset.windows.length === 0) throw new Error("请至少选择一个窗口");
-      return api.sceneSave(name, subset);
+      return api.workspaceCreate(name, subset);
     },
     onSuccess: (scene) => {
-      qc.invalidateQueries({ queryKey: ["scenes"] });
-      navigate(`/restore?scene=${scene.id}`);
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
+      navigate(`/workspaces?id=${scene.id}`);
     },
     onError: (e) => setError(String((e as Error).message)),
   });
@@ -262,7 +262,7 @@ export function CapturePage() {
         <>
           <Card className="flex flex-col gap-4">
             <label className="flex flex-col gap-1.5">
-              <span className="text-aux text-ink-2">工作现场名称</span>
+              <span className="text-aux text-ink-2">工作空间名称</span>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -304,7 +304,7 @@ export function CapturePage() {
             </Button>
             <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
               {save.isPending ? <Spinner /> : <Check size={15} />}
-              保存为工作现场
+              保存为工作空间
             </Button>
           </div>
         </>

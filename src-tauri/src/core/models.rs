@@ -169,6 +169,8 @@ pub struct RestoreStepResult {
     pub delta_y: Option<i32>,
     /// 显示状态（最大化/最小化）是否与快照一致；不一致时 message 会明确说明
     pub state_restored: bool,
+    /// 机器可读错误码，见 docs/RESTORE_CONTRACT.md §3；成功时为 None
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

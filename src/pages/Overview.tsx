@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Camera, Monitor, RotateCcw, Trash2, AppWindow } from "lucide-react";
+import { AppWindow, Camera, Monitor, RotateCcw, Trash2 } from "lucide-react";
 import { api, formatRelative } from "@/services/api";
-import type { DisplayInfo, WindowInfo } from "@/types/contract";
+import type { DisplayInfo } from "@/types/contract";
 import {
   Badge,
   Button,
@@ -27,9 +27,9 @@ export function OverviewPage() {
     retry: 0,
   });
 
-  const scenes = useQuery({
-    queryKey: ["scenes"],
-    queryFn: api.sceneList,
+  const workspaces = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: api.workspaceList,
     staleTime: 2_000,
   });
 
@@ -40,70 +40,70 @@ export function OverviewPage() {
   });
 
   const remove = useMutation({
-    mutationFn: (id: string) => api.sceneDelete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["scenes"] }),
+    mutationFn: (id: string) => api.workspaceDelete(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
   });
 
   const stats = useMemo(() => {
     const windows = capture.data?.windows ?? [];
-    const apps = new Set(windows.map((w) => w.processName.toLowerCase()));
-    return { windows: windows.length, apps: apps.size };
+    return {
+      windows: windows.length,
+      apps: new Set(windows.map((w) => w.processName.toLowerCase())).size,
+    };
   }, [capture.data]);
 
   return (
     <div className="mx-auto flex max-w-[1100px] flex-col gap-6">
-      <section>
-        <Card className="flex flex-col gap-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-[11px] font-medium uppercase tracking-widest text-ink-3">
-                Current Desktop
-              </p>
-              <p className="mt-1 text-card text-ink-2">
-                {capture.isPending
-                  ? "正在扫描当前桌面…"
-                  : capture.isError
-                    ? "无法读取当前桌面"
-                    : "当前桌面已就绪，可以捕获为工作现场"}
-              </p>
-            </div>
-            <Button variant="primary" onClick={() => navigate("/capture")}>
-              <Camera size={15} />
-              捕获当前现场
-            </Button>
+      <Card className="flex flex-col gap-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-widest text-ink-3">
+              Current Desktop
+            </p>
+            <p className="mt-1 text-card text-ink-2">
+              {capture.isPending
+                ? "正在扫描当前桌面…"
+                : capture.isError
+                  ? "无法读取当前桌面"
+                  : "当前桌面已就绪，可以捕获为工作空间"}
+            </p>
           </div>
+          <Button variant="primary" onClick={() => navigate("/capture")}>
+            <Camera size={15} />
+            捕获当前现场
+          </Button>
+        </div>
 
-          {capture.isError ? <ErrorNote message={String(capture.error.message)} /> : null}
+        {capture.isError ? <ErrorNote message={String(capture.error.message)} /> : null}
 
-          <div className="flex flex-wrap items-end gap-8 border-t border-line pt-4">
-            <Metric label="窗口" value={capture.isPending ? "—" : stats.windows} />
-            <Metric label="应用" value={capture.isPending ? "—" : stats.apps} />
-            <Metric
-              label="显示器"
-              value={capture.isPending ? "—" : (capture.data?.displays.length ?? 0)}
-            />
-            {capture.data ? (
-              <div className="ml-auto flex items-center gap-2 text-aux text-ink-3">
-                <Badge tone="success">扫描完成</Badge>
-                <span className="tabnum">耗时 {capture.data.durationMs} ms</span>
-              </div>
-            ) : null}
-          </div>
-
+        <div className="flex flex-wrap items-end gap-8 border-t border-line pt-4">
+          <Metric label="窗口" value={capture.isPending ? "—" : stats.windows} />
+          <Metric label="应用" value={capture.isPending ? "—" : stats.apps} />
+          <Metric
+            label="显示器"
+            value={capture.isPending ? "—" : (capture.data?.displays.length ?? 0)}
+          />
           {capture.data ? (
-            <MonitorCanvas
-              displays={capture.data.displays}
-              windows={capture.data.windows}
-              height={180}
-            />
+            <div className="ml-auto flex items-center gap-2 text-aux text-ink-3">
+              <Badge tone="success">扫描完成</Badge>
+              <span className="tabnum">耗时 {capture.data.durationMs} ms</span>
+            </div>
           ) : null}
-        </Card>
-      </section>
+        </div>
+
+        {capture.data ? (
+          <MonitorCanvas
+            displays={capture.data.displays}
+            windows={capture.data.windows}
+            height={180}
+          />
+        ) : null}
+      </Card>
 
       <section>
         <SectionTitle
           title="显示器"
-          hint="窗口恢复按显示器工作区计算比例坐标，显示器变化时会重新映射"
+          hint="窗口恢复按显示器工作区计算比例坐标，显示器变化时自动重新映射"
         />
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {(capture.data?.displays ?? []).map((d: DisplayInfo) => (
@@ -111,7 +111,9 @@ export function OverviewPage() {
               <Monitor size={18} className="mt-0.5 text-ink-3" />
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <p className="text-body font-medium">{d.isPrimary ? "主显示器" : "副显示器"}</p>
+                  <p className="text-body font-medium">
+                    {d.isPrimary ? "主显示器" : "副显示器"}
+                  </p>
                   <Badge>{Math.round(d.scaleFactor * 100)}%</Badge>
                 </div>
                 <p className="mt-1 font-mono text-aux text-ink-3">
@@ -130,19 +132,26 @@ export function OverviewPage() {
 
       <section>
         <SectionTitle
-          title="已保存的工作现场"
-          hint="每个现场是一份不可变快照，恢复后可随时回退"
+          title="工作空间"
+          hint="每个工作空间保存一套应用清单与窗口布局，恢复前会自动留存保护快照"
+          action={
+            workspaces.data?.length ? (
+              <Button size="sm" variant="ghost" onClick={() => navigate("/workspaces")}>
+                全部工作空间
+              </Button>
+            ) : null
+          }
         />
 
-        {scenes.isPending ? (
+        {workspaces.isPending ? (
           <Card className="flex items-center gap-2 text-aux text-ink-3">
-            <Spinner /> 读取快照…
+            <Spinner /> 读取工作空间…
           </Card>
-        ) : (scenes.data ?? []).length === 0 ? (
+        ) : (workspaces.data ?? []).length === 0 ? (
           <EmptyState
             icon={<AppWindow size={22} />}
-            title="还没有保存任何工作现场"
-            description="打开需要记录的应用与窗口，调整好布局，然后捕获为工作现场。"
+            title="还没有保存任何工作空间"
+            description="打开需要记录的应用与窗口，调整好布局，然后捕获为工作空间。"
             action={
               <Button variant="primary" onClick={() => navigate("/capture")}>
                 <Camera size={15} />
@@ -152,20 +161,22 @@ export function OverviewPage() {
           />
         ) : (
           <ul className="flex flex-col gap-2">
-            {(scenes.data ?? []).map((s) => (
-              <li key={s.id}>
+            {(workspaces.data ?? []).slice(0, 5).map((w) => (
+              <li key={w.id}>
                 <Card className="flex items-center gap-4">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-body font-medium">{s.name}</p>
+                    <p className="truncate text-body font-medium">{w.name}</p>
                     <p className="mt-0.5 text-aux text-ink-3">
-                      {s.windowCount} 个窗口 · {s.displayCount} 台显示器 ·{" "}
-                      {formatRelative(s.capturedAt)}
+                      {w.itemCount} 个应用 · {w.windowCount} 个窗口 ·{" "}
+                      {w.lastRestoredAt
+                        ? `上次恢复 ${formatRelative(w.lastRestoredAt)}`
+                        : `创建于 ${formatRelative(w.createdAt)}`}
                     </p>
                   </div>
                   <Button
                     size="sm"
                     variant="secondary"
-                    onClick={() => navigate(`/restore?scene=${s.id}`)}
+                    onClick={() => navigate(`/restore?workspace=${w.id}`)}
                   >
                     <RotateCcw size={14} />
                     恢复
@@ -173,10 +184,11 @@ export function OverviewPage() {
                   <Button
                     size="sm"
                     variant="danger"
-                    title="删除该快照"
+                    title="删除该工作空间及其快照"
                     disabled={remove.isPending}
                     onClick={() => {
-                      if (confirm(`删除快照「${s.name}」？此操作不可撤销。`)) remove.mutate(s.id);
+                      if (confirm(`删除工作空间「${w.name}」及其所有快照？此操作不可撤销。`))
+                        remove.mutate(w.id);
                     }}
                   >
                     <Trash2 size={14} />
@@ -191,7 +203,7 @@ export function OverviewPage() {
         {(health.data?.corrupted.length ?? 0) > 0 ? (
           <div className="mt-3 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-aux text-warning">
             <p className="font-medium">
-              {health.data!.corrupted.length} 个快照文件已损坏，未出现在上面的列表中
+              {health.data!.corrupted.length} 个快照文件已损坏，未出现在列表中
             </p>
             <ul className="mt-1 flex flex-col gap-0.5 font-mono text-[11px]">
               {health.data!.corrupted.slice(0, 5).map((c) => (
@@ -200,9 +212,6 @@ export function OverviewPage() {
                 </li>
               ))}
             </ul>
-            <p className="mt-1 text-[11px] text-ink-3">
-              原始文件仍在 snapshots 目录中，可手动检查或删除后重新捕获。
-            </p>
           </div>
         ) : null}
       </section>
@@ -220,5 +229,3 @@ export function OverviewPage() {
     </div>
   );
 }
-
-export type { WindowInfo };

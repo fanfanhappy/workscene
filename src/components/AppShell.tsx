@@ -13,6 +13,7 @@ import type { AppInfo } from "@/types/contract";
 
 const NAV = [
   { to: "/", label: "总览", icon: LayoutDashboard, end: true },
+  { to: "/workspaces", label: "工作空间", icon: Boxes },
   { to: "/capture", label: "现场捕获", icon: Camera },
   { to: "/restore", label: "恢复中心", icon: RotateCcw },
 ];

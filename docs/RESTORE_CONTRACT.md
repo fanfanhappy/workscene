@@ -34,22 +34,21 @@
 | 无窗口 | skipped | `未找到可用的对应窗口…` | Yes |
 | 显示器缺失 | — | 走 `displayNotes`，位置映射到主屏 | Yes |
 
-## 3. 待补：error_code 枚举
+## 3. error_code（v0.2 已部分落地）
 
-当前 `message` 是自由中文句子，**无法按错误类型聚合**，也无法做成功率统计。目标形态：
+`RestoreStepResult.code` 与 `restore_steps.error_code` 已开始写入，`run_error_stats` 可按 code 聚合。
 
-| error_code | 含义 | 建议动作 | 已实现 |
+| error_code | 含义 | 建议动作 | 状态 |
 |---|---|---|---|
-| `match_ambiguous` | 多候选评分接近 | 打开候选选择器 | No |
-| `window_not_found` | 无匹配窗口 | 启动应用 / 重新捕获 | No |
-| `exe_missing` | 可执行文件不存在 | 重新定位应用 | No |
-| `uipi_denied` | 权限不足无法移动 | 以相同权限运行 | No（当前混在写入失败里） |
-| `state_not_restored` | 最大化/最小化未还原 | 手动最大化 | No（当前靠 `stateRestored=false`） |
-| `layout_drift` | 应用改回自身位置 | 查看建议 | No（当前混在 failed 文案里） |
-| `launch_timeout` | 启动后超时未见窗口 | 重试 | No（当前归入 skipped） |
-| `display_missing` | 目标显示器不在 | 查看映射预览 | 部分（仅 displayNotes） |
-
-引入 error_code 时，`StepStatus` 保持不变，新增 `code: String` 字段；UI 先按 code 分组统计，再显示中文文案。
+| `match_ambiguous` | 多候选评分接近 | 打开候选选择器 | **已实现** |
+| `window_not_found` | 无匹配窗口 | 启动应用 / 重新捕获 | **已实现** |
+| `window_control_denied` | 写入位置失败（已关闭或 UIPI 限制） | 以相同权限运行 | **已实现** |
+| `layout_drift` | 应用改回自身位置 | 查看建议 | **已实现** |
+| `state_not_restored` | 最大化/最小化未还原 | 手动最大化 | **已实现** |
+| `exe_missing` | 可执行文件不存在 | 重新定位应用 | 未实现 |
+| `launch_timeout` | 启动后超时未见窗口 | 重试 | 未实现（当前归入 `window_not_found`） |
+| `display_missing` | 目标显示器不在 | 查看映射预览 | 部分（仅 `displayNotes`） |
+| `uipi_denied` | 权限不足 | 提示提权 | 未实现（与 `window_control_denied` 合并） |
 
 ## 4. 报告落盘
 
