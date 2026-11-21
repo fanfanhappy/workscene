@@ -4,6 +4,7 @@ import { OverviewPage } from "@/pages/Overview";
 import { CapturePage } from "@/pages/Capture";
 import { RestorePage } from "@/pages/Restore";
 import { WorkspacesPage } from "@/pages/Workspaces";
+import { HistoryPage } from "@/pages/History";
 
 function Shell() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/capture" element={<CapturePage />} />
           <Route path="/restore" element={<RestorePage />} />
+          <Route path="/history" element={<HistoryPage />} />
         </Route>
       </Routes>
     </HashRouter>

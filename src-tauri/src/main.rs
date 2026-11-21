@@ -16,6 +16,10 @@ fn main() {
         workscene_lib::m2test();
         return;
     }
+    if args.iter().any(|a| a == "--m5test") {
+        workscene_lib::m5test();
+        return;
+    }
     if let Some(pos) = args.iter().position(|a| a == "--baseline") {
         let rounds = args
             .get(pos + 1)
@@ -27,6 +31,11 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--capture") {
         let name = args.get(pos + 1).cloned().unwrap_or_else(|| "未命名现场".into());
         workscene_lib::cli_capture(&name);
+        return;
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--snap") {
+        let name = args.get(pos + 1).cloned().unwrap_or_default();
+        workscene_lib::cli_snapshot(&name);
         return;
     }
 

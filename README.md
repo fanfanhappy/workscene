@@ -14,7 +14,7 @@ Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
 
-## 进度：M4（可编辑布局 + 跨 DPI）；M1/M2/M3 已完成
+## 进度：M5（Hybrid 快照）；M1–M4 已完成
 
 ### M1 系统能力验证
 
@@ -65,6 +65,19 @@ Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）·
 | 删除应用项（级联删其窗口）与删除单个窗口 | 完成，含级联单测 |
 | `SetThreadDpiAwarenessContext`：每次 SetWindowPos/SetWindowPlacement 前把线程切到 PMv2 | 完成 |
 | 布局保存后行更新与「放弃改动」回滚 | 完成 |
+
+### M5 Hybrid 快照
+
+| 内容 | 状态 |
+|---|---|
+| 手动快照（每次都写）与自动快照（指纹去重 + 180s 节流） | 完成，见 ADR-0004 |
+| 内容指纹：路径/类名/显示器/位置桶(40px)/尺寸/状态，标题不入指纹 | 完成 |
+| 保留策略：只淘汰最旧的 auto，手动/初始/保护快照永不删除，同时删 payload 文件 | 完成 |
+| 后台自动快照任务：仅在存在激活工作空间且开关打开时工作，60s 巡检 | 完成 |
+| 恢复成功即记录激活工作空间（自动快照的归属） | 完成 |
+| 快照差异：按「进程+类名+归一化标题」对齐，输出新增/移除/移动/状态变化 | 完成，含 2 条单测 |
+| 历史页：时间线、类型标签、保护标记、比较、恢复、删除、清理自动快照 | 完成 |
+| 崩溃后恢复提示（异常退出检测） | 未做 |
 
 ### 按评审已修的问题
 
@@ -119,7 +132,9 @@ pnpm tauri dev                       # 开发
 cargo run --manifest-path src-tauri/Cargo.toml -- --selftest      # 打印真实捕获 JSON
 cargo run --manifest-path src-tauri/Cargo.toml -- --m1test        # 捕获→破坏→恢复→校验（含最大化）
 cargo run --manifest-path src-tauri/Cargo.toml -- --m2test        # 工作空间闭环：建库→建空间→恢复→报告入库→删除
+cargo run --manifest-path src-tauri/Cargo.toml -- --m5test       # 快照去重/节流/保留/差异
 cargo run --manifest-path src-tauri/Cargo.toml -- --baseline 5    # 成功率基线（JSONL + 汇总，95% 门槛）
+cargo run --manifest-path src-tauri/Cargo.toml -- --snap "名称"    # 给同名工作空间追加一份手动快照
 cargo run --manifest-path src-tauri/Cargo.toml -- --capture "名称" # 无头捕获并保存为工作空间
 cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -172,9 +187,9 @@ src-tauri/
 - 跨 DPI 已加线程级 context 切换，但**真实双屏 + 混合 DPI 仍未实机验证**
 - 快照 JSON 明文保存窗口标题与完整路径，**没有加密**；导入/导出未实现（实现时必须按评审 R5 补信任模型）
 - 单实例与恢复互斥已实现，但窗口标题写死为 "WorkScene"（多语言改名后需同步）
-- 无自动快照、无指纹去重（`content_fingerprint` 已入库，但目前只记录不参与去重）
+- 自动快照只在"有激活工作空间"时工作；应用没运行的应用不会被自动记录\n- 指纹用 DefaultHasher，跨版本不稳定，仅用于同一次运行内去重
 - 最小化窗口恢复为普通窗口（有 `stateRestored=false` 与文案说明，不算谎报）
 
-## 下一步（M4）
+## 下一步（M6）
 
-工作空间编辑（增删应用、可视化拖拽布局 UI-06b）、`SetThreadDpiAwarenessContext`、10 应用 × 3 场景真实成功率矩阵（把模拟窗口基线换成真实应用）。
+异常退出后的恢复提示、应用适配器（L2：VS Code / Terminal / 浏览器启动参数）、托盘与快捷键、安装包与签名、10 应用 × 3 场景真实成功率矩阵。

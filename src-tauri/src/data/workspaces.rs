@@ -95,7 +95,7 @@ fn identity_of(process_path: &Option<String>, process_name: &str) -> String {
     }
 }
 
-fn fingerprint(capture: &CaptureResult) -> String {
+pub fn fingerprint(capture: &CaptureResult) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 

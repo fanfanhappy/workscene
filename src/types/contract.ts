@@ -225,6 +225,39 @@ export interface LayoutUpdate {
   heightRatio: number;
 }
 
+// ---- M5：Hybrid 快照 ----
+
+export interface SnapshotSummary {
+  id: string;
+  workspaceId: string;
+  name: string;
+  snapshotType: string;
+  triggerType: string;
+  capturedAt: number;
+  windowCount: number;
+  displayCount: number;
+  isProtected: boolean;
+  fingerprint: string | null;
+}
+
+export interface WindowDiff {
+  change: "added" | "removed" | "moved" | "state_changed";
+  titleA: string;
+  titleB: string;
+  detail: string;
+}
+
+export interface SnapshotDiff {
+  added: number;
+  removed: number;
+  moved: number;
+  stateChanged: number;
+  unchanged: number;
+  windows: WindowDiff[];
+  displayChanged: boolean;
+  displayDetail: string;
+}
+
 export interface RunSummary {  id: string;
   workspaceId: string | null;
   snapshotId: string | null;

@@ -49,6 +49,8 @@ pub fn run() {
 
             builder.build()?;
 
+            spawn_auto_snapshot(app.handle().clone());
+
             // 诊断用：WORKSCENE_ROUTE=/workspaces 可直接打开指定页面（截图与回归用）
             if let Ok(route) = std::env::var("WORKSCENE_ROUTE") {
                 if let Some(w) = app.get_webview_window("main") {
@@ -80,6 +82,11 @@ pub fn run() {
             commands::run_list,
             commands::run_error_stats,
             commands::restore_is_busy,
+            commands::snapshot_list,
+            commands::snapshot_create,
+            commands::snapshot_delete,
+            commands::snapshot_diff,
+            commands::snapshot_prune,
         ])
         .run(tauri::generate_context!())
         .expect("WorkScene 启动失败");
@@ -124,6 +131,49 @@ pub fn cli_capture(name: &str) {
             w.name, w.item_count, w.window_count, w.id
         ),
         Err(e) => eprintln!("保存失败：{e}"),
+    }
+}
+
+/// 无头快照：按工作空间名称追加一份手动快照（演示与回归用）。
+/// 用法：cargo run -- --snap "前端开发"
+pub fn cli_snapshot(name: &str) {
+    win::dpi::enable_per_monitor_v2();
+    let capture = match capture::scan() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("捕获失败：{e}");
+            return;
+        }
+    };
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("数据库初始化失败：{e}");
+            return;
+        }
+    };
+    let list = match tauri::async_runtime::block_on(data::workspaces::list(&db)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("读取工作空间失败：{e}");
+            return;
+        }
+    };
+    let Some(ws) = list.iter().find(|w| w.name == name).or_else(|| list.first()) else {
+        eprintln!("没有可用的工作空间");
+        return;
+    };
+    match tauri::async_runtime::block_on(data::snapshots::create_manual(
+        &db,
+        &ws.id,
+        &format!("手动快照 {}", ws.name),
+        &capture,
+    )) {
+        Ok(s) => println!(
+            "已写入快照：{}（{} 个窗口，类型 {}）",
+            s.id, s.window_count, s.snapshot_type
+        ),
+        Err(e) => eprintln!("写入快照失败：{e}"),
     }
 }
 
@@ -682,6 +732,261 @@ pub fn baseline(iterations: usize) {
         if pass { "PASS" } else { "FAIL" }
     );
     if !pass {
+        std::process::exit(1);
+    }
+}
+
+/// 自动快照后台任务：只在存在"当前激活工作空间"且其开关打开时工作。
+/// 每分钟看一次桌面，指纹不变就不写库（红线二：不能每次窗口变化都落库）。
+fn spawn_auto_snapshot(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        // 启动后先等一会，避免与应用启动抢资源
+        std::thread::sleep(Duration::from_secs(40));
+        loop {
+            let db = app.state::<data::Db>().inner().clone();
+            match tauri::async_runtime::block_on(auto_snapshot_once(&db)) {
+                Ok(()) => {}
+                Err(e) => eprintln!("自动快照失败：{e}"),
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+}
+
+async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
+    let Some(ws) = data::snapshots::active_workspace(db).await? else {
+        return Ok(());
+    };
+
+    let enabled: Option<i64> = sqlx::query_scalar(
+        "SELECT auto_snapshot_enabled FROM workspaces WHERE id = ?",
+    )
+    .bind(&ws)
+    .fetch_optional(&db.pool)
+    .await?;
+
+    if enabled.unwrap_or(0) == 0 {
+        return Ok(());
+    }
+
+    let capture = capture::scan()?;
+    let _ = data::snapshots::create_auto(
+        db,
+        &ws,
+        &capture,
+        data::snapshots::AUTO_MIN_INTERVAL_MS,
+    )
+    .await?;
+    Ok(())
+}
+
+/// M5 自检：Hybrid 快照。
+/// 建空间 → 自动快照去重（指纹相同不写）→ 变化后写入 → 保留策略只淘汰旧自动快照 →
+/// 手动快照受保护 → 差异比较 → 删除。
+/// 用法：cargo run -- --m5test
+pub fn m5test() {
+    win::dpi::enable_per_monitor_v2();
+    println!("[env] data_dir={}", storage::data_dir().display());
+    let mut ok = true;
+
+    let Some(mock_a) = win::mock::MockWindow::spawn("M5 窗口 A", (320, 220, 860, 580)) else {
+        eprintln!("无法创建模拟窗口，自检中止");
+        std::process::exit(2);
+    };
+    let Some(mock_b) = win::mock::MockWindow::spawn("M5 窗口 B", (720, 380, 760, 520)) else {
+        eprintln!("无法创建第二个模拟窗口，自检中止");
+        mock_a.close();
+        std::process::exit(2);
+    };
+    std::thread::sleep(Duration::from_millis(350));
+
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("数据库初始化失败：{e}");
+            mock_a.close();
+            mock_b.close();
+            std::process::exit(2);
+        }
+    };
+
+    let capture = match capture::scan_for_test() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("捕获失败：{e}");
+            mock_a.close();
+            mock_b.close();
+            std::process::exit(2);
+        }
+    };
+    let hwnds = [mock_a.hwnd as usize, mock_b.hwnd as usize];
+    let mine: Vec<WindowInfo> = capture
+        .windows
+        .iter()
+        .filter(|w| hwnds.contains(&w.hwnd))
+        .cloned()
+        .collect();
+    if mine.len() != 2 {
+        eprintln!("捕获到 {} 个模拟窗口（应为 2）", mine.len());
+        mock_a.close();
+        mock_b.close();
+        std::process::exit(2);
+    }
+    let isolated = CaptureResult {
+        windows: mine,
+        displays: capture.displays.clone(),
+        ..capture
+    };
+
+    let ws = match tauri::async_runtime::block_on(data::workspaces::create_from_capture(
+        &db,
+        "M5 自检工作空间",
+        &isolated,
+    )) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("创建工作空间失败：{e}");
+            mock_a.close();
+            mock_b.close();
+            std::process::exit(2);
+        }
+    };
+
+    let list = tauri::async_runtime::block_on(data::snapshots::list(&db, &ws.id, 50));
+    let count_initial = list.map(|v| v.len()).unwrap_or(0);
+    println!("[1/6] 初始快照数：{count_initial}（建空间时自动写入 1 份）");
+
+    // 指纹相同 -> 跳过
+    let same = tauri::async_runtime::block_on(data::snapshots::create_auto(
+        &db,
+        &ws.id,
+        &isolated,
+        0,
+    ));
+    let same_skipped = matches!(same, Ok(None));
+    println!("[2/6] 桌面未变时自动快照被去重：{same_skipped}");
+    if !same_skipped {
+        ok = false;
+    }
+
+    // 移动窗口 -> 指纹变化 -> 写入
+    win::window::set_window_rect(mock_a.hwnd, 900, 500, 780, 520);
+    std::thread::sleep(Duration::from_millis(300));
+    let capture2 = match capture::scan_for_test() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("第二次捕获失败：{e}");
+            mock_a.close();
+            mock_b.close();
+            std::process::exit(2);
+        }
+    };
+    let capture2 = CaptureResult {
+        windows: capture2
+            .windows
+            .iter()
+            .filter(|w| hwnds.contains(&w.hwnd))
+            .cloned()
+            .collect(),
+        ..capture2
+    };
+    let created_auto = tauri::async_runtime::block_on(data::snapshots::create_auto(
+        &db,
+        &ws.id,
+        &capture2,
+        0,
+    ));
+    let auto_ok = matches!(created_auto, Ok(Some(_)));
+    println!("[3/6] 桌面变化后写入自动快照：{auto_ok}");
+    if !auto_ok {
+        ok = false;
+    }
+
+    // 再来一份自动快照 + 手动快照
+    win::window::set_window_rect(mock_a.hwnd, 420, 260, 820, 560);
+    std::thread::sleep(Duration::from_millis(300));
+    let capture3 = match capture::scan_for_test() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("第三次捕获失败：{e}");
+            mock_a.close();
+            mock_b.close();
+            std::process::exit(2);
+        }
+    };
+    let capture3 = CaptureResult {
+        windows: capture3
+            .windows
+            .iter()
+            .filter(|w| hwnds.contains(&w.hwnd))
+            .cloned()
+            .collect(),
+        ..capture3
+    };
+    let _ = tauri::async_runtime::block_on(data::snapshots::create_auto(&db, &ws.id, &capture3, 0));
+    let manual = tauri::async_runtime::block_on(data::snapshots::create_manual(
+        &db,
+        &ws.id,
+        "手动快照",
+        &capture3,
+    ));
+    println!(
+        "[4/6] 手动快照已创建：{}（protected={:?}）",
+        manual.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
+        manual.as_ref().map(|m| m.is_protected)
+    );
+
+    // 保留策略：只留 1 份自动快照
+    let removed = tauri::async_runtime::block_on(data::snapshots::prune(&db, &ws.id, 1));
+    let after = tauri::async_runtime::block_on(data::snapshots::list(&db, &ws.id, 50))
+        .unwrap_or_default();
+    let autos = after.iter().filter(|s| s.snapshot_type == "auto").count();
+    let manuals = after.iter().filter(|s| s.snapshot_type == "manual").count();
+    println!(
+        "[5/6] 保留策略：淘汰 {removed:?} 份，剩余自动 {autos} / 手动 {manuals} / 总计 {}",
+        after.len()
+    );
+    if autos > 1 || manuals != 1 {
+        ok = false;
+    }
+
+    // 差异比较：初始快照 vs 最新自动快照
+    let initial = after.iter().find(|s| s.snapshot_type == "initial").map(|s| s.id.clone());
+    let newest = after
+        .iter()
+        .find(|s| s.snapshot_type == "auto")
+        .map(|s| s.id.clone());
+    if let (Some(a), Some(b)) = (initial, newest) {
+        match (
+            storage::load_scene(&a),
+            storage::load_scene(&b),
+        ) {
+            (Ok(sa), Ok(sb)) => {
+                let d = data::snapshots::diff(&sa, &sb);
+                println!(
+                    "[6/6] 差异：新增 {} / 移除 {} / 移动 {} / 状态变化 {} / 未变 {}（{}）",
+                    d.added, d.removed, d.moved, d.state_changed, d.unchanged, d.display_detail
+                );
+                if d.moved == 0 {
+                    ok = false;
+                }
+            }
+            _ => {
+                eprintln!("读取快照 payload 失败");
+                ok = false;
+            }
+        }
+    } else {
+        eprintln!("缺少可比对的快照");
+        ok = false;
+    }
+
+    let _ = tauri::async_runtime::block_on(data::workspaces::delete(&db, &ws.id));
+    mock_a.close();
+    mock_b.close();
+
+    println!("\nM5 结果：{}", if ok { "PASS" } else { "FAIL" });
+    if !ok {
         std::process::exit(1);
     }
 }

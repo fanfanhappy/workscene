@@ -4,6 +4,7 @@ use crate::core::models::{
 };
 use crate::core::{AppError, AppResult};
 use crate::data::runs::{self, RunSummary};
+use crate::data::snapshots::{self, SnapshotDiff, SnapshotSummary};
 use crate::data::workspaces::{self, WorkspaceDetail, WorkspaceSummary};
 use crate::data::Db;
 use crate::storage;
@@ -158,6 +159,8 @@ pub async fn workspace_restore(
 
     let _ = runs::save(&db, &report, Some(&id), snapshot_id.as_deref(), "manual").await;
     let _ = workspaces::mark_restored(&db, &id).await;
+    // 恢复过的空间成为"当前激活空间"，自动快照据此归属
+    let _ = snapshots::set_active_workspace(&db, &id).await;
 
     Ok(report)
 }
@@ -229,4 +232,54 @@ pub async fn run_error_stats(db: State<'_, Db>) -> AppResult<Vec<(String, i64)>>
 #[tauri::command]
 pub fn restore_is_busy() -> bool {
     crate::restore::is_busy()
+}
+
+// ---- 快照（M5：Hybrid） ----
+
+#[tauri::command]
+pub async fn snapshot_list(
+    db: State<'_, Db>,
+    workspace_id: String,
+    limit: Option<usize>,
+) -> AppResult<Vec<SnapshotSummary>> {
+    snapshots::list(&db, &workspace_id, limit.unwrap_or(50)).await
+}
+
+/// 手动快照：立即捕获当前桌面并归档（永远创建，不做去重）
+#[tauri::command]
+pub async fn snapshot_create(db: State<'_, Db>, workspace_id: String, name: String) -> AppResult<SnapshotSummary> {
+    let capture = capture::scan()?;
+    let name = if name.trim().is_empty() {
+        "手动快照".to_string()
+    } else {
+        name
+    };
+    snapshots::create_manual(&db, &workspace_id, &name, &capture).await
+}
+
+#[tauri::command]
+pub async fn snapshot_delete(db: State<'_, Db>, id: String) -> AppResult<()> {
+    snapshots::delete(&db, &id).await
+}
+
+#[tauri::command]
+pub async fn snapshot_diff(
+    db: State<'_, Db>,
+    id_a: String,
+    id_b: String,
+) -> AppResult<SnapshotDiff> {
+    let a = storage::load_scene(&id_a)?;
+    let b = storage::load_scene(&id_b)?;
+    let _ = snapshots::get(&db, &id_a).await?;
+    let _ = snapshots::get(&db, &id_b).await?;
+    Ok(snapshots::diff(&a, &b))
+}
+
+#[tauri::command]
+pub async fn snapshot_prune(
+    db: State<'_, Db>,
+    workspace_id: String,
+    keep: usize,
+) -> AppResult<usize> {
+    snapshots::prune(&db, &workspace_id, keep).await
 }

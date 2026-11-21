@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import {
   Boxes,
   Camera,
+  History,
   LayoutDashboard,
   Moon,
   RotateCcw,
@@ -16,6 +17,7 @@ const NAV = [
   { to: "/workspaces", label: "工作空间", icon: Boxes },
   { to: "/capture", label: "现场捕获", icon: Camera },
   { to: "/restore", label: "恢复中心", icon: RotateCcw },
+  { to: "/history", label: "历史快照", icon: History },
 ];
 
 function useTheme() {

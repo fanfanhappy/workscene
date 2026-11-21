@@ -1,4 +1,5 @@
 pub mod runs;
+pub mod snapshots;
 pub mod workspaces;
 
 use crate::core::{AppError, AppResult};

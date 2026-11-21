@@ -8,6 +8,8 @@ import type {
   RestoreReport,
   RunSummary,
   SceneHealth,
+  SnapshotDiff,
+  SnapshotSummary,
   WorkspaceDetail,
   WorkspaceSummary,
 } from "@/types/contract";
@@ -71,6 +73,16 @@ export const api = {
     call<void>("workspace_window_delete", { workspaceId, windowId }),
   workspaceItemDelete: (workspaceId: string, itemId: string) =>
     call<void>("workspace_item_delete", { workspaceId, itemId }),
+
+  snapshotList: (workspaceId: string, limit = 50) =>
+    call<SnapshotSummary[]>("snapshot_list", { workspaceId, limit }),
+  snapshotCreate: (workspaceId: string, name: string) =>
+    call<SnapshotSummary>("snapshot_create", { workspaceId, name }),
+  snapshotDelete: (id: string) => call<void>("snapshot_delete", { id }),
+  snapshotDiff: (idA: string, idB: string) =>
+    call<SnapshotDiff>("snapshot_diff", { idA, idB }),
+  snapshotPrune: (workspaceId: string, keep: number) =>
+    call<number>("snapshot_prune", { workspaceId, keep }),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),
