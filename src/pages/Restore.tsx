@@ -502,7 +502,20 @@ export function RestorePage() {
                   </div>
                   <Switch
                     checked={focusMode}
-                    onChange={setFocusMode}
+                    onChange={async (next) => {
+                      // 首次开启时说清后果：它会收起你其它窗口，虽然不关闭
+                      if (next && !localStorage.getItem("workscene.focusModeAck")) {
+                        const ok = await confirmAction({
+                          title: "开启专注模式？",
+                          description:
+                            "恢复完成后，不属于这个工作空间的窗口会被最小化到任务栏（不会关闭任何软件，也不会丢数据）。它们需要你手动点回来。",
+                          confirmLabel: "开启",
+                        });
+                        if (!ok) return;
+                        localStorage.setItem("workscene.focusModeAck", "1");
+                      }
+                      setFocusMode(next);
+                    }}
                     ariaLabel="专注模式"
                   />
                 </div>

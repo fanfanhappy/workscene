@@ -369,3 +369,14 @@ export interface AppInfo {
   dataDir: string;
   snapshotDir: string;
 }
+
+/** 导入前预检（只读，不写库） */
+export interface ImportPreview {
+  name: string;
+  appCount: number;
+  resourceCount: number;
+  /** 路径不存在或位于网络位置，导入后会停用 */
+  disabledApps: string[];
+  /** 文件里带了启动参数，导入时会被剥离 */
+  appsWithArgs: string[];
+}

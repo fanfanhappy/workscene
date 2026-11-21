@@ -1106,6 +1106,43 @@ mod tests {
         assert_eq!(choose_opener(&scene, &folder), ResourceOpener::Default);
     }
 
+    /// 收工（批量关闭）依赖 matcher 的判定：这里钉住"不同应用绝不会被认成同一窗口"，
+    /// 否则用户点一次收工可能关掉别的软件。真实窗口枚举没法在单测里复现，
+    /// 所以测的是决策点本身（match_window 返回 None 时收工不会动手）。
+    #[test]
+    fn matcher_never_picks_unrelated_window() {
+        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Mozilla Firefox\firefox.exe", 1);
+        let target = (0, 0, 1920, 1080);
+        let intruder = Candidate {
+            hwnd: 999,
+            pid: 4242,
+            process_path: Some(r"C:\Other\explorer.exe".into()),
+            process_name: "explorer.exe".into(),
+            class_name: "CabinetWClass".into(),
+            title: "完全无关的窗口".into(),
+            rect: (0, 0, 800, 600),
+        };
+
+        let outcome = match_window(&scene.windows[0], &[intruder], target);
+        assert!(
+            outcome.picked.is_none(),
+            "不相关窗口被匹配上了，收工会误关：{}",
+            outcome.note
+        );
+
+        // 同名同类的候选才允许被选中，确认判定不是"永远返回 None"
+        let same = Candidate {
+            hwnd: 1000,
+            pid: 4243,
+            process_path: Some(r"C:\Program Files\Mozilla Firefox\firefox.exe".into()),
+            process_name: "firefox.exe".into(),
+            class_name: "Class".into(),
+            title: "w0".into(),
+            rect: (0, 0, 800, 600),
+        };
+        let hit = match_window(&scene.windows[0], &[same], target);
+        assert!(hit.picked.is_some(), "同一应用应能匹配：{}", hit.note);
+    }
     #[test]
     fn threshold_never_drops_below_base() {
         assert_eq!(delta_threshold(96), 8);

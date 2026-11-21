@@ -419,7 +419,7 @@ export function SettingsPage() {
             </Row>
             <Row
               label="启动 WorkScene 时自动恢复工作空间"
-              hint="搭配「开机启动」使用，开电脑后自动进入你的常用工作现场"
+              hint="注意：启动后会自动打开该空间的软件并摆好窗口；搭配「开机启动」时，登录 Windows 就会开始恢复"
             >
               <select
                 value={draft.startupWorkspaceId ?? ""}

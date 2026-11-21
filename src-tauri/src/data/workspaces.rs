@@ -955,6 +955,27 @@ pub async fn add_item(
 }
 
 /// 批量添加网址资源（支持多行粘贴或一键导入 Chrome/Edge 书签文件夹，自动跳过重复）
+/// 判断是否像"非 http(s) 协议"（`javascript:`、`file:`、`mailto:` …）。
+/// 注意区分端口号：`example.com:8080` 里的冒号后面是数字，不算协议。
+fn looks_like_other_scheme(s: &str) -> bool {
+    let Some((prefix, rest)) = s.split_once(':') else {
+        return false;
+    };
+    if prefix.is_empty() || !prefix.chars().next().unwrap().is_ascii_alphabetic() {
+        return false;
+    }
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return false;
+    }
+    // 已被上游的 http(s) 分支处理；这里只剩"冒号后不是 //"和"不是端口"的情况
+    if rest.starts_with("//") {
+        return true;
+    }
+    !rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+}
 pub async fn add_urls_batch(
     db: &Db,
     workspace_id: &str,
@@ -987,8 +1008,12 @@ pub async fn add_urls_batch(
         if trimmed.is_empty() {
             continue;
         }
+        // 只接受 http(s)。像 javascript:、file:、ms-msdt: 这类协议不补前缀，
+        // 直接跳过——否则会变成 https://javascript:alert(1) 这种既打不开又可疑的条目。
         let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
             trimmed.to_string()
+        } else if looks_like_other_scheme(trimmed) {
+            continue;
         } else {
             format!("https://{trimmed}")
         };
@@ -2279,6 +2304,52 @@ mod tests {
         set_hotkey_slot(&db, &a.id, Some(1)).await.unwrap();
         set_hotkey_slot(&db, &a.id, Some(9)).await.unwrap();
         assert_eq!(id_for_slot(&db, 9).await.as_deref(), Some(a.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn add_urls_batch_normalizes_and_rejects_other_schemes() {
+        let db = db().await;
+        let s = create_from_capture(&db, "网址", &capture()).await.unwrap();
+
+        let entries = vec![
+            ("example.com".to_string(), None),
+            ("example.com".to_string(), None), // 重复，应只入一条
+            ("https://docs.rs".to_string(), Some("Rust 文档".to_string())),
+            ("javascript:alert(1)".to_string(), None),
+            ("file:///C:/Windows".to_string(), None),
+            ("mailto:a@b.com".to_string(), None),
+            ("example.com:8080/path".to_string(), None), // 端口不是协议
+            ("   ".to_string(), None),
+        ];
+        let added = add_urls_batch(&db, &s.id, &entries).await.unwrap();
+        assert_eq!(added, 3, "只有 3 条合法且不重复");
+
+        let detail = get(&db, &s.id).await.unwrap();
+        let urls: Vec<(String, String)> = detail
+            .items
+            .iter()
+            .filter(|i| i.item_type == "url")
+            .map(|i| (i.display_name.clone(), i.target.clone().unwrap_or_default()))
+            .collect();
+
+        assert!(
+            urls.iter().any(|(_, t)| t == "https://example.com"),
+            "裸域名应补 https://"
+        );
+        assert!(
+            urls.iter().any(|(_, t)| t == "https://example.com:8080/path"),
+            "带端口的裸域名也应补前缀"
+        );
+        assert!(
+            urls.iter().any(|(n, t)| n == "Rust 文档" && t == "https://docs.rs"),
+            "自定义名称应保留"
+        );
+        assert!(
+            !urls.iter().any(|(_, t)| t.starts_with("https://javascript")
+                || t.contains("file://")
+                || t.contains("mailto:")),
+            "非 http(s) 协议不应被补前缀入库：{urls:?}"
+        );
     }
 
     #[tokio::test]

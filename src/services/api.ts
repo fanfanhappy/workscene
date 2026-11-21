@@ -6,6 +6,7 @@ import type {
   BookmarkFolder,
   CaptureResult,
   DisplayInfo,
+  ImportPreview,
   LayoutUpdate,
   RecoveryHint,
   RestorePreview,
@@ -83,6 +84,8 @@ export const api = {
   workspaceDuplicate: (id: string, newName: string) =>
     call<WorkspaceSummary>("workspace_duplicate", { id, newName }),
   workspaceExport: (id: string) => call<string>("workspace_export", { id }),
+  workspaceImportPreview: (json: string) =>
+    call<ImportPreview>("workspace_import_preview", { rawJson: json }),
   workspaceImport: (json: string) => call<WorkspaceSummary>("workspace_import", { json }),
   workspaceRecapture: (id: string) =>
     call<WorkspaceDetail>("workspace_recapture", { id }),

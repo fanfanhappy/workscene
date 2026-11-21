@@ -171,6 +171,37 @@ mod tests {
     }
 
     #[test]
+    fn normalize_process_key_strips_path_and_forces_exe() {
+        assert_eq!(normalize_process_key("WeChat.exe"), "wechat.exe");
+        assert_eq!(normalize_process_key("  WeChat.EXE  "), "wechat.exe");
+        assert_eq!(
+            normalize_process_key(r"C:\Program Files\Tencent\WeChat.exe"),
+            "wechat.exe"
+        );
+        assert_eq!(normalize_process_key("FlClash"), "flclash.exe");
+        assert_eq!(normalize_process_key(""), "");
+        assert_eq!(normalize_process_key("   "), "");
+    }
+
+    #[test]
+    fn ignored_process_list_matches_case_and_extension_insensitively() {
+        set_ignored_processes(&[
+            "WeChat.exe".to_string(),
+            "flclash".to_string(),
+            "  ".to_string(),
+        ]);
+
+        assert!(is_ignored_process("wechat.exe"));
+        assert!(is_ignored_process("WECHAT"));
+        assert!(is_ignored_process("FlClash.exe"));
+        assert!(!is_ignored_process("Code.exe"));
+        assert!(!is_ignored_process(""));
+
+        set_ignored_processes(&[]);
+        assert!(!is_ignored_process("wechat.exe"));
+    }
+
+    #[test]
     fn drops_shell_and_uwp() {
         assert!(exclude_reason(&win("Shell_TrayWnd", "任务栏", 1920, 40), 7, false).is_some());
         assert!(

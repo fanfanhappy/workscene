@@ -521,7 +521,33 @@ export function WorkspacesPage() {
     e.target.value = "";
     if (!file) return;
     try {
-      importWs.mutate(await file.text());
+      const json = await file.text();
+      // 导入的文件可能是别人给的：先预检"它会启动什么"，再让用户决定
+      const preview = await api.workspaceImportPreview(json);
+      const risky: string[] = [];
+      if (preview.disabledApps.length > 0) {
+        risky.push(
+          `${preview.disabledApps.length} 个应用的路径不存在或位于网络位置，导入后会被停用：${preview.disabledApps.join("、")}`,
+        );
+      }
+      if (preview.appsWithArgs.length > 0) {
+        risky.push(
+          `${preview.appsWithArgs.length} 个应用的启动参数会被剥离：${preview.appsWithArgs.join("、")}`,
+        );
+      }
+      const ok = await confirmAction({
+        title: `导入「${preview.name}」？`,
+        description: [
+          `这份文件包含 ${preview.appCount} 个应用、${preview.resourceCount} 个资源。`,
+          ...risky,
+          risky.length > 0
+            ? "导入后仍可手动启用应用或重新填写启动参数；请确认文件来源可信。"
+            : "请确认文件来源可信。",
+        ].join("\n"),
+        confirmLabel: "导入",
+      });
+      if (!ok) return;
+      importWs.mutate(json);
     } catch (err) {
       toast.danger("读取文件失败", String((err as Error).message));
     }
