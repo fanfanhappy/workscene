@@ -64,11 +64,13 @@ pub async fn save(
         sqlx::query(
             "INSERT INTO restore_steps (id, run_id, seq, step_type, target_name, status,
                 error_code, message, match_note, duration_ms, delta_x, delta_y, state_restored)
-             VALUES (?, ?, ?, 'window', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(format!("{}-{}", report.run_id, seq))
         .bind(&report.run_id)
         .bind(seq as i64)
+        // 之前这里写死了 'window'，导致资源步骤在记录里被标成窗口步骤
+        .bind(&step.step_type)
         .bind(&step.target_name)
         .bind(format!("{:?}", step.status).to_lowercase())
         .bind(&step.code)
@@ -114,6 +116,51 @@ pub async fn list(db: &Db, limit: usize) -> AppResult<Vec<RunSummary>> {
         .collect())
 }
 
+/// 单条恢复步骤（从库里回读，用于"恢复记录"详情）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStepRow {
+    pub seq: i64,
+    pub step_type: String,
+    pub target_name: String,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub message: String,
+    pub match_note: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub delta_x: Option<i64>,
+    pub delta_y: Option<i64>,
+    pub state_restored: bool,
+}
+
+pub async fn steps(db: &Db, run_id: &str) -> AppResult<Vec<RunStepRow>> {
+    let rows = sqlx::query(
+        "SELECT seq, step_type, target_name, status, error_code, message, match_note,
+                duration_ms, delta_x, delta_y, state_restored
+         FROM restore_steps WHERE run_id = ? ORDER BY seq",
+    )
+    .bind(run_id)
+    .fetch_all(&db.pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| RunStepRow {
+            seq: r.get("seq"),
+            step_type: r.get("step_type"),
+            target_name: r.get("target_name"),
+            status: r.get("status"),
+            error_code: r.get("error_code"),
+            message: r.get("message"),
+            match_note: r.get("match_note"),
+            duration_ms: r.get("duration_ms"),
+            delta_x: r.get("delta_x"),
+            delta_y: r.get("delta_y"),
+            state_restored: r.get::<i64, _>("state_restored") != 0,
+        })
+        .collect())
+}
+
 /// 成功率基线用：按错误码聚合（docs/RESTORE_CONTRACT.md §3）
 pub async fn error_code_stats(db: &Db) -> AppResult<Vec<(String, i64)>> {
     let rows = sqlx::query(
@@ -126,4 +173,85 @@ pub async fn error_code_stats(db: &Db) -> AppResult<Vec<(String, i64)>> {
         .into_iter()
         .map(|r| (r.get::<String, _>("code"), r.get::<i64, _>("n")))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::models::{RestoreStepResult, StepStatus};
+
+    fn report() -> RestoreReport {
+        RestoreReport {
+            run_id: "run-test-1".into(),
+            scene_id: "scene-1".into(),
+            scene_name: "测试现场".into(),
+            started_at: 1_700_000_000_000,
+            finished_at: 1_700_000_001_000,
+            total_steps: 2,
+            succeeded: 1,
+            failed: 1,
+            skipped: 0,
+            steps: vec![
+                RestoreStepResult {
+                    step_type: "window".into(),
+                    target_name: "窗口 A".into(),
+                    status: StepStatus::Success,
+                    message: "已恢复".into(),
+                    match_note: "0.95".into(),
+                    duration_ms: 120,
+                    delta_x: Some(0),
+                    delta_y: Some(0),
+                    state_restored: true,
+                    code: None,
+                },
+                RestoreStepResult {
+                    step_type: "resource".into(),
+                    target_name: "README".into(),
+                    status: StepStatus::Failed,
+                    message: "无法打开".into(),
+                    match_note: "D:/x".into(),
+                    duration_ms: 5,
+                    delta_x: None,
+                    delta_y: None,
+                    state_restored: true,
+                    code: Some("resource_open_failed".into()),
+                },
+            ],
+            display_notes: vec![],
+            pre_restore_scene_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn save_then_read_back_run_and_steps() {
+        let db = crate::data::in_memory().await.unwrap();
+        save(&db, &report(), None, None, "test").await.unwrap();
+
+        let runs = list(&db, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "partial", "有失败也有成功 -> partial");
+        assert_eq!(runs[0].total_steps, 2);
+
+        let steps = steps(&db, "run-test-1").await.unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].seq, 0);
+        assert_eq!(steps[1].step_type, "resource");
+        assert_eq!(steps[1].error_code.as_deref(), Some("resource_open_failed"));
+        assert!(steps[0].state_restored);
+    }
+
+    #[tokio::test]
+    async fn error_code_stats_group_by_code() {
+        let db = crate::data::in_memory().await.unwrap();
+        save(&db, &report(), None, None, "test").await.unwrap();
+
+        let stats = error_code_stats(&db).await.unwrap();
+        let ok = stats.iter().find(|(c, _)| c == "ok").map(|(_, n)| *n);
+        let failed = stats
+            .iter()
+            .find(|(c, _)| c == "resource_open_failed")
+            .map(|(_, n)| *n);
+        assert_eq!(ok, Some(1));
+        assert_eq!(failed, Some(1));
+    }
 }

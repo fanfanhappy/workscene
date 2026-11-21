@@ -245,8 +245,113 @@ export function HistoryPage() {
         )}
 
         {diff ? <DiffPanel diff={diff} onClose={() => setDiff(null)} /> : null}
+
+        <RunHistorySection />
       </div>
     </div>
+  );
+}
+
+/** 恢复记录：库里已有的 restore_runs / restore_steps，关窗后仍可回查 */
+function RunHistorySection() {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const runs = useQuery({
+    queryKey: ["runs"],
+    queryFn: () => api.runList(10),
+    staleTime: 0,
+  });
+
+  const steps = useQuery({
+    queryKey: ["run-steps", expanded],
+    queryFn: () => api.runSteps(expanded!),
+    enabled: Boolean(expanded),
+    retry: 0,
+  });
+
+  const tone = (status: string) =>
+    status === "completed" ? "success" : status === "partial" ? "warning" : "danger";
+
+  return (
+    <Card padded={false} className="overflow-hidden">
+      <div className="flex items-center justify-between border-b border-line px-5 py-2.5">
+        <span className="text-aux text-ink-2">恢复记录（最近 10 次）</span>
+        <span className="text-[11px] text-ink-3">每次恢复的逐步结果都写库，关窗后仍可回查</span>
+      </div>
+
+      {runs.isPending ? (
+        <div className="flex items-center gap-2 px-5 py-4 text-aux text-ink-3">
+          <Spinner /> 读取记录…
+        </div>
+      ) : (runs.data ?? []).length === 0 ? (
+        <p className="px-5 py-4 text-aux text-ink-3">还没有恢复记录。</p>
+      ) : (
+        <ul className="divide-y divide-line/60">
+          {(runs.data ?? []).map((r) => (
+            <li key={r.id}>
+              <button
+                className="flex w-full items-center gap-3 px-5 py-2.5 text-left hover:bg-raised/40"
+                onClick={() => setExpanded((prev) => (prev === r.id ? null : r.id))}
+              >
+                <Badge tone={tone(r.status)}>
+                  {r.status === "completed" ? "全部成功" : r.status === "partial" ? "部分成功" : "失败"}
+                </Badge>
+                <span className="min-w-0 flex-1 truncate text-aux text-ink-2">
+                  {formatTime(r.startedAt)} · {r.triggerType} · {r.totalSteps} 步
+                </span>
+                <span className="tabnum text-[11px] text-ink-3">
+                  成功 {r.succeeded} / 失败 {r.failed} / 跳过 {r.skipped}
+                </span>
+                <span className="text-[11px] text-accent">
+                  {expanded === r.id ? "收起" : "详情"}
+                </span>
+              </button>
+
+              {expanded === r.id ? (
+                <div className="border-t border-line/60 bg-canvas/40 px-5 py-2">
+                  {steps.isPending ? (
+                    <p className="py-2 text-[11px] text-ink-3">读取步骤…</p>
+                  ) : (
+                    <ul className="flex flex-col divide-y divide-line/40">
+                      {(steps.data ?? []).map((s) => (
+                        <li key={s.seq} className="flex items-start gap-3 py-1.5">
+                          <span className="w-6 shrink-0 text-right font-mono text-[11px] text-ink-3">
+                            {s.seq + 1}
+                          </span>
+                          <Badge
+                            tone={
+                              s.status === "success"
+                                ? "success"
+                                : s.status === "skipped"
+                                  ? "neutral"
+                                  : "danger"
+                            }
+                          >
+                            {s.stepType === "resource" ? "资源" : "窗口"}
+                          </Badge>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[11px] text-ink-2">{s.targetName}</p>
+                            <p className="mt-0.5 text-[11px] text-ink-3">{s.message}</p>
+                          </div>
+                          {s.errorCode ? (
+                            <code className="shrink-0 rounded-sm border border-line px-1 font-mono text-[10px] text-danger">
+                              {s.errorCode}
+                            </code>
+                          ) : null}
+                          <span className="tabnum shrink-0 text-[10px] text-ink-3">
+                            {s.durationMs ?? 0}ms
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

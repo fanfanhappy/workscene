@@ -99,6 +99,7 @@ pub fn run() {
             commands::workspace_restore,
             commands::snapshot_restore,
             commands::run_list,
+            commands::run_steps,
             commands::run_error_stats,
             commands::restore_is_busy,
             commands::snapshot_list,

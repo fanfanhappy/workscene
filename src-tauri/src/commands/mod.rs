@@ -236,6 +236,15 @@ pub async fn run_list(db: State<'_, Db>, limit: Option<usize>) -> AppResult<Vec<
     runs::list(&db, limit.unwrap_or(20)).await
 }
 
+/// 单次恢复的逐步结果（关窗/重启后仍可回查）
+#[tauri::command]
+pub async fn run_steps(
+    db: State<'_, Db>,
+    run_id: String,
+) -> AppResult<Vec<runs::RunStepRow>> {
+    runs::steps(&db, &run_id).await
+}
+
 /// 成功率基线：按 error_code 聚合。没有这一层，R8 的数字只能靠"跑一遍看看"。
 #[tauri::command]
 pub async fn run_error_stats(db: State<'_, Db>) -> AppResult<Vec<(String, i64)>> {

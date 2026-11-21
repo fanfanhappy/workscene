@@ -293,6 +293,20 @@ export interface StorageStats {
   runCount: number;
 }
 
+export interface RunStepRow {
+  seq: number;
+  stepType: string;
+  targetName: string;
+  status: string;
+  errorCode: string | null;
+  message: string;
+  matchNote: string | null;
+  durationMs: number | null;
+  deltaX: number | null;
+  deltaY: number | null;
+  stateRestored: boolean;
+}
+
 export interface RunSummary {  id: string;
   workspaceId: string | null;
   snapshotId: string | null;

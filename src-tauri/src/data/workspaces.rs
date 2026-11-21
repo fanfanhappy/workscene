@@ -696,7 +696,13 @@ pub async fn add_item(
         .unwrap_or_else(|| default_display_name(item_type, target));
 
     let now = now_ms();
-    let id = format!("it-{:x}-res", now);
+    // 同一毫秒内可能连续添加多个资源，用进程内序号保证 id 唯一
+    static ITEM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!(
+        "it-{:x}-res-{}",
+        now,
+        ITEM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let sort: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM workspace_items WHERE workspace_id = ?",
     )

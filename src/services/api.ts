@@ -9,6 +9,7 @@ import type {
   RecoveryHint,
   RestorePreview,
   RestoreReport,
+  RunStepRow,
   RunSummary,
   SceneHealth,
   SnapshotDiff,
@@ -119,6 +120,7 @@ export const api = {
     call<RestoreReport>("snapshot_restore", { id, relaunchMissing }),
 
   runList: (limit = 20) => call<RunSummary[]>("run_list", { limit }),
+  runSteps: (runId: string) => call<RunStepRow[]>("run_steps", { runId }),
 };
 
 /** 统一的时间展示，避免各页面自己格式化 */
