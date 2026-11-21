@@ -158,6 +158,104 @@ export function LayoutEditor({
     [commitChange, selectedId, windows],
   );
 
+  /** 一键分屏排布模板：按显示器分组自动排齐，支持 Ctrl+Z 撤销 */
+  const applyLayoutTemplate = useCallback(
+    (preset: "split2" | "focus65" | "cols3" | "grid4" | "center") => {
+      if (windows.length === 0) return;
+      const gap = 0.008;
+      const primaryKey =
+        displays.find((d) => d.isPrimary)?.monitorKey ?? displays[0]?.monitorKey ?? "";
+
+      const groups = new Map<string, WorkspaceWindow[]>();
+      for (const w of windows) {
+        const k = w.monitorKey || primaryKey;
+        const list = groups.get(k) ?? [];
+        list.push(w);
+        groups.set(k, list);
+      }
+
+      const patchMap = new Map<string, Partial<WorkspaceWindow>>();
+      for (const list of groups.values()) {
+        list.forEach((w, idx) => {
+          if (preset === "split2") {
+            const col = idx % 2;
+            const halfW = (1 - gap * 3) / 2;
+            patchMap.set(w.id, {
+              xRatio: round4(gap + col * (halfW + gap)),
+              yRatio: gap,
+              widthRatio: round4(halfW),
+              heightRatio: round4(1 - gap * 2),
+              showState: "normal",
+            });
+          } else if (preset === "focus65") {
+            const leftW = 0.64;
+            const rightW = 1 - leftW - gap * 3;
+            if (idx === 0) {
+              patchMap.set(w.id, {
+                xRatio: gap,
+                yRatio: gap,
+                widthRatio: round4(leftW),
+                heightRatio: round4(1 - gap * 2),
+                showState: "normal",
+              });
+            } else {
+              const stackCount = Math.max(1, list.length - 1);
+              const row = idx - 1;
+              const cellH = (1 - gap * (stackCount + 1)) / stackCount;
+              patchMap.set(w.id, {
+                xRatio: round4(gap * 2 + leftW),
+                yRatio: round4(gap + row * (cellH + gap)),
+                widthRatio: round4(rightW),
+                heightRatio: round4(Math.max(0.18, cellH)),
+                showState: "normal",
+              });
+            }
+          } else if (preset === "cols3") {
+            const cols = Math.min(3, list.length);
+            const col = idx % cols;
+            const colW = (1 - gap * (cols + 1)) / cols;
+            patchMap.set(w.id, {
+              xRatio: round4(gap + col * (colW + gap)),
+              yRatio: gap,
+              widthRatio: round4(colW),
+              heightRatio: round4(1 - gap * 2),
+              showState: "normal",
+            });
+          } else if (preset === "grid4") {
+            const slot = idx % 4;
+            const col = slot % 2;
+            const row = Math.floor(slot / 2);
+            const cellW = (1 - gap * 3) / 2;
+            const cellH = (1 - gap * 3) / 2;
+            patchMap.set(w.id, {
+              xRatio: round4(gap + col * (cellW + gap)),
+              yRatio: round4(gap + row * (cellH + gap)),
+              widthRatio: round4(cellW),
+              heightRatio: round4(cellH),
+              showState: "normal",
+            });
+          } else {
+            const offset = Math.min(idx, 5) * 0.018;
+            patchMap.set(w.id, {
+              xRatio: round4(0.08 + offset),
+              yRatio: round4(0.06 + offset),
+              widthRatio: 0.78,
+              heightRatio: 0.82,
+              showState: "normal",
+            });
+          }
+        });
+      }
+
+      const next = windows.map((w) => {
+        const p = patchMap.get(w.id);
+        return p ? { ...w, ...p } : w;
+      });
+      commitChange(next);
+    },
+    [commitChange, displays, windows],
+  );
+
   // 键盘编辑支持：方向键微调、Shift+方向键 5% 步进、Ctrl+Z/Y 撤销重做、Esc 取消选中
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -433,6 +531,31 @@ export function LayoutEditor({
           </Button>
         </div>
       </div>
+
+      {/* 一键分屏排布快捷条 */}
+      {windows.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-line bg-canvas/55 px-4 py-2 text-[11px]">
+          <span className="mr-1 font-medium text-ink-3">一键排布</span>
+          {(
+            [
+              { id: "split2", label: "左右平分" },
+              { id: "focus65", label: "左大右小" },
+              { id: "cols3", label: "三列均分" },
+              { id: "grid4", label: "四宫格" },
+              { id: "center", label: "居中叠放" },
+            ] as const
+          ).map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => applyLayoutTemplate(p.id)}
+              className="cursor-pointer rounded-[6px] border border-line bg-surface px-2 py-0.5 text-ink-2 transition-colors hover:border-accent/50 hover:text-accent"
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {/* 主编辑区 + 右侧 Inspector */}
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_296px]">

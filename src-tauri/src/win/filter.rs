@@ -1,5 +1,52 @@
 use super::window::RawWindow;
 use crate::core::models::ShowState;
+use std::sync::{OnceLock, RwLock};
+
+static IGNORED_PROCESSES: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
+
+fn ignored_store() -> &'static RwLock<Vec<String>> {
+    IGNORED_PROCESSES.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// 同步用户的全局捕获忽略名单（进程名，大小写不敏感，例如 `flclash.exe`）
+pub fn set_ignored_processes(list: &[String]) {
+    let normalized: Vec<String> = list
+        .iter()
+        .map(|s| normalize_process_key(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Ok(mut guard) = ignored_store().write() {
+        *guard = normalized;
+    }
+}
+
+pub fn normalize_process_key(raw: &str) -> String {
+    let base = raw
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_lowercase();
+    if base.is_empty() {
+        return String::new();
+    }
+    if base.ends_with(".exe") {
+        base
+    } else {
+        format!("{base}.exe")
+    }
+}
+
+pub fn is_ignored_process(process_name: &str) -> bool {
+    let key = normalize_process_key(process_name);
+    if key.is_empty() {
+        return false;
+    }
+    ignored_store()
+        .read()
+        .map(|list| list.iter().any(|item| item == &key))
+        .unwrap_or(false)
+}
 
 /// 系统 Shell / 系统 UI 窗口类名：这些不是用户的「工作窗口」。
 /// 文档 §3.2 要求「过滤系统窗口并标记不确定项」，规则集中在此处便于调整。

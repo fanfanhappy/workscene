@@ -60,16 +60,29 @@ pub fn run() {
             win::tray::build_tray(app)?;
             win::tray::intercept_close(app);
 
-            // 快捷键以设置为准；设置里为空串表示关闭
-            let hotkey_preset = {
+            // 快捷键以设置为准；同时按设置注册 Ctrl+Alt+1~5 工作空间快捷切屏
+            let init_settings = {
                 let db = app.state::<data::Db>().inner().clone();
-                tauri::async_runtime::block_on(data::settings::get(&db))
-                    .map(|s| s.hotkey)
-                    .unwrap_or_else(|_| "Ctrl+Alt+W".to_string())
+                tauri::async_runtime::block_on(data::settings::get(&db)).unwrap_or_default()
             };
-            win::tray::spawn_hotkey(app.handle().clone(), &hotkey_preset);
+            win::filter::set_ignored_processes(&init_settings.ignored_processes);
+            win::tray::spawn_hotkey(
+                app.handle().clone(),
+                &init_settings.hotkey,
+                init_settings.workspace_hotkeys_enabled,
+            );
 
             spawn_auto_snapshot(app.handle().clone());
+            spawn_display_watcher(app.handle().clone());
+
+            // 开机/启动后自动恢复指定工作空间（若用户已配置）
+            if let Some(ws_id) = init_settings.startup_workspace_id.clone() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(3500));
+                    win::tray::restore_workspace_by_id(&handle, &ws_id);
+                });
+            }
 
             // 诊断用：WORKSCENE_ROUTE=/settings 可直接打开指定页面（截图与回归用）。
             // 必须等 WebView 加载完再改 hash，否则会被 HashRouter 的初始化覆盖。
@@ -112,6 +125,10 @@ pub fn run() {
             commands::workspace_window_delete,
             commands::workspace_item_delete,
             commands::workspace_item_add,
+            commands::workspace_items_add_batch,
+            commands::workspace_close_windows,
+            commands::app_icons_batch,
+            commands::bookmarks_list_folders,
             commands::workspace_preview,
             commands::workspace_restore,
             commands::workspace_restore_retry,
@@ -130,6 +147,7 @@ pub fn run() {
             commands::recovery_hint,
             commands::recovery_dismiss,
             commands::adapter_suggest,
+            commands::adapter_classify_batch,
             commands::settings_get,
             commands::settings_set,
             commands::storage_stats,
@@ -882,6 +900,41 @@ fn spawn_auto_snapshot(app: tauri::AppHandle) {
                 Err(e) => eprintln!("自动快照失败：{e}"),
             }
             std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+}
+
+/// 轻量监听显示器热插拔（仅枚举显示器拓扑，耗时 < 0.2ms）：插拔外接屏时通知前端自动刷新布局与提示用户
+fn spawn_display_watcher(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        let sig = || -> (usize, String) {
+            let mons = win::display::enumerate();
+            let mut parts: Vec<String> = mons
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{}:{}x{}@{},{}#{}",
+                        m.key,
+                        m.rect.right - m.rect.left,
+                        m.rect.bottom - m.rect.top,
+                        m.rect.left,
+                        m.rect.top,
+                        m.dpi
+                    )
+                })
+                .collect();
+            parts.sort();
+            (mons.len(), parts.join("|"))
+        };
+        let (_, mut last) = sig();
+        loop {
+            std::thread::sleep(Duration::from_secs(4));
+            let (count, now_sig) = sig();
+            if count > 0 && now_sig != last {
+                last = now_sig;
+                let _ = app.emit("displays:changed", count);
+            }
         }
     });
 }

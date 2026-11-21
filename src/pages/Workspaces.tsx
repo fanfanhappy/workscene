@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AppWindow,
   ArrowLeft,
+  Bookmark,
   Camera,
   ChevronDown,
   Copy,
@@ -22,6 +23,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Power,
   RefreshCw,
   Rows3,
   SlidersHorizontal,
@@ -38,6 +40,13 @@ import type {
 } from "@/types/contract";
 import { confirmAction, toast } from "@/stores/ui.store";
 import { LayoutEditor, toLayoutUpdates } from "@/components/LayoutEditor";
+import {
+  AppIcon,
+  AppIconStrip,
+  useAppIcons,
+  WORKSPACE_COLORS,
+  WorkspaceColorDot,
+} from "@/components/AppIcon";
 import {
   Badge,
   Button,
@@ -107,6 +116,7 @@ export function WorkspacesPage() {
   const [metaName, setMetaName] = useState("");
   const [metaDesc, setMetaDesc] = useState("");
   const [metaAutoSnap, setMetaAutoSnap] = useState(true);
+  const [metaColor, setMetaColor] = useState<string | null>(null);
 
   const [dupOpen, setDupOpen] = useState(false);
   const [dupName, setDupName] = useState("");
@@ -139,6 +149,18 @@ export function WorkspacesPage() {
     staleTime: 30_000,
     retry: 0,
   });
+
+  const allIconPaths = useMemo(() => {
+    const out: (string | null | undefined)[] = [];
+    for (const w of list.data ?? []) {
+      for (const p of w.appPaths ?? []) out.push(p);
+    }
+    for (const it of detail.data?.items ?? []) {
+      if (it.itemType === "application") out.push(it.target);
+    }
+    return out;
+  }, [list.data, detail.data]);
+  const appIcons = useAppIcons(allIconPaths);
 
   const [draft, setDraft] = useState<WorkspaceWindow[]>([]);
   useEffect(() => {
@@ -243,16 +265,26 @@ export function WorkspacesPage() {
         metaName.trim(),
         metaDesc.trim() || null,
         metaAutoSnap,
+        metaColor,
       ),
     onSuccess: () => {
       const id = detail.data?.id;
       const nextName = metaName.trim();
       const nextDesc = metaDesc.trim() || null;
+      const nextColor = metaColor;
       setMetaOpen(false);
       if (id) {
         qc.setQueryData<WorkspaceSummary[]>(["workspaces"], (prev) =>
           prev?.map((w) =>
-            w.id === id ? { ...w, name: nextName, description: nextDesc, updatedAt: Date.now() } : w,
+            w.id === id
+              ? {
+                  ...w,
+                  name: nextName,
+                  description: nextDesc,
+                  color: nextColor,
+                  updatedAt: Date.now(),
+                }
+              : w,
           ),
         );
       }
@@ -358,7 +390,17 @@ export function WorkspacesPage() {
       reusePolicy: string;
       launchArgs: string | null;
       enabled: boolean;
-    }) => api.workspaceItemUpdate(v.itemId, v.reusePolicy, v.launchArgs, v.enabled),
+      launchPriority?: number;
+      launchDelayMs?: number;
+    }) =>
+      api.workspaceItemUpdate(
+        v.itemId,
+        v.reusePolicy,
+        v.launchArgs,
+        v.enabled,
+        v.launchPriority,
+        v.launchDelayMs,
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["workspace", activeId] });
       toast.success("设置已保存");
@@ -368,6 +410,17 @@ export function WorkspacesPage() {
       setError(msg);
       toast.danger("保存失败", msg);
     },
+  });
+
+  const closeWsWindows = useMutation({
+    mutationFn: (id: string) => api.workspaceCloseWindows(id),
+    onSuccess: (count) => {
+      toast.info(
+        count > 0 ? `已向 ${count} 个窗口发送关闭请求` : "当前没有已打开的本空间窗口",
+        count > 0 ? "有未保存内容的软件会正常弹出保存提示" : undefined,
+      );
+    },
+    onError: (e) => toast.danger("收工失败", String((e as Error).message)),
   });
 
   const relocateItem = useMutation({
@@ -622,7 +675,10 @@ export function WorkspacesPage() {
               >
                 <div className="min-w-0">
                   <div className="flex items-start justify-between gap-2">
-                    <h3 className="truncate text-[14px] font-semibold text-ink">{w.name}</h3>
+                    <h3 className="flex min-w-0 items-center gap-1.5 text-[14px] font-semibold text-ink">
+                      <WorkspaceColorDot color={w.color} />
+                      <span className="truncate">{w.name}</span>
+                    </h3>
                     <button
                       type="button"
                       title={w.isFavorite ? "取消收藏" : "收藏置顶"}
@@ -643,7 +699,16 @@ export function WorkspacesPage() {
                       {w.description}
                     </p>
                   ) : null}
-                  <p className="mt-1.5 text-aux text-ink-2">
+                  {(w.appPaths ?? []).length > 0 ? (
+                    <div className="mt-2">
+                      <AppIconStrip
+                        paths={w.appPaths}
+                        icons={appIcons}
+                        totalApps={w.itemCount}
+                      />
+                    </div>
+                  ) : null}
+                  <p className="mt-2 text-aux text-ink-2">
                     {w.itemCount} 软件 · {w.resourceCount} 文件/网址 · {w.windowCount} 窗口
                   </p>
                   <p className="mt-0.5 text-[11px] text-ink-3">
@@ -709,7 +774,10 @@ export function WorkspacesPage() {
                     />
                   </button>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-body font-semibold text-ink">{w.name}</p>
+                    <p className="flex items-center gap-1.5 truncate text-body font-semibold text-ink">
+                      <WorkspaceColorDot color={w.color} />
+                      <span className="truncate">{w.name}</span>
+                    </p>
                     <p className="text-[11px] text-ink-3">
                       {w.itemCount} 软件 · {w.resourceCount} 文件/网址 · {w.windowCount} 窗口
                     </p>
@@ -750,6 +818,7 @@ export function WorkspacesPage() {
                   onClick={() => setParams({ id: w.id })}
                   className="flex cursor-pointer items-center gap-3 px-4 py-2 transition-colors hover:bg-raised/45"
                 >
+                  <WorkspaceColorDot color={w.color} />
                   {w.isFavorite ? (
                     <Star size={12} className="shrink-0 fill-warning text-warning" />
                   ) : null}
@@ -831,11 +900,12 @@ export function WorkspacesPage() {
               </button>
               <button
                 type="button"
-                title="编辑名称与备注"
+                title="编辑名称、备注与色标"
                 onClick={() => {
                   setMetaName(detail.data!.name);
                   setMetaDesc(detail.data!.description ?? "");
                   setMetaAutoSnap(detail.data!.autoSnapshotEnabled);
+                  setMetaColor(detail.data!.color ?? null);
                   setMetaOpen(true);
                 }}
                 className="cursor-pointer rounded-full p-1 text-ink-3 hover:bg-raised hover:text-ink"
@@ -901,6 +971,22 @@ export function WorkspacesPage() {
                     className="flex w-full cursor-pointer items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-aux text-ink hover:bg-raised"
                   >
                     <Download size={13} className="text-ink-3" /> 导出备份文件
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setMenuOpen(false);
+                      const ok = await confirmAction({
+                        title: `收工：关闭「${detail.data!.name}」的窗口？`,
+                        description: "仅向本空间已打开的窗口发送标准关闭请求，绝不强杀进程。",
+                        detail: "如有未保存文档，软件会正常弹出保存提示。",
+                        confirmLabel: "发送关闭请求",
+                      });
+                      if (ok) closeWsWindows.mutate(detail.data!.id);
+                    }}
+                    className="flex w-full cursor-pointer items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-aux text-ink hover:bg-raised"
+                  >
+                    <Power size={13} className="text-ink-3" /> 收工（关闭窗口）
                   </button>
                   <div className="my-1 border-t border-line" />
                   <button
@@ -984,43 +1070,64 @@ export function WorkspacesPage() {
                 </span>
               </div>
               <ul className="divide-y divide-line">
-                {appItems.map((it) => (
-                  <AppItemRow
-                    key={it.id}
-                    item={it}
-                    disabled={
-                      saveItem.isPending || removeItem.isPending || relocateItem.isPending
-                    }
-                    onUpdate={(patch) =>
-                      saveItem.mutate({
-                        itemId: it.id,
-                        reusePolicy: patch.reusePolicy ?? it.reusePolicy,
-                        launchArgs:
-                          patch.launchArgs !== undefined ? patch.launchArgs : it.launchArgs,
-                        enabled: patch.enabled ?? it.enabled,
-                      })
-                    }
-                    onRelocate={async () => {
-                      try {
-                        const picked = await api.dialogPickFile(true);
-                        if (picked) {
-                          relocateItem.mutate({ itemId: it.id, newPath: picked });
-                        }
-                      } catch (e) {
-                        toast.danger("打开文件选择框失败", String((e as Error).message));
+                {appItems.map((it) => {
+                  const exeLower = (it.target?.split(/[\\/]/).pop() ?? it.displayName).toLowerCase();
+                  const isBrowser = [
+                    "chrome.exe",
+                    "msedge.exe",
+                    "firefox.exe",
+                    "brave.exe",
+                    "arc.exe",
+                    "vivaldi.exe",
+                    "opera.exe",
+                  ].includes(exeLower);
+                  const matchedResource = isBrowser
+                    ? resourceItems.find((r) => r.itemType === "url")?.target ?? null
+                    : resourceItems.find((r) => r.itemType === "folder")?.target ??
+                      resourceItems.find((r) => r.itemType === "file")?.target ??
+                      null;
+                  return (
+                    <AppItemRow
+                      key={it.id}
+                      item={it}
+                      icons={appIcons}
+                      suggestTarget={matchedResource}
+                      disabled={
+                        saveItem.isPending || removeItem.isPending || relocateItem.isPending
                       }
-                    }}
-                    onDelete={async () => {
-                      const ok = await confirmAction({
-                        title: `移除软件「${it.displayName}」？`,
-                        description: "将一并移除该软件记录的窗口位置。",
-                        confirmLabel: "移除",
-                        variant: "danger",
-                      });
-                      if (ok) removeItem.mutate(it.id);
-                    }}
-                  />
-                ))}
+                      onUpdate={(patch) =>
+                        saveItem.mutate({
+                          itemId: it.id,
+                          reusePolicy: patch.reusePolicy ?? it.reusePolicy,
+                          launchArgs:
+                            patch.launchArgs !== undefined ? patch.launchArgs : it.launchArgs,
+                          enabled: patch.enabled ?? it.enabled,
+                          launchPriority: patch.launchPriority ?? it.launchPriority,
+                          launchDelayMs: patch.launchDelayMs ?? it.launchDelayMs,
+                        })
+                      }
+                      onRelocate={async () => {
+                        try {
+                          const picked = await api.dialogPickFile(true);
+                          if (picked) {
+                            relocateItem.mutate({ itemId: it.id, newPath: picked });
+                          }
+                        } catch (e) {
+                          toast.danger("打开文件选择框失败", String((e as Error).message));
+                        }
+                      }}
+                      onDelete={async () => {
+                        const ok = await confirmAction({
+                          title: `移除软件「${it.displayName}」？`,
+                          description: "将一并移除该软件记录的窗口位置。",
+                          confirmLabel: "移除",
+                          variant: "danger",
+                        });
+                        if (ok) removeItem.mutate(it.id);
+                      }}
+                    />
+                  );
+                })}
               </ul>
             </Card>
           ) : null}
@@ -1080,6 +1187,34 @@ export function WorkspacesPage() {
               className="rounded-[8px] border border-line-strong bg-canvas p-2.5 text-body text-ink outline-none focus:border-accent"
             />
           </label>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-aux font-medium text-ink">色标分组（可选）</span>
+            <div className="flex flex-wrap items-center gap-2">
+              {WORKSPACE_COLORS.map((c) => {
+                const active = (metaColor ?? null) === c.value;
+                return (
+                  <button
+                    key={c.label}
+                    type="button"
+                    onClick={() => setMetaColor(c.value)}
+                    className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-all ${
+                      active
+                        ? "border-accent bg-accent/12 font-medium text-accent"
+                        : "border-line bg-canvas/70 text-ink-2 hover:border-line-strong"
+                    }`}
+                  >
+                    {c.hex ? (
+                      <span
+                        className="size-2.5 rounded-full"
+                        style={{ backgroundColor: c.hex }}
+                      />
+                    ) : null}
+                    {c.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <div className="flex items-center justify-between border-t border-line pt-3">
             <div>
               <p className="text-body font-medium text-ink">后台自动备份</p>
@@ -1129,20 +1264,26 @@ export function WorkspacesPage() {
   );
 }
 
-/** 简洁软件行：默认只显示开关、名称、更换程序、移除；高级参数折叠按需展开 */
+/** 简洁软件行：默认只显示开关、图标、名称、更换程序、移除；高级参数折叠按需展开 */
 function AppItemRow({
   item,
+  icons,
+  suggestTarget,
   disabled,
   onUpdate,
   onRelocate,
   onDelete,
 }: {
   item: WorkspaceItem;
+  icons: Record<string, string>;
+  suggestTarget: string | null;
   disabled: boolean;
   onUpdate: (patch: {
     reusePolicy?: string;
     launchArgs?: string | null;
     enabled?: boolean;
+    launchPriority?: number;
+    launchDelayMs?: number;
   }) => void;
   onRelocate: () => void;
   onDelete: () => void;
@@ -1157,6 +1298,8 @@ function AppItemRow({
     onUpdate({ launchArgs: trimmed === "" ? null : trimmed });
   };
 
+  const isPriority = item.launchPriority < 0;
+
   return (
     <li className={`flex flex-col px-4 py-2.5 transition-opacity ${item.enabled ? "" : "opacity-55"}`}>
       <div className="flex items-center gap-3">
@@ -1166,10 +1309,17 @@ function AppItemRow({
           ariaLabel={`启用 ${item.displayName}`}
           onChange={(v) => onUpdate({ enabled: v })}
         />
+        <AppIcon path={item.target} name={item.displayName} icons={icons} size={22} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-body font-medium text-ink">
-            {item.displayName.replace(/\.exe$/i, "")}
-          </p>
+          <div className="flex items-center gap-1.5">
+            <p className="truncate text-body font-medium text-ink">
+              {item.displayName.replace(/\.exe$/i, "")}
+            </p>
+            {isPriority ? <Badge tone="accent">优先启动</Badge> : null}
+            {item.launchDelayMs > 0 ? (
+              <Badge tone="warning">等 {(item.launchDelayMs / 1000).toFixed(item.launchDelayMs % 1000 === 0 ? 0 : 1)}s</Badge>
+            ) : null}
+          </div>
           <p
             className="selectable truncate font-mono text-[11px] text-ink-3"
             title={item.target ?? undefined}
@@ -1192,7 +1342,7 @@ function AppItemRow({
           size="xs"
           variant="ghost"
           onClick={() => setExpanded((v) => !v)}
-          title="展开高级启动选项"
+          title="展开高级启动选项（启动顺序、延迟、参数）"
         >
           高级
           <ChevronDown
@@ -1214,47 +1364,79 @@ function AppItemRow({
       </div>
 
       {expanded ? (
-        <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-[9px] bg-canvas/70 px-3 py-2.5 pl-[48px]">
-          <label className="flex items-center gap-1.5 text-[11px] text-ink-2">
-            <span>打开方式</span>
-            <select
-              value={item.reusePolicy}
+        <div className="mt-2.5 flex flex-col gap-2 rounded-[9px] bg-canvas/70 px-3 py-2.5 pl-[48px]">
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 text-[11px] text-ink-2">
+              <span>打开方式</span>
+              <select
+                value={item.reusePolicy}
+                disabled={disabled || !item.enabled}
+                onChange={(e) => onUpdate({ reusePolicy: e.target.value })}
+                className="h-7 rounded-[7px] border border-line bg-surface px-2 text-[11px] text-ink outline-none focus:border-accent"
+              >
+                <option value="reuse_or_launch">已打开就直接用（推荐）</option>
+                <option value="reuse_if_matched">只整理已打开的，不自动启动</option>
+                <option value="always_launch">总是新开窗口</option>
+              </select>
+            </label>
+
+            <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-ink-2">
+              <input
+                type="checkbox"
+                checked={isPriority}
+                disabled={disabled || !item.enabled}
+                onChange={(e) => onUpdate({ launchPriority: e.target.checked ? -10 : 0 })}
+                className="accent-accent"
+              />
+              <span>优先启动（如代理/依赖服务）</span>
+            </label>
+
+            <label className="flex items-center gap-1.5 text-[11px] text-ink-2">
+              <span>启动后等待</span>
+              <select
+                value={item.launchDelayMs}
+                disabled={disabled || !item.enabled}
+                onChange={(e) => onUpdate({ launchDelayMs: Number(e.target.value) })}
+                className="h-7 rounded-[7px] border border-line bg-surface px-2 text-[11px] text-ink outline-none focus:border-accent"
+              >
+                <option value={0}>不等待</option>
+                <option value={1000}>1 秒</option>
+                <option value={2000}>2 秒</option>
+                <option value={3000}>3 秒</option>
+                <option value={5000}>5 秒</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={argsText}
               disabled={disabled || !item.enabled}
-              onChange={(e) => onUpdate({ reusePolicy: e.target.value })}
-              className="h-7 rounded-[7px] border border-line bg-surface px-2 text-[11px] text-ink outline-none focus:border-accent"
-            >
-              <option value="reuse_or_launch">已打开就直接用（推荐）</option>
-              <option value="reuse_if_matched">只整理已打开的，不自动启动</option>
-              <option value="always_launch">总是新开窗口</option>
-            </select>
-          </label>
-          <input
-            value={argsText}
-            disabled={disabled || !item.enabled}
-            onChange={(e) => setArgsText(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") e.currentTarget.blur();
-            }}
-            placeholder="可选启动参数（回车保存）"
-            className="h-7 min-w-[180px] flex-1 rounded-[7px] border border-line bg-surface px-2.5 font-mono text-[11px] text-ink placeholder:text-ink-3 outline-none focus:border-accent"
-          />
-          <SuggestArgs
-            exeName={item.target?.split(/[\\/]/).pop() ?? ""}
-            target={item.target}
-            current={item.launchArgs}
-            onApply={(args) => {
-              setArgsText(args);
-              onUpdate({ launchArgs: args });
-            }}
-          />
+              onChange={(e) => setArgsText(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+              }}
+              placeholder="可选启动参数（回车保存）"
+              className="h-7 min-w-[180px] flex-1 rounded-[7px] border border-line bg-surface px-2.5 font-mono text-[11px] text-ink placeholder:text-ink-3 outline-none focus:border-accent"
+            />
+            <SuggestArgs
+              exeName={item.target?.split(/[\\/]/).pop() ?? item.displayName}
+              target={suggestTarget}
+              current={item.launchArgs}
+              onApply={(args) => {
+                setArgsText(args);
+                onUpdate({ launchArgs: args });
+              }}
+            />
+          </div>
         </div>
       ) : null}
     </li>
   );
 }
 
-/** 文件与网址卡片：支持一键系统文件/文件夹选择框，不再要求手打路径 */
+/** 文件与网址卡片：支持一键系统文件/文件夹选择框、批量粘贴网址、一键导入 Chrome/Edge 书签夹 */
 function ResourcesCard({
   workspaceId,
   items,
@@ -1269,6 +1451,17 @@ function ResourcesCard({
   const [urlInput, setUrlInput] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchTab, setBatchTab] = useState<"paste" | "bookmarks">("paste");
+  const [batchText, setBatchText] = useState("");
+
+  const bookmarks = useQuery({
+    queryKey: ["browser-bookmarks"],
+    queryFn: api.bookmarksListFolders,
+    enabled: batchOpen && batchTab === "bookmarks",
+    staleTime: 60_000,
+    retry: 0,
+  });
 
   const add = useMutation({
     mutationFn: ({ type, target }: { type: "file" | "folder" | "url"; target: string }) =>
@@ -1285,7 +1478,23 @@ function ResourcesCard({
             : "已添加文件",
       );
     },
-    onError: (e) => onError(String((e as Error).message)),
+    onError: (e) => {
+      const msg = String((e as Error).message);
+      onError(msg);
+      toast.danger("添加失败", msg);
+    },
+  });
+
+  const addBatch = useMutation({
+    mutationFn: (entries: { url: string; name?: string | null }[]) =>
+      api.workspaceItemsAddBatch(workspaceId, entries),
+    onSuccess: (count) => {
+      setBatchOpen(false);
+      setBatchText("");
+      onChanged();
+      toast.success(count > 0 ? `已批量添加 ${count} 个网址` : "所选网址均已存在");
+    },
+    onError: (e) => toast.danger("批量添加失败", String((e as Error).message)),
   });
 
   const remove = useMutation({
@@ -1338,16 +1547,38 @@ function ResourcesCard({
     add.mutate({ type: "url", target: val });
   };
 
+  const submitBatchPaste = () => {
+    const lines = batchText
+      .split(/[\r\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const valid: { url: string }[] = [];
+    for (const line of lines) {
+      const u = /^https?:\/\//i.test(line) ? line : `https://${line}`;
+      try {
+        new URL(u);
+        valid.push({ url: u });
+      } catch {
+        // ignore invalid lines
+      }
+    }
+    if (valid.length === 0) {
+      toast.warning("没有识别到有效网址", "请每行输入一个网址，例如 github.com");
+      return;
+    }
+    addBatch.mutate(valid);
+  };
+
   return (
     <Card className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-body font-semibold text-ink">恢复时顺手打开的文件、文件夹与网页</p>
           <p className="text-[11px] text-ink-3">
-            浏览器窗口本身在「软件列表」里备份；如需自动打开指定网页，在这里添加网址即可
+            浏览器窗口本身在「软件列表」里备份；如需自动打开指定网页，在这里添加网址或导入书签夹即可
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="primary" disabled={picking || add.isPending} onClick={pickFile}>
             <FilePlus2 size={13} /> 选择文件
           </Button>
@@ -1359,8 +1590,126 @@ function ResourcesCard({
           >
             <FolderPlus size={13} /> 选择文件夹
           </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={addBatch.isPending}
+            onClick={() => setBatchOpen(true)}
+          >
+            <Bookmark size={13} /> 批量 / 书签
+          </Button>
         </div>
       </div>
+
+      <Dialog
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        title="批量添加网址或导入书签"
+        maxWidth="max-w-lg"
+        footer={
+          batchTab === "paste" ? (
+            <>
+              <Button variant="secondary" onClick={() => setBatchOpen(false)}>
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                disabled={addBatch.isPending || !batchText.trim()}
+                onClick={submitBatchPaste}
+              >
+                {addBatch.isPending ? <Spinner /> : <Plus size={13} />} 批量添加
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" onClick={() => setBatchOpen(false)}>
+              关闭
+            </Button>
+          )
+        }
+      >
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 rounded-[8px] bg-raised/70 p-0.5 text-aux">
+            <button
+              type="button"
+              onClick={() => setBatchTab("paste")}
+              className={`h-7 cursor-pointer rounded-[6px] font-medium transition-all ${
+                batchTab === "paste" ? "apple-segment-active" : "text-ink-3"
+              }`}
+            >
+              批量粘贴网址
+            </button>
+            <button
+              type="button"
+              onClick={() => setBatchTab("bookmarks")}
+              className={`h-7 cursor-pointer rounded-[6px] font-medium transition-all ${
+                batchTab === "bookmarks" ? "apple-segment-active" : "text-ink-3"
+              }`}
+            >
+              导入 Chrome / Edge 书签
+            </button>
+          </div>
+
+          {batchTab === "paste" ? (
+            <div className="flex flex-col gap-1.5">
+              <textarea
+                autoFocus
+                rows={5}
+                value={batchText}
+                onChange={(e) => setBatchText(e.target.value)}
+                placeholder={"每行粘贴一个网址，例如：\nhttps://github.com\nhttps://chatgpt.com\ndocs.rs"}
+                className="w-full rounded-[8px] border border-line-strong bg-canvas p-2.5 font-mono text-aux text-ink placeholder:text-ink-3 outline-none focus:border-accent"
+              />
+              <p className="text-[11px] text-ink-3">会自动补全 https:// 并跳过已经添加过的重复网址。</p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <p className="text-[11px] text-ink-3">
+                仅只读本机浏览器公开的书签文件夹列表，不碰密码、Cookie 或浏览记录。
+              </p>
+              {bookmarks.isPending ? (
+                <div className="flex items-center gap-2 py-4 text-aux text-ink-3">
+                  <Spinner /> 扫描 Chrome / Edge 书签夹…
+                </div>
+              ) : (bookmarks.data ?? []).length === 0 ? (
+                <p className="rounded-[9px] border border-dashed border-line py-6 text-center text-aux text-ink-3">
+                  未在本机默认目录检测到 Chrome / Edge 书签文件夹。
+                </p>
+              ) : (
+                <ul className="max-h-60 divide-y divide-line overflow-y-auto rounded-[9px] border border-line">
+                  {(bookmarks.data ?? []).map((f) => (
+                    <li
+                      key={`${f.browser}:${f.folderPath}`}
+                      className="flex items-center justify-between gap-2 px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <Badge tone="accent">{f.browser}</Badge>
+                          <span className="truncate text-aux font-medium text-ink">
+                            {f.folderPath}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 truncate text-[11px] text-ink-3">
+                          {f.urls.length} 个网页 · {f.urls.slice(0, 2).map((u) => u.name).join("、")}
+                        </p>
+                      </div>
+                      <Button
+                        size="xs"
+                        variant="primary"
+                        disabled={addBatch.isPending}
+                        onClick={() =>
+                          addBatch.mutate(f.urls.map((u) => ({ url: u.url, name: u.name })))
+                        }
+                      >
+                        导入 ({f.urls.length})
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      </Dialog>
 
       <form onSubmit={submitUrl} className="flex flex-col gap-1">
         <div className="flex items-center gap-2">

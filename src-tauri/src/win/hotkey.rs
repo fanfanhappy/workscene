@@ -10,6 +10,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, Unregister
 use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY};
 
 pub const HOTKEY_ID: i32 = 0x5753; // 'WS'
+pub const HOTKEY_WS_BASE: i32 = 0x5760; // Ctrl+Alt+1 .. Ctrl+Alt+5
+pub const WS_HOTKEY_COUNT: usize = 5;
 
 /// 支持的预设组合（白名单，避免任意字符串注册失败）
 pub const PRESETS: [&str; 4] = ["Ctrl+Alt+W", "Ctrl+Shift+W", "Ctrl+Alt+Space", ""];
@@ -20,7 +22,14 @@ pub const MOD_SHIFT: u32 = 0x0004;
 pub const MOD_NOREPEAT: u32 = 0x4000;
 
 pub const VK_SPACE: u32 = 0x20;
+pub const VK_1: u32 = 0x31;
 pub const VK_W: u32 = 0x57;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotkeyConfig {
+    pub main_combo: Option<Combo>,
+    pub workspace_slots: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Combo {
@@ -56,41 +65,74 @@ pub fn normalize_preset(text: &str) -> String {
     }
 }
 
-static SENDER: OnceLock<Mutex<Sender<Option<Combo>>>> = OnceLock::new();
+static SENDER: OnceLock<Mutex<Sender<HotkeyConfig>>> = OnceLock::new();
 
-/// 窗口线程调用一次：注册初始组合并进入消息循环
-pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>) {
-    let (tx, rx) = channel::<Option<Combo>>();
+/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~5 空间切屏键）并进入消息循环
+pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: bool) {
+    let (tx, rx) = channel::<HotkeyConfig>();
     let _ = SENDER.set(Mutex::new(tx));
 
     std::thread::spawn(move || unsafe {
-        let mut current = register(initial);
+        let mut current_main = register(initial);
+        let mut current_slots = if workspace_slots {
+            register_ws_slots()
+        } else {
+            false
+        };
 
         loop {
             while let Ok(next) = rx.try_recv() {
-                if current {
+                if current_main {
                     unregister();
                 }
-                current = register(next);
+                current_main = register(next.main_combo);
+
+                if current_slots != next.workspace_slots {
+                    if current_slots {
+                        unregister_ws_slots();
+                        current_slots = false;
+                    } else {
+                        current_slots = register_ws_slots();
+                    }
+                }
             }
 
             // 用 PeekMessage 而不是阻塞的 GetMessage，才能定期检查通道
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_HOTKEY {
-                    crate::win::tray::show_main(&app);
+                    let id = msg.wParam as i32;
+                    if id == HOTKEY_ID {
+                        crate::win::tray::show_main(&app);
+                    } else if (HOTKEY_WS_BASE..HOTKEY_WS_BASE + WS_HOTKEY_COUNT as i32).contains(&id)
+                    {
+                        let slot = (id - HOTKEY_WS_BASE) as usize;
+                        let handle = app.clone();
+                        std::thread::spawn(move || {
+                            crate::win::tray::restore_workspace_by_index(&handle, slot);
+                        });
+                    }
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis(120));
         }
     });
 }
 
-/// 运行中切换快捷键（设置页调用）
-pub fn update(combo: Option<Combo>) -> bool {
+/// 运行中切换快捷键配置（设置页调用）
+pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
     match SENDER.get() {
-        Some(tx) => tx.lock().map(|s| s.send(combo).is_ok()).unwrap_or(false),
+        Some(tx) => tx
+            .lock()
+            .map(|s| {
+                s.send(HotkeyConfig {
+                    main_combo: combo,
+                    workspace_slots,
+                })
+                .is_ok()
+            })
+            .unwrap_or(false),
         None => false,
     }
 }
@@ -104,6 +146,28 @@ unsafe fn register(combo: Option<Combo>) -> bool {
 
 unsafe fn unregister() {
     UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+}
+
+unsafe fn register_ws_slots() -> bool {
+    let mut any = false;
+    for i in 0..WS_HOTKEY_COUNT {
+        let ok = RegisterHotKey(
+            std::ptr::null_mut(),
+            HOTKEY_WS_BASE + i as i32,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+            VK_1 + i as u32,
+        ) != 0;
+        if ok {
+            any = true;
+        }
+    }
+    any
+}
+
+unsafe fn unregister_ws_slots() {
+    for i in 0..WS_HOTKEY_COUNT {
+        UnregisterHotKey(std::ptr::null_mut(), HOTKEY_WS_BASE + i as i32);
+    }
 }
 
 #[cfg(test)]

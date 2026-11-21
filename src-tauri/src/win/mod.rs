@@ -1,9 +1,11 @@
 pub mod autostart;
+pub mod bookmarks;
 pub mod dialog;
 pub mod display;
 pub mod dpi;
 pub mod filter;
 pub mod hotkey;
+pub mod icon;
 pub mod mock;
 pub mod process;
 pub mod single_instance;

@@ -1,17 +1,14 @@
-//! 应用适配器的最小实现（PRD §11 的 L1/L2）。
+//! 应用适配器的 L1/L2 实现（PRD §11）。
 //!
-//! 这里刻意只做**建议**，不自动接管启动：
-//! - L1 通用：任何应用都能启动、等窗口、定位（已由恢复引擎实现）；
-//! - L2 参数：按可执行文件名给出"该应用打开某资源时的常见参数"，
-//!   由用户确认后写进 app_configs.launch_args，不猜、不覆盖用户已填的内容。
-//!
-//! 为什么不自动填：不同版本/安装方式的参数不保证一致（例如 Chrome 的
-//! --new-window 在已有实例时的行为、VS Code 的 CLI 是否在 PATH 中），
-//! 猜错会让"恢复"变成"乱开窗口"，违背不谎报原则。
+//! - L1 通用：任何 Win32 应用都能启动、等窗口、定位（由恢复引擎实现）；
+//! - L2 参数：按可执行文件名识别主流 IDE / 终端 / 浏览器 / 资源管理器，
+//!   在用户确认后给出规范的启动参数建议（例如 wt.exe 使用 `-d`，Firefox 使用 `-new-window`），
+//!   不猜、不覆盖用户已填内容。
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     VsCode,
+    JetBrains,
     Terminal,
     Browser,
     Explorer,
@@ -22,6 +19,7 @@ impl AdapterKind {
     pub fn as_str(self) -> &'static str {
         match self {
             AdapterKind::VsCode => "vscode",
+            AdapterKind::JetBrains => "jetbrains",
             AdapterKind::Terminal => "terminal",
             AdapterKind::Browser => "browser",
             AdapterKind::Explorer => "explorer",
@@ -32,16 +30,48 @@ impl AdapterKind {
 
 /// 依据可执行文件名识别适配等级（大小写不敏感）
 pub fn classify(exe_name: &str) -> AdapterKind {
-    let name = exe_name.to_lowercase();
+    let name = exe_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(exe_name)
+        .trim()
+        .to_lowercase();
     match name.as_str() {
-        "code.exe" | "code - insiders.exe" | "cursor.exe" => AdapterKind::VsCode,
+        "code.exe"
+        | "code - insiders.exe"
+        | "cursor.exe"
+        | "antigravity.exe"
+        | "windsurf.exe"
+        | "trae.exe" => AdapterKind::VsCode,
+        "idea64.exe"
+        | "pycharm64.exe"
+        | "webstorm64.exe"
+        | "goland64.exe"
+        | "clion64.exe"
+        | "rider64.exe"
+        | "rustrover64.exe"
+        | "datagrip64.exe"
+        | "phpstorm64.exe" => AdapterKind::JetBrains,
         "windowsterminal.exe" | "wt.exe" | "cmd.exe" | "powershell.exe" | "pwsh.exe" => {
             AdapterKind::Terminal
         }
-        "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" => AdapterKind::Browser,
+        "chrome.exe"
+        | "msedge.exe"
+        | "firefox.exe"
+        | "brave.exe"
+        | "arc.exe"
+        | "vivaldi.exe"
+        | "opera.exe"
+        | "360chrome.exe"
+        | "360chromex.exe" => AdapterKind::Browser,
         "explorer.exe" => AdapterKind::Explorer,
         _ => AdapterKind::Generic,
     }
+}
+
+/// 是否属于可直接打开项目目录的 IDE（供恢复文件夹资源时自动选择 IDE）
+pub fn is_ide(exe_name: &str) -> bool {
+    matches!(classify(exe_name), AdapterKind::VsCode | AdapterKind::JetBrains)
 }
 
 /// 给出"打开某资源"时的建议参数（仅建议，需用户确认）
@@ -50,11 +80,30 @@ pub fn suggest_args(exe_name: &str, target: Option<&str>) -> Option<String> {
     if target.is_empty() {
         return None;
     }
-    match classify(exe_name) {
-        // VS Code / Terminal：第一个位置参数就是目录或文件
-        AdapterKind::VsCode | AdapterKind::Terminal => Some(quote_if_needed(target)),
-        // 浏览器：明确要求新窗口打开网址
-        AdapterKind::Browser => Some(format!("--new-window {}", quote_if_needed(target))),
+    let name = exe_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(exe_name)
+        .trim()
+        .to_lowercase();
+
+    match classify(&name) {
+        // VS Code / Cursor / Antigravity / JetBrains：直接传项目目录或文件路径
+        AdapterKind::VsCode | AdapterKind::JetBrains => Some(quote_if_needed(target)),
+        // Windows Terminal 必须用 -d 指定初始工作目录；pwsh 使用 -WorkingDirectory
+        AdapterKind::Terminal => match name.as_str() {
+            "windowsterminal.exe" | "wt.exe" => Some(format!("-d {}", quote_if_needed(target))),
+            "pwsh.exe" => Some(format!("-WorkingDirectory {}", quote_if_needed(target))),
+            _ => None,
+        },
+        // 浏览器：Firefox 用 -new-window，Chromium 系用 --new-window
+        AdapterKind::Browser => {
+            if name == "firefox.exe" {
+                Some(format!("-new-window {}", quote_if_needed(target)))
+            } else {
+                Some(format!("--new-window {}", quote_if_needed(target)))
+            }
+        }
         // 资源管理器：直接把路径作为参数
         AdapterKind::Explorer => Some(quote_if_needed(target)),
         AdapterKind::Generic => None,
@@ -76,10 +125,17 @@ mod tests {
     #[test]
     fn classifies_common_apps() {
         assert_eq!(classify("Code.exe"), AdapterKind::VsCode);
+        assert_eq!(classify("Antigravity.exe"), AdapterKind::VsCode);
+        assert_eq!(classify("Windsurf.exe"), AdapterKind::VsCode);
+        assert_eq!(classify("idea64.exe"), AdapterKind::JetBrains);
         assert_eq!(classify("WindowsTerminal.exe"), AdapterKind::Terminal);
         assert_eq!(classify("chrome.exe"), AdapterKind::Browser);
+        assert_eq!(classify("Arc.exe"), AdapterKind::Browser);
         assert_eq!(classify("explorer.exe"), AdapterKind::Explorer);
         assert_eq!(classify("notepad.exe"), AdapterKind::Generic);
+        assert!(is_ide("Antigravity.exe"));
+        assert!(is_ide("pycharm64.exe"));
+        assert!(!is_ide("chrome.exe"));
     }
 
     #[test]
@@ -89,6 +145,14 @@ mod tests {
         assert_eq!(
             suggest_args("Code.exe", Some(r"D:\work\app")).as_deref(),
             Some(r"D:\work\app")
+        );
+        assert_eq!(
+            suggest_args("WindowsTerminal.exe", Some(r"D:\work\my app")).as_deref(),
+            Some(r#"-d "D:\work\my app""#)
+        );
+        assert_eq!(
+            suggest_args("firefox.exe", Some("https://example.com")).as_deref(),
+            Some("-new-window https://example.com")
         );
     }
 

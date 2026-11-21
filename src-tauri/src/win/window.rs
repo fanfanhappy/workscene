@@ -197,3 +197,15 @@ pub fn current_rect(hwnd: HWND) -> Option<RECT> {
 pub fn is_window(hwnd: HWND) -> bool {
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) != 0 }
 }
+
+/// 专注模式：把非本空间的窗口安静最小化到任务栏，绝不关闭或抢焦点
+pub fn minimize_window(hwnd: HWND) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWMINNOACTIVE};
+    unsafe { ShowWindow(hwnd, SW_SHOWMINNOACTIVE) != 0 }
+}
+
+/// 优雅关闭窗口：发送标准 WM_CLOSE（等价点击右上角 ×），有未保存文档时会正常提示，绝不强杀进程
+pub fn close_window_gracefully(hwnd: HWND) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 }
+}

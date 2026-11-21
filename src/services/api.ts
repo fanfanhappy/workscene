@@ -3,6 +3,7 @@ import type {
   AdapterSuggestion,
   AppInfo,
   AppSettings,
+  BookmarkFolder,
   CaptureResult,
   DisplayInfo,
   LayoutUpdate,
@@ -16,6 +17,7 @@ import type {
   SnapshotDiff,
   SnapshotSummary,
   StorageStats,
+  UrlBatchEntry,
   WorkspaceDetail,
   WorkspaceItem,
   WorkspaceSummary,
@@ -67,12 +69,14 @@ export const api = {
     name: string,
     description: string | null,
     autoSnapshotEnabled: boolean,
+    color: string | null = null,
   ) =>
     call<void>("workspace_update_meta", {
       id,
       name,
       description,
       autoSnapshotEnabled,
+      color,
     }),
   workspaceDuplicate: (id: string, newName: string) =>
     call<WorkspaceSummary>("workspace_duplicate", { id, newName }),
@@ -83,17 +87,22 @@ export const api = {
   workspaceUpdateFromCapture: (id: string, capture: CaptureResult) =>
     call<WorkspaceDetail>("workspace_update_from_capture", { id, capture }),
   workspaceDelete: (id: string) => call<void>("workspace_delete", { id }),
+  workspaceCloseWindows: (id: string) => call<number>("workspace_close_windows", { id }),
   workspaceItemUpdate: (
     itemId: string,
     reusePolicy: string,
     launchArgs: string | null,
     enabled: boolean,
+    launchPriority?: number,
+    launchDelayMs?: number,
   ) =>
     call<void>("workspace_item_update", {
       itemId,
       reusePolicy,
       launchArgs,
       enabled,
+      launchPriority,
+      launchDelayMs,
     }),
   workspaceItemRelocate: (workspaceId: string, itemId: string, newPath: string) =>
     call<WorkspaceItem>("workspace_item_relocate", {
@@ -101,6 +110,11 @@ export const api = {
       itemId,
       newPath,
     }),
+  appIconsBatch: (paths: string[]) =>
+    call<Record<string, string>>("app_icons_batch", { paths }),
+  bookmarksListFolders: () => call<BookmarkFolder[]>("bookmarks_list_folders"),
+  workspaceItemsAddBatch: (workspaceId: string, entries: UrlBatchEntry[]) =>
+    call<number>("workspace_items_add_batch", { workspaceId, entries }),
   restoreIsBusy: () => call<boolean>("restore_is_busy"),
   restoreCancel: () => call<boolean>("restore_cancel"),
   systemOpenDataDir: () => call<void>("system_open_data_dir"),
@@ -142,14 +156,16 @@ export const api = {
   recoveryDismiss: () => call<void>("recovery_dismiss"),
   adapterSuggest: (exeName: string, target: string | null) =>
     call<AdapterSuggestion>("adapter_suggest", { exeName, target }),
+  adapterClassifyBatch: (exeNames: string[]) =>
+    call<Record<string, string>>("adapter_classify_batch", { exeNames }),
 
   settingsGet: () => call<AppSettings>("settings_get"),
   settingsSet: (settings: AppSettings) => call<AppSettings>("settings_set", { settings }),
   storageStats: () => call<StorageStats>("storage_stats"),
   storageCleanup: () => call<number>("storage_cleanup"),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
-  workspaceRestore: (id: string, relaunchMissing: boolean) =>
-    call<RestoreReport>("workspace_restore", { id, relaunchMissing }),
+  workspaceRestore: (id: string, relaunchMissing: boolean, focusMode = false) =>
+    call<RestoreReport>("workspace_restore", { id, relaunchMissing, focusMode }),
   workspaceRestoreRetry: (
     id: string,
     relaunchMissing: boolean,

@@ -323,7 +323,7 @@ pub fn apply(
     relaunch_missing: bool,
     pre_restore_scene_id: Option<String>,
 ) -> AppResult<RestoreReport> {
-    apply_subset(app, scene, relaunch_missing, pre_restore_scene_id, None)
+    apply_with_options(app, scene, relaunch_missing, false, pre_restore_scene_id, None)
 }
 
 /// 按可选目标白名单恢复（用于「仅重试失败/未完成项」，不重复折腾已成功窗口）
@@ -331,6 +331,25 @@ pub fn apply_subset(
     app: Option<&AppHandle>,
     scene: &SceneFile,
     relaunch_missing: bool,
+    pre_restore_scene_id: Option<String>,
+    only_targets: Option<&HashSet<String>>,
+) -> AppResult<RestoreReport> {
+    apply_with_options(
+        app,
+        scene,
+        relaunch_missing,
+        false,
+        pre_restore_scene_id,
+        only_targets,
+    )
+}
+
+/// 完整恢复入口：支持专注模式（自动最小化非本空间窗口）与可选目标白名单
+pub fn apply_with_options(
+    app: Option<&AppHandle>,
+    scene: &SceneFile,
+    relaunch_missing: bool,
+    focus_mode: bool,
     pre_restore_scene_id: Option<String>,
     only_targets: Option<&HashSet<String>>,
 ) -> AppResult<RestoreReport> {
@@ -395,6 +414,15 @@ pub fn apply_subset(
                 if wait_for_process_window(&plan.exe) {
                     current = current_candidates(self_pid);
                 }
+            }
+            if plan.delay_ms > 0 && !is_cancelled() {
+                let mut left = plan.delay_ms.min(15_000);
+                while left > 0 && !is_cancelled() {
+                    let step = left.min(100);
+                    std::thread::sleep(Duration::from_millis(step));
+                    left -= step;
+                }
+                current = current_candidates(self_pid);
             }
         }
     }
@@ -621,12 +649,45 @@ pub fn apply_subset(
         steps.push(step);
     }
 
-    let succeeded = steps.iter().filter(|s| s.status == StepStatus::Success).count();
+    let mut succeeded = steps.iter().filter(|s| s.status == StepStatus::Success).count();
     let failed = steps.iter().filter(|s| s.status == StepStatus::Failed).count();
     let skipped = steps
         .iter()
         .filter(|s| matches!(s.status, StepStatus::Skipped | StepStatus::NeedsReview))
         .count();
+
+    // 专注模式：把不属于本空间的其他可见窗口安静最小化到任务栏（绝不关闭，跳过 WorkScene 自身）
+    if focus_mode && !is_cancelled() && only_targets.is_none() {
+        let mut minimized = 0usize;
+        for c in current_candidates(self_pid) {
+            if c.pid == self_pid || used.contains(&c.hwnd) {
+                continue;
+            }
+            let hwnd = c.hwnd as HWND;
+            if !window::is_iconic(hwnd) && window::minimize_window(hwnd) {
+                minimized += 1;
+            }
+        }
+        if minimized > 0 {
+            let step = RestoreStepResult {
+                step_type: "focus".into(),
+                target_name: "专注模式清理".into(),
+                status: StepStatus::Success,
+                message: format!("已自动最小化 {minimized} 个非本空间窗口（未关闭任何软件）"),
+                match_note: "focus_mode".into(),
+                duration_ms: 0,
+                delta_x: None,
+                delta_y: None,
+                state_restored: true,
+                code: None,
+            };
+            if let Some(app) = app {
+                let _ = app.emit("restore:step", &step);
+            }
+            succeeded += 1;
+            steps.push(step);
+        }
+    }
 
     let report = RestoreReport {
         run_id: format!("run-{:x}", started_at),
@@ -703,13 +764,45 @@ pub fn split_args(input: &str) -> Vec<String> {
     out
 }
 
+/// 一键收工：向当前已打开且匹配本空间的窗口发送标准 WM_CLOSE（绝不强杀进程，也不碰 WorkScene 自身）
+pub fn close_workspace_windows(scene: &SceneFile) -> AppResult<usize> {
+    let monitors = display::enumerate();
+    if monitors.is_empty() {
+        return Ok(0);
+    }
+    let self_pid = std::process::id();
+    let current = current_candidates(self_pid);
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut closed = 0usize;
+
+    for win in &scene.windows {
+        let target = resolve_target(win, &monitors);
+        let pool: Vec<Candidate> = current
+            .iter()
+            .filter(|c| c.pid != self_pid && !used.contains(&c.hwnd))
+            .cloned()
+            .collect();
+        let outcome = match_window(win, &pool, target.rect);
+        if let Some(idx) = outcome.picked {
+            let hwnd = pool[idx].hwnd;
+            used.insert(hwnd);
+            if window::close_window_gracefully(hwnd as HWND) {
+                closed += 1;
+            }
+        }
+    }
+    Ok(closed)
+}
+
 struct LaunchPlan {
     exe: String,
     args: Vec<String>,
     count: usize,
+    priority: i64,
+    delay_ms: u64,
 }
 
-/// 每个可执行文件要补几个实例，取决于它自己的复用策略与当前已开窗口数
+/// 每个可执行文件要补几个实例，取决于它自己的复用策略与当前已开窗口数；按 launch_priority 升序启动
 fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
     struct Group {
         key: String,
@@ -717,6 +810,8 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
         policy: String,
         args: Option<String>,
         need: usize,
+        priority: i64,
+        delay_ms: u64,
     }
 
     let mut groups: Vec<Group> = Vec::new();
@@ -726,18 +821,24 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
         };
         let key = path.to_lowercase();
         match groups.iter_mut().find(|g| g.key == key) {
-            Some(g) => g.need += 1,
+            Some(g) => {
+                g.need += 1;
+                g.priority = g.priority.min(w.launch_priority);
+                g.delay_ms = g.delay_ms.max(w.launch_delay_ms);
+            }
             None => groups.push(Group {
                 key,
                 exe: path.clone(),
                 policy: w.reuse_policy.clone(),
                 args: w.launch_args.clone(),
                 need: 1,
+                priority: w.launch_priority,
+                delay_ms: w.launch_delay_ms,
             }),
         }
     }
 
-    groups
+    let mut plans: Vec<LaunchPlan> = groups
         .into_iter()
         .filter_map(|g| {
             let available = current
@@ -763,9 +864,14 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
                 exe: g.exe,
                 args: split_args(g.args.as_deref().unwrap_or("")),
                 count,
+                priority: g.priority,
+                delay_ms: g.delay_ms,
             })
         })
-        .collect()
+        .collect();
+
+    plans.sort_by_key(|p| p.priority);
+    plans
 }
 
 fn delta_threshold(dpi: u32) -> i32 {
@@ -883,9 +989,8 @@ pub fn choose_opener(scene: &SceneFile, r: &SceneResource) -> ResourceOpener {
         let name = path
             .rsplit(['\\', '/'])
             .next()
-            .unwrap_or_default()
-            .to_lowercase();
-        if matches!(name.as_str(), "code.exe" | "code - insiders.exe" | "cursor.exe") {
+            .unwrap_or_default();
+        if crate::adapters::is_ide(name) {
             return ResourceOpener::Ide(path.clone());
         }
     }
@@ -1050,6 +1155,8 @@ mod tests {
                 z_order: i as i32,
                 reuse_policy: policy.into(),
                 launch_args: None,
+                launch_priority: 0,
+                launch_delay_ms: 0,
             })
             .collect();
         SceneFile {

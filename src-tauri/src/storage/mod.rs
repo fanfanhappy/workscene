@@ -175,6 +175,8 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
             z_order: windows.len() as i32,
             reuse_policy: "reuse_or_launch".into(),
             launch_args: None,
+            launch_priority: 0,
+            launch_delay_ms: 0,
         });
     }
 

@@ -89,6 +89,20 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
             .entry(raw.pid)
             .or_insert_with(|| process::info(raw.pid));
 
+        // 尊重用户在「设置 -> 应用适配」里配置的全局捕获忽略名单（不静默丢弃，透明记入 excluded）
+        if !allow_self_window && filter::is_ignored_process(&pinfo.name) {
+            excluded_total += 1;
+            if excluded.len() < 120 {
+                excluded.push(ExcludedWindow {
+                    title: raw.title,
+                    class_name: raw.class_name,
+                    process_name: pinfo.name.clone(),
+                    reason: "已在全局忽略名单中".into(),
+                });
+            }
+            continue;
+        }
+
         // 最小化窗口的 GetWindowRect 不可用，必须用 rcNormalPosition（评审 R2-4）
         let effective = if raw.show_state == ShowState::Minimized {
             raw.restored_rect

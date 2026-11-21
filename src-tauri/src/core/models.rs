@@ -101,6 +101,12 @@ pub struct SceneWindow {
     /// 启动参数（命令行字符串，按类 shell 规则切分，绝不经过 cmd.exe）
     #[serde(default)]
     pub launch_args: Option<String>,
+    /// 启动优先级：数值越小越先启动（如 -10 代理软件优先启动）
+    #[serde(default)]
+    pub launch_priority: i64,
+    /// 启动本程序后的等待延迟（毫秒），用于等代理/服务就绪后再开后续应用
+    #[serde(default)]
+    pub launch_delay_ms: u64,
 }
 
 /// 非应用类资源：文件、文件夹、网址（PRD FR-008 / FR-009）

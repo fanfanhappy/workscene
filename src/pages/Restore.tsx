@@ -11,6 +11,7 @@ import {
   Lightbulb,
   Loader2,
   Play,
+  Power,
   RefreshCw,
   RotateCw,
   ShieldCheck,
@@ -37,6 +38,7 @@ import {
   Spinner,
   Switch,
 } from "@/components/ui";
+import { WorkspaceColorDot } from "@/components/AppIcon";
 
 const statusMeta: Record<
   StepStatus,
@@ -63,6 +65,7 @@ export function RestorePage() {
 
   const [wsSearch, setWsSearch] = useState("");
   const [relaunch, setRelaunch] = useState(true);
+  const [focusMode, setFocusMode] = useState(false);
   const [relaunchSynced, setRelaunchSynced] = useState(false);
   const [showTech, setShowTech] = useState(false);
   const [liveSteps, setLiveSteps] = useState<RestoreStepResult[]>([]);
@@ -84,6 +87,7 @@ export function RestorePage() {
   useEffect(() => {
     if (settings.data && !relaunchSynced) {
       setRelaunch(settings.data.restoreRelaunchDefault);
+      setFocusMode(settings.data.restoreFocusModeDefault);
       setRelaunchSynced(true);
     }
   }, [settings.data, relaunchSynced]);
@@ -154,7 +158,7 @@ export function RestorePage() {
   };
 
   const run = useMutation({
-    mutationFn: () => api.workspaceRestore(active!.id, relaunch),
+    mutationFn: () => api.workspaceRestore(active!.id, relaunch, focusMode),
     onMutate: () => {
       setLiveSteps([]);
       setReport(null);
@@ -171,6 +175,18 @@ export function RestorePage() {
       setError(msg);
       toast.danger("恢复失败", msg);
     },
+  });
+
+  const closeWindows = useMutation({
+    mutationFn: () => api.workspaceCloseWindows(active!.id),
+    onSuccess: (count) => {
+      qc.invalidateQueries({ queryKey: ["preview", active?.id] });
+      toast.info(
+        count > 0 ? `已向 ${count} 个窗口发送关闭请求` : "当前没有已打开的本空间窗口",
+        count > 0 ? "有未保存内容的软件会正常弹出保存确认" : undefined,
+      );
+    },
+    onError: (e) => toast.danger("收工失败", String((e as Error).message)),
   });
 
   // 仅重试未完成/失败项
@@ -364,7 +380,8 @@ export function RestorePage() {
                   }`}
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="flex items-center gap-1 truncate text-body font-medium text-ink">
+                    <p className="flex items-center gap-1.5 truncate text-body font-medium text-ink">
+                      <WorkspaceColorDot color={s.color} />
                       {s.isFavorite ? (
                         <Star size={11} className="shrink-0 fill-warning text-warning" />
                       ) : null}
@@ -412,13 +429,31 @@ export function RestorePage() {
 
                 <div className="flex items-center gap-1.5">
                   {active ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => navigate(`/workspaces?id=${active.id}`)}
-                    >
-                      <SlidersHorizontal size={13} /> 编辑
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={closeWindows.isPending}
+                        onClick={async () => {
+                          const ok = await confirmAction({
+                            title: `收工：关闭「${active.name}」的窗口？`,
+                            description: "仅向本空间已打开的窗口发送标准关闭请求，不会强杀进程。",
+                            detail: "如有未保存文档，软件会正常弹出保存确认提示。",
+                            confirmLabel: "发送关闭请求",
+                          });
+                          if (ok) closeWindows.mutate();
+                        }}
+                      >
+                        <Power size={13} /> 收工
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => navigate(`/workspaces?id=${active.id}`)}
+                      >
+                        <SlidersHorizontal size={13} /> 编辑
+                      </Button>
+                    </>
                   ) : null}
                   <Button
                     size="sm"
@@ -443,18 +478,34 @@ export function RestorePage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between gap-4 border-t border-line pt-2.5">
-                <div>
-                  <p className="text-body font-medium text-ink">自动打开没启动的软件</p>
-                  <p className="text-[11px] text-ink-3">
-                    打开后自动帮你拉起还没运行的软件；关闭则只整理已打开的窗口
-                  </p>
+              <div className="flex flex-col gap-2.5 border-t border-line pt-2.5">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-body font-medium text-ink">自动打开没启动的软件</p>
+                    <p className="text-[11px] text-ink-3">
+                      打开后自动帮你拉起还没运行的软件；关闭则只整理已打开的窗口
+                    </p>
+                  </div>
+                  <Switch
+                    checked={relaunch}
+                    onChange={setRelaunch}
+                    ariaLabel="自动打开没启动的软件"
+                  />
                 </div>
-                <Switch
-                  checked={relaunch}
-                  onChange={setRelaunch}
-                  ariaLabel="自动打开没启动的软件"
-                />
+
+                <div className="flex items-center justify-between gap-4 border-t border-line/60 pt-2.5">
+                  <div>
+                    <p className="text-body font-medium text-ink">专注模式（收起无关窗口）</p>
+                    <p className="text-[11px] text-ink-3">
+                      自动把非本空间的窗口最小化到任务栏，一秒切换出干净桌面（绝不关闭任何软件）
+                    </p>
+                  </div>
+                  <Switch
+                    checked={focusMode}
+                    onChange={setFocusMode}
+                    ariaLabel="专注模式"
+                  />
+                </div>
               </div>
             </Card>
 

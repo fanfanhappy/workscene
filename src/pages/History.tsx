@@ -36,6 +36,7 @@ import {
   Spinner,
 } from "@/components/ui";
 import { MonitorCanvas } from "@/components/MonitorCanvas";
+import { WorkspaceColorDot } from "@/components/AppIcon";
 
 const typeMeta: Record<
   string,
@@ -234,7 +235,10 @@ export function HistoryPage() {
                 : "border-line bg-surface hover:bg-raised/55"
             }`}
           >
-            <p className="truncate text-body font-medium text-ink">{w.name}</p>
+            <p className="flex items-center gap-1.5 truncate text-body font-medium text-ink">
+              <WorkspaceColorDot color={w.color} />
+              <span className="truncate">{w.name}</span>
+            </p>
             <p className="text-[11px] text-ink-3">
               {w.itemCount} 应用 · {w.windowCount} 窗口
             </p>

@@ -30,6 +30,7 @@ import {
   Spinner,
 } from "@/components/ui";
 import { MonitorCanvas } from "@/components/MonitorCanvas";
+import { AppIconStrip, useAppIcons, WorkspaceColorDot } from "@/components/AppIcon";
 
 export function OverviewPage() {
   const navigate = useNavigate();
@@ -116,6 +117,12 @@ export function OverviewPage() {
     for (const w of workspaces.data ?? []) m.set(w.id, w.name);
     return m;
   }, [workspaces.data]);
+
+  const wsIconPaths = useMemo(
+    () => (workspaces.data ?? []).slice(0, 6).flatMap((w) => w.appPaths ?? []),
+    [workspaces.data],
+  );
+  const appIcons = useAppIcons(wsIconPaths);
 
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-4">
@@ -317,6 +324,7 @@ export function OverviewPage() {
                   <div className="min-w-0">
                     <div className="flex items-center justify-between gap-2">
                       <h3 className="flex items-center gap-1.5 truncate text-body font-semibold text-ink">
+                        <WorkspaceColorDot color={w.color} />
                         {w.isFavorite ? (
                           <Star size={12} className="shrink-0 fill-warning text-warning" />
                         ) : null}
@@ -327,8 +335,17 @@ export function OverviewPage() {
                       </span>
                     </div>
                     <p className="mt-1 text-[11px] text-ink-3">
-                      {w.itemCount} 应用 · {w.resourceCount} 资源 · {w.windowCount} 窗口
+                      {w.itemCount} 软件 · {w.resourceCount} 文件/网址 · {w.windowCount} 窗口
                     </p>
+                    {(w.appPaths ?? []).length > 0 ? (
+                      <div className="mt-2">
+                        <AppIconStrip
+                          paths={w.appPaths}
+                          icons={appIcons}
+                          totalApps={w.itemCount}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                   <div
                     className="flex items-center justify-between gap-2 border-t border-line pt-2"

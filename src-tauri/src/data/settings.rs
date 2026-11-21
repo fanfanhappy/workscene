@@ -12,7 +12,11 @@ pub const KEY_AUTO_ENABLED: &str = "auto_snapshot_enabled";
 pub const KEY_AUTO_KEEP: &str = "auto_keep";
 pub const KEY_AUTO_INTERVAL: &str = "auto_min_interval_secs";
 pub const KEY_RELAUNCH_DEFAULT: &str = "restore_relaunch_default";
+pub const KEY_FOCUS_MODE_DEFAULT: &str = "restore_focus_mode_default";
 pub const KEY_HOTKEY: &str = "hotkey";
+pub const KEY_WS_HOTKEYS: &str = "workspace_hotkeys_enabled";
+pub const KEY_STARTUP_WORKSPACE: &str = "startup_workspace_id";
+pub const KEY_IGNORED_PROCESSES: &str = "ignored_processes";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,16 +25,32 @@ pub struct AppSettings {
     pub auto_keep: i64,
     pub auto_min_interval_secs: i64,
     pub restore_relaunch_default: bool,
+    /// 专注模式默认值：恢复时自动最小化非本空间窗口（不关闭软件）
+    #[serde(default)]
+    pub restore_focus_mode_default: bool,
     /// 开机启动：真源是注册表（HKCU Run），这里只做展示与提交
     #[serde(default)]
     pub autostart: bool,
     /// 全局快捷键预设；空串表示关闭
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    /// 是否启用 Ctrl+Alt+1~5 全局快速切换前 5 个工作空间
+    #[serde(default = "default_true")]
+    pub workspace_hotkeys_enabled: bool,
+    /// 启动 WorkScene 时自动恢复的工作空间 ID（None 表示不自动恢复）
+    #[serde(default)]
+    pub startup_workspace_id: Option<String>,
+    /// 全局捕获忽略名单（进程名列表，捕获桌面时自动跳过）
+    #[serde(default)]
+    pub ignored_processes: Vec<String>,
 }
 
 fn default_hotkey() -> String {
     "Ctrl+Alt+W".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -41,8 +61,12 @@ impl Default for AppSettings {
             auto_keep: super::snapshots::AUTO_KEEP_PER_WORKSPACE as i64,
             auto_min_interval_secs: super::snapshots::AUTO_MIN_INTERVAL_MS / 1000,
             restore_relaunch_default: true,
+            restore_focus_mode_default: false,
             autostart: false,
             hotkey: default_hotkey(),
+            workspace_hotkeys_enabled: true,
+            startup_workspace_id: None,
+            ignored_processes: Vec::new(),
         }
     }
 }
@@ -53,6 +77,18 @@ impl AppSettings {
         self.auto_keep = self.auto_keep.clamp(1, 500);
         self.auto_min_interval_secs = self.auto_min_interval_secs.clamp(10, 86_400);
         self.hotkey = crate::win::hotkey::normalize_preset(&self.hotkey);
+        self.startup_workspace_id = self
+            .startup_workspace_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut dedup: Vec<String> = Vec::new();
+        for raw in self.ignored_processes {
+            let key = crate::win::filter::normalize_process_key(&raw);
+            if !key.is_empty() && !dedup.contains(&key) {
+                dedup.push(key);
+            }
+        }
+        self.ignored_processes = dedup;
         self
     }
 }
@@ -98,8 +134,27 @@ pub async fn get(db: &Db) -> AppResult<AppSettings> {
     if let Some(v) = read_raw(db, KEY_RELAUNCH_DEFAULT).await? {
         s.restore_relaunch_default = v == "true" || v == "1";
     }
+    if let Some(v) = read_raw(db, KEY_FOCUS_MODE_DEFAULT).await? {
+        s.restore_focus_mode_default = v == "true" || v == "1";
+    }
     if let Some(v) = read_raw(db, KEY_HOTKEY).await? {
         s.hotkey = crate::win::hotkey::normalize_preset(&v);
+    }
+    if let Some(v) = read_raw(db, KEY_WS_HOTKEYS).await? {
+        s.workspace_hotkeys_enabled = v == "true" || v == "1";
+    }
+    if let Some(v) = read_raw(db, KEY_STARTUP_WORKSPACE).await? {
+        let trimmed = v.trim();
+        s.startup_workspace_id = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(v) = read_raw(db, KEY_IGNORED_PROCESSES).await? {
+        if let Ok(list) = serde_json::from_str::<Vec<String>>(&v) {
+            s.ignored_processes = list;
+        }
     }
 
     Ok(s.sanitized())
@@ -117,7 +172,27 @@ pub async fn set(db: &Db, settings: &AppSettings) -> AppResult<AppSettings> {
         if s.restore_relaunch_default { "true" } else { "false" },
     )
     .await?;
+    write_raw(
+        db,
+        KEY_FOCUS_MODE_DEFAULT,
+        if s.restore_focus_mode_default { "true" } else { "false" },
+    )
+    .await?;
     write_raw(db, KEY_HOTKEY, &s.hotkey).await?;
+    write_raw(
+        db,
+        KEY_WS_HOTKEYS,
+        if s.workspace_hotkeys_enabled { "true" } else { "false" },
+    )
+    .await?;
+    write_raw(
+        db,
+        KEY_STARTUP_WORKSPACE,
+        s.startup_workspace_id.as_deref().unwrap_or(""),
+    )
+    .await?;
+    let ignored_json = serde_json::to_string(&s.ignored_processes).unwrap_or_else(|_| "[]".into());
+    write_raw(db, KEY_IGNORED_PROCESSES, &ignored_json).await?;
 
     Ok(s)
 }
@@ -214,8 +289,12 @@ mod tests {
                 auto_keep: 0,          // 应被夹到 1
                 auto_min_interval_secs: 1, // 应被夹到 10
                 restore_relaunch_default: false,
+                restore_focus_mode_default: true,
                 autostart: false,
                 hotkey: "Ctrl+Shift+W".into(),
+                workspace_hotkeys_enabled: false,
+                startup_workspace_id: Some("ws-demo".into()),
+                ignored_processes: vec!["FlClash".into(), "flclash.exe".into()],
             },
         )
         .await

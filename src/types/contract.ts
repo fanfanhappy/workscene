@@ -172,6 +172,7 @@ export interface WorkspaceSummary {
   id: string;
   name: string;
   description: string | null;
+  color: string | null;
   isFavorite: boolean;
   itemCount: number;
   resourceCount: number;
@@ -179,6 +180,7 @@ export interface WorkspaceSummary {
   createdAt: number;
   updatedAt: number;
   lastRestoredAt: number | null;
+  appPaths: string[];
 }
 
 export interface WorkspaceItem {
@@ -190,6 +192,24 @@ export interface WorkspaceItem {
   enabled: boolean;
   reusePolicy: string;
   launchArgs: string | null;
+  launchPriority: number;
+  launchDelayMs: number;
+}
+
+export interface BookmarkUrl {
+  name: string;
+  url: string;
+}
+
+export interface BookmarkFolder {
+  browser: string;
+  folderPath: string;
+  urls: BookmarkUrl[];
+}
+
+export interface UrlBatchEntry {
+  url: string;
+  name?: string | null;
 }
 
 export interface WorkspaceWindow {
@@ -290,10 +310,18 @@ export interface AppSettings {
   autoKeep: number;
   autoMinIntervalSecs: number;
   restoreRelaunchDefault: boolean;
+  /** 恢复时默认开启专注模式（自动最小化非本空间窗口，不关闭软件） */
+  restoreFocusModeDefault: boolean;
   /** 开机启动：真源是注册表 HKCU Run */
   autostart: boolean;
   /** 全局快捷键预设，空串表示关闭 */
   hotkey: string;
+  /** 是否启用 Ctrl+Alt+1~5 快速切换前 5 个工作空间 */
+  workspaceHotkeysEnabled: boolean;
+  /** 启动 WorkScene 时自动恢复的工作空间 ID */
+  startupWorkspaceId: string | null;
+  /** 全局捕获忽略名单（进程名，扫描桌面时自动跳过） */
+  ignoredProcesses: string[];
 }
 
 export interface StorageStats {

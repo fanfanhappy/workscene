@@ -405,6 +405,8 @@ mod tests {
             z_order: 0,
             reuse_policy: String::new(),
             launch_args: None,
+            launch_priority: 0,
+            launch_delay_ms: 0,
         }
     }
 

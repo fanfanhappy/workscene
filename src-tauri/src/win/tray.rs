@@ -112,7 +112,23 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 托盘一键恢复：按全局设置自动启动缺失程序，恢复前自动备份，结果落库并通知前端
+/// 后台按序号（收藏优先列表第 `index` 个，供 Ctrl+Alt+1~5 全局快捷键调用）一键恢复
+pub fn restore_workspace_by_index(app: &AppHandle, index: usize) {
+    let db = app.state::<data::Db>().inner().clone();
+    let target_id = tauri::async_runtime::block_on(data::workspaces::list(&db))
+        .ok()
+        .and_then(|list| list.get(index).map(|w| w.id.clone()));
+    if let Some(ws_id) = target_id {
+        restore_from_tray(app, &ws_id);
+    }
+}
+
+/// 后台按工作空间 ID 一键恢复（供托盘、快捷键及开机自动恢复复用）
+pub fn restore_workspace_by_id(app: &AppHandle, workspace_id: &str) {
+    restore_from_tray(app, workspace_id);
+}
+
+/// 托盘一键恢复：按全局设置自动启动缺失程序及专注模式，恢复前自动备份，结果落库并通知前端
 fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
     let Some(_guard) = crate::restore::try_acquire() else {
         return;
@@ -122,10 +138,9 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
     let res = tauri::async_runtime::block_on(async {
         let scene = data::workspaces::to_scene(&db, workspace_id).await?;
         let snapshot_id = data::workspaces::latest_snapshot(&db, workspace_id).await?;
-        let relaunch = data::settings::get(&db)
-            .await
-            .map(|s| s.restore_relaunch_default)
-            .unwrap_or(true);
+        let settings = data::settings::get(&db).await.unwrap_or_default();
+        let relaunch = settings.restore_relaunch_default;
+        let focus_mode = settings.restore_focus_mode_default;
 
         let pre_restore = match crate::capture::scan() {
             Ok(current) => data::workspaces::add_snapshot(
@@ -142,7 +157,14 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
             Err(_) => None,
         };
 
-        let report = crate::restore::apply(Some(app), &scene, relaunch, pre_restore)?;
+        let report = crate::restore::apply_with_options(
+            Some(app),
+            &scene,
+            relaunch,
+            focus_mode,
+            pre_restore,
+            None,
+        )?;
         let _ = data::runs::save(
             &db,
             &report,
@@ -211,6 +233,10 @@ pub fn intercept_close(app: &tauri::App) {
 }
 
 /// 在独立线程里注册全局快捷键并跑消息循环（实现已移到 win::hotkey）
-pub fn spawn_hotkey(app: AppHandle, preset: &str) {
-    crate::win::hotkey::spawn(app, crate::win::hotkey::parse_preset(preset));
+pub fn spawn_hotkey(app: AppHandle, preset: &str, workspace_slots: bool) {
+    crate::win::hotkey::spawn(
+        app,
+        crate::win::hotkey::parse_preset(preset),
+        workspace_slots,
+    );
 }

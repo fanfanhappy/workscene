@@ -115,9 +115,17 @@ pub async fn workspace_update_meta(
     name: String,
     description: Option<String>,
     auto_snapshot_enabled: bool,
+    color: Option<String>,
 ) -> AppResult<()> {
-    workspaces::update_meta(&db, &id, &name, description.as_deref(), auto_snapshot_enabled)
-        .await?;
+    workspaces::update_meta(
+        &db,
+        &id,
+        &name,
+        description.as_deref(),
+        auto_snapshot_enabled,
+        color.as_deref(),
+    )
+    .await?;
     crate::win::tray::refresh_menu(&app).await;
     Ok(())
 }
@@ -197,7 +205,7 @@ pub async fn workspace_item_relocate(
     workspaces::relocate_item(&db, &workspace_id, &item_id, &new_path).await
 }
 
-/// 更新单个应用项：复用策略 / 启动参数 / 启用状态
+/// 更新单个应用项：复用策略 / 启动参数 / 启用状态 / 启动顺序 / 启动延迟
 #[tauri::command]
 pub async fn workspace_item_update(
     db: State<'_, Db>,
@@ -205,8 +213,19 @@ pub async fn workspace_item_update(
     reuse_policy: String,
     launch_args: Option<String>,
     enabled: bool,
+    launch_priority: Option<i64>,
+    launch_delay_ms: Option<i64>,
 ) -> AppResult<()> {
-    workspaces::update_item(&db, &item_id, &reuse_policy, launch_args, enabled).await
+    workspaces::update_item(
+        &db,
+        &item_id,
+        &reuse_policy,
+        launch_args,
+        enabled,
+        launch_priority,
+        launch_delay_ms,
+    )
+    .await
 }
 
 /// 布局编辑：批量提交窗口的新比例坐标（一个事务）
@@ -249,6 +268,54 @@ pub async fn workspace_item_add(
     workspaces::add_item(&db, &workspace_id, &item_type, &target, display_name.as_deref()).await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UrlBatchEntry {
+    pub url: String,
+    pub name: Option<String>,
+}
+
+/// 批量添加网址资源（多行粘贴或导入浏览器书签夹）
+#[tauri::command]
+pub async fn workspace_items_add_batch(
+    db: State<'_, Db>,
+    workspace_id: String,
+    entries: Vec<UrlBatchEntry>,
+) -> AppResult<usize> {
+    let pairs: Vec<(String, Option<String>)> = entries
+        .into_iter()
+        .map(|e| (e.url, e.name))
+        .collect();
+    workspaces::add_urls_batch(&db, &workspace_id, &pairs).await
+}
+
+/// 批量提取本地 .exe 软件真实图标（Data URL，内存缓存）
+#[tauri::command]
+pub async fn app_icons_batch(
+    paths: Vec<String>,
+) -> AppResult<std::collections::HashMap<String, String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::win::icon::extract_batch(&paths))
+        .await
+        .map_err(|e| AppError::msg(format!("提取图标异常：{e}")))
+}
+
+/// 只读扫描本机 Chrome / Edge 书签文件夹（不读密码、Cookie 或历史记录）
+#[tauri::command]
+pub async fn bookmarks_list_folders() -> AppResult<Vec<crate::win::bookmarks::BookmarkFolder>> {
+    tauri::async_runtime::spawn_blocking(crate::win::bookmarks::list_folders)
+        .await
+        .map_err(|e| AppError::msg(format!("读取书签目录异常：{e}")))
+}
+
+/// 一键收工：向当前打开且属于该工作空间的窗口发送标准 WM_CLOSE（绝不强杀进程）
+#[tauri::command]
+pub async fn workspace_close_windows(db: State<'_, Db>, id: String) -> AppResult<usize> {
+    let scene = workspaces::to_scene(&db, &id).await?;
+    tauri::async_runtime::spawn_blocking(move || crate::restore::close_workspace_windows(&scene))
+        .await
+        .map_err(|e| AppError::msg(format!("关闭窗口异常：{e}")))?
+}
+
 /// 导入前预检：只看不写，供 UI 提示"这份文件会启动什么"
 #[tauri::command]
 pub fn workspace_import_preview(
@@ -273,6 +340,7 @@ pub async fn workspace_restore(
     db: State<'_, Db>,
     id: String,
     relaunch_missing: bool,
+    focus_mode: Option<bool>,
 ) -> AppResult<RestoreReport> {
     // 同一时刻只允许一个恢复任务：两个恢复互相搬窗口会让报告完全失真
     let _guard = crate::restore::try_acquire()
@@ -280,6 +348,7 @@ pub async fn workspace_restore(
 
     let scene = workspaces::to_scene(&db, &id).await?;
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
+    let focus = focus_mode.unwrap_or(false);
 
     let pre_restore = match scan_blocking().await {
         Ok(current) => workspaces::add_snapshot(
@@ -299,7 +368,14 @@ pub async fn workspace_restore(
     let scene_for_task = scene.clone();
     let pre_for_task = pre_restore.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        crate::restore::apply(Some(&app), &scene_for_task, relaunch_missing, pre_for_task)
+        crate::restore::apply_with_options(
+            Some(&app),
+            &scene_for_task,
+            relaunch_missing,
+            focus,
+            pre_for_task,
+            None,
+        )
     })
     .await;
 
@@ -570,6 +646,20 @@ pub fn adapter_suggest(exe_name: String, target: Option<String>) -> AdapterSugge
     }
 }
 
+/// 批量识别软件的适配等级（供设置页「我常用软件的适配状态」一次返回）
+#[tauri::command]
+pub fn adapter_classify_batch(
+    exe_names: Vec<String>,
+) -> std::collections::HashMap<String, String> {
+    exe_names
+        .into_iter()
+        .map(|name| {
+            let kind = crate::adapters::classify(&name).as_str().to_string();
+            (name, kind)
+        })
+        .collect()
+}
+
 // ---- 设置与存储（M8） ----
 
 #[tauri::command]
@@ -588,10 +678,11 @@ pub async fn settings_set(
     // 先应用注册表，成功后才落库，避免界面显示"已开启"但实际没生效
     let autostart_ok = crate::win::autostart::sync(settings.autostart);
     let saved = settings::set(&db, &settings).await?;
+    crate::win::filter::set_ignored_processes(&saved.ignored_processes);
 
     // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程
     let combo = crate::win::hotkey::parse_preset(&saved.hotkey);
-    let hotkey_ok = crate::win::hotkey::update(combo);
+    let hotkey_ok = crate::win::hotkey::update(combo, saved.workspace_hotkeys_enabled);
 
     if !autostart_ok {
         return Err(AppError::msg(

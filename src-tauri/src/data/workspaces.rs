@@ -14,6 +14,7 @@ pub struct WorkspaceSummary {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub color: Option<String>,
     pub is_favorite: bool,
     pub item_count: i64,
     pub resource_count: i64,
@@ -21,6 +22,8 @@ pub struct WorkspaceSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_restored_at: Option<i64>,
+    #[serde(default)]
+    pub app_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,30 @@ pub struct WorkspaceItem {
     pub enabled: bool,
     pub reuse_policy: String,
     pub launch_args: Option<String>,
+    #[serde(default)]
+    pub launch_priority: i64,
+    #[serde(default)]
+    pub launch_delay_ms: i64,
+}
+
+fn parse_delay_ms(adapter_config_json: Option<&str>) -> i64 {
+    let Some(raw) = adapter_config_json else {
+        return 0;
+    };
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("delayMs").and_then(|d| d.as_i64()))
+        .unwrap_or(0)
+        .clamp(0, 15_000)
+}
+
+fn encode_delay_ms(delay_ms: i64) -> Option<String> {
+    let clamped = delay_ms.clamp(0, 15_000);
+    if clamped == 0 {
+        None
+    } else {
+        Some(format!(r#"{{"delayMs":{clamped}}}"#))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,10 +299,23 @@ pub async fn create_from_capture(
 
     tx.commit().await?;
 
+    let mut app_paths: Vec<String> = Vec::new();
+    for w in &capture.windows {
+        if let Some(p) = &w.process_path {
+            if !p.is_empty() && !app_paths.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                app_paths.push(p.clone());
+                if app_paths.len() >= 6 {
+                    break;
+                }
+            }
+        }
+    }
+
     Ok(WorkspaceSummary {
         id: ws_id,
         name: name.to_string(),
         description: None,
+        color: None,
         is_favorite: false,
         item_count: item_ids.len() as i64,
         resource_count: 0,
@@ -283,6 +323,7 @@ pub async fn create_from_capture(
         created_at: now,
         updated_at: now,
         last_restored_at: None,
+        app_paths,
     })
 }
 
@@ -322,7 +363,7 @@ pub async fn add_snapshot(
 
 pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
     let rows = sqlx::query(
-        "SELECT w.id, w.name, w.description, w.is_favorite, w.created_at, w.updated_at,
+        "SELECT w.id, w.name, w.description, w.color, w.is_favorite, w.created_at, w.updated_at,
                 w.last_restored_at,
                 (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type = 'application') AS item_count,
                 (SELECT COUNT(*) FROM workspace_items i WHERE i.workspace_id = w.id AND i.item_type <> 'application') AS resource_count,
@@ -333,19 +374,46 @@ pub async fn list(db: &Db) -> AppResult<Vec<WorkspaceSummary>> {
     .fetch_all(&db.pool)
     .await?;
 
+    // 批量查出各空间应用可执行路径（每空间最多 6 个），供卡片展示真实软件图标
+    let app_rows = sqlx::query(
+        "SELECT workspace_id, target
+         FROM workspace_items
+         WHERE item_type = 'application' AND enabled = 1 AND target IS NOT NULL AND target <> ''
+         ORDER BY sort_order ASC",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+
+    let mut path_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for r in app_rows {
+        let ws_id: String = r.get("workspace_id");
+        let target: String = r.get("target");
+        let entry = path_map.entry(ws_id).or_default();
+        if entry.len() < 6 && !entry.iter().any(|x| x.eq_ignore_ascii_case(&target)) {
+            entry.push(target);
+        }
+    }
+
     Ok(rows
         .into_iter()
-        .map(|r| WorkspaceSummary {
-            id: r.get("id"),
-            name: r.get("name"),
-            description: r.get("description"),
-            is_favorite: r.get::<i64, _>("is_favorite") != 0,
-            item_count: r.get("item_count"),
-            resource_count: r.get("resource_count"),
-            window_count: r.get("window_count"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-            last_restored_at: r.get("last_restored_at"),
+        .map(|r| {
+            let id: String = r.get("id");
+            let app_paths = path_map.remove(&id).unwrap_or_default();
+            WorkspaceSummary {
+                id,
+                name: r.get("name"),
+                description: r.get("description"),
+                color: r.get("color"),
+                is_favorite: r.get::<i64, _>("is_favorite") != 0,
+                item_count: r.get("item_count"),
+                resource_count: r.get("resource_count"),
+                window_count: r.get("window_count"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                last_restored_at: r.get("last_restored_at"),
+                app_paths,
+            }
         })
         .collect())
 }
@@ -363,12 +431,14 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
 
     let item_rows = sqlx::query(
         "SELECT i.id, i.item_type, i.display_name, i.target, i.target_kind, i.enabled,
+                i.sort_order,
                 COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
-                c.launch_args_json
+                c.launch_args_json,
+                c.adapter_config_json
          FROM workspace_items i
          LEFT JOIN app_configs c ON c.item_id = i.id
          WHERE i.workspace_id = ?
-         ORDER BY i.sort_order",
+         ORDER BY i.sort_order ASC, i.created_at ASC",
     )
     .bind(id)
     .fetch_all(&db.pool)
@@ -376,15 +446,20 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
 
     let items: Vec<WorkspaceItem> = item_rows
         .into_iter()
-        .map(|r| WorkspaceItem {
-            id: r.get("id"),
-            item_type: r.get("item_type"),
-            display_name: r.get("display_name"),
-            target: r.get("target"),
-            target_kind: r.get("target_kind"),
-            enabled: r.get::<i64, _>("enabled") != 0,
-            reuse_policy: r.get("reuse_policy"),
-            launch_args: r.get("launch_args_json"),
+        .map(|r| {
+            let adapter_cfg: Option<String> = r.get("adapter_config_json");
+            WorkspaceItem {
+                id: r.get("id"),
+                item_type: r.get("item_type"),
+                display_name: r.get("display_name"),
+                target: r.get("target"),
+                target_kind: r.get("target_kind"),
+                enabled: r.get::<i64, _>("enabled") != 0,
+                reuse_policy: r.get("reuse_policy"),
+                launch_args: r.get("launch_args_json"),
+                launch_priority: r.get("sort_order"),
+                launch_delay_ms: parse_delay_ms(adapter_cfg.as_deref()),
+            }
         })
         .collect();
 
@@ -483,7 +558,7 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// 更新应用项配置：复用策略、启动参数、启用状态。
+/// 更新应用项配置：复用策略、启动参数、启用状态、可选启动优先级与启动后等待延迟。
 /// `launch_args` 以原始字符串存进 `launch_args_json`（不使用 shell，切分在恢复侧做）。
 pub async fn update_item(
     db: &Db,
@@ -491,39 +566,56 @@ pub async fn update_item(
     reuse_policy: &str,
     launch_args: Option<String>,
     enabled: bool,
+    launch_priority: Option<i64>,
+    launch_delay_ms: Option<i64>,
 ) -> AppResult<()> {
     let policy = match reuse_policy {
         "reuse_if_matched" | "always_launch" | "reuse_or_launch" => reuse_policy,
         other => return Err(AppError::msg(format!("未知的复用策略：{other}"))),
     };
 
-    let workspace_id: Option<String> =
-        sqlx::query_scalar("SELECT workspace_id FROM workspace_items WHERE id = ?")
-            .bind(item_id)
-            .fetch_optional(&db.pool)
-            .await?;
-    let workspace_id = workspace_id.ok_or_else(|| AppError::msg("应用项不存在"))?;
+    let row = sqlx::query(
+        "SELECT i.workspace_id, i.sort_order, c.adapter_config_json
+         FROM workspace_items i
+         LEFT JOIN app_configs c ON c.item_id = i.id
+         WHERE i.id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(&db.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("应用项不存在"))?;
+
+    let workspace_id: String = row.get("workspace_id");
+    let sort_order: i64 = launch_priority.unwrap_or_else(|| row.get("sort_order"));
+    let existing_cfg: Option<String> = row.get("adapter_config_json");
+    let delay_ms = launch_delay_ms
+        .map(|d| d.clamp(0, 15_000))
+        .unwrap_or_else(|| parse_delay_ms(existing_cfg.as_deref()));
+    let adapter_cfg = encode_delay_ms(delay_ms);
 
     let now = now_ms();
     let mut tx = db.pool.begin().await?;
 
-    sqlx::query("UPDATE workspace_items SET enabled = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE workspace_items SET enabled = ?, sort_order = ?, updated_at = ? WHERE id = ?")
         .bind(if enabled { 1 } else { 0 })
+        .bind(sort_order)
         .bind(now)
         .bind(item_id)
         .execute(&mut *tx)
         .await?;
 
     sqlx::query(
-        "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
-         VALUES (?, ?, ?, 8000)
+        "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms, adapter_config_json)
+         VALUES (?, ?, ?, 8000, ?)
          ON CONFLICT(item_id) DO UPDATE SET
              reuse_policy = excluded.reuse_policy,
-             launch_args_json = excluded.launch_args_json",
+             launch_args_json = excluded.launch_args_json,
+             adapter_config_json = excluded.adapter_config_json",
     )
     .bind(item_id)
     .bind(policy)
     .bind(&launch_args)
+    .bind(&adapter_cfg)
     .execute(&mut *tx)
     .await?;
 
@@ -553,9 +645,9 @@ pub async fn relocate_item(
     }
 
     let row = sqlx::query(
-        "SELECT i.item_type, i.display_name, i.target_kind, i.enabled,
+        "SELECT i.item_type, i.display_name, i.target_kind, i.enabled, i.sort_order,
                 COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
-                c.launch_args_json
+                c.launch_args_json, c.adapter_config_json
          FROM workspace_items i
          LEFT JOIN app_configs c ON c.item_id = i.id
          WHERE i.id = ? AND i.workspace_id = ?",
@@ -615,6 +707,7 @@ pub async fn relocate_item(
 
     tx.commit().await?;
 
+    let adapter_cfg: Option<String> = row.get("adapter_config_json");
     Ok(WorkspaceItem {
         id: item_id.to_string(),
         item_type,
@@ -624,6 +717,8 @@ pub async fn relocate_item(
         enabled: row.get::<i64, _>("enabled") != 0,
         reuse_policy: row.get("reuse_policy"),
         launch_args: row.get("launch_args_json"),
+        launch_priority: row.get("sort_order"),
+        launch_delay_ms: parse_delay_ms(adapter_cfg.as_deref()),
     })
 }
 
@@ -848,7 +943,92 @@ pub async fn add_item(
         enabled: true,
         reuse_policy: "reuse_or_launch".into(),
         launch_args: None,
+        launch_priority: sort,
+        launch_delay_ms: 0,
     })
+}
+
+/// 批量添加网址资源（支持多行粘贴或一键导入 Chrome/Edge 书签文件夹，自动跳过重复）
+pub async fn add_urls_batch(
+    db: &Db,
+    workspace_id: &str,
+    entries: &[(String, Option<String>)],
+) -> AppResult<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM workspaces WHERE id = ?")
+        .bind(workspace_id)
+        .fetch_optional(&db.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::msg(format!("工作空间不存在：{workspace_id}")));
+    }
+
+    let now = now_ms();
+    let mut sort: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_items WHERE workspace_id = ?",
+    )
+    .bind(workspace_id)
+    .fetch_one(&db.pool)
+    .await?;
+
+    let mut tx = db.pool.begin().await?;
+    let mut added = 0usize;
+
+    for (raw_url, custom_name) in entries {
+        let trimmed = raw_url.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("https://{trimmed}")
+        };
+        let identity = url.to_lowercase();
+        let name = custom_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_display_name("url", &url));
+        let id = format!(
+            "it-{:x}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, 'url', ?, ?, ?, 'url', 1, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(workspace_id)
+        .bind(&name)
+        .bind(&identity)
+        .bind(&url)
+        .bind(sort)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        if res.rows_affected() > 0 {
+            added += 1;
+            sort += 1;
+        }
+    }
+
+    if added > 0 {
+        sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(added)
 }
 
 fn default_display_name(item_type: &str, target: &str) -> String {
@@ -926,6 +1106,8 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
                     .map(|i| i.reuse_policy.clone())
                     .unwrap_or_else(|| "reuse_or_launch".into()),
                 launch_args: item.and_then(|i| i.launch_args.clone()),
+                launch_priority: item.map(|i| i.launch_priority).unwrap_or(0),
+                launch_delay_ms: item.map(|i| i.launch_delay_ms.max(0) as u64).unwrap_or(0),
             }
         })
         .collect();
@@ -967,6 +1149,7 @@ pub async fn update_meta(
     name: &str,
     description: Option<&str>,
     auto_snapshot_enabled: bool,
+    color: Option<&str>,
 ) -> AppResult<()> {
     let name = name.trim();
     if name.is_empty() {
@@ -976,15 +1159,20 @@ pub async fn update_meta(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let color_val = color
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let affected = sqlx::query(
         "UPDATE workspaces
-         SET name = ?, description = ?, auto_snapshot_enabled = ?, updated_at = ?
+         SET name = ?, description = ?, auto_snapshot_enabled = ?, color = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(name)
     .bind(desc)
     .bind(if auto_snapshot_enabled { 1 } else { 0 })
+    .bind(color_val)
     .bind(now_ms())
     .bind(id)
     .execute(&db.pool)
@@ -1128,10 +1316,20 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
 
     tx.commit().await?;
 
+    let app_paths: Vec<String> = src
+        .items
+        .iter()
+        .filter(|i| i.item_type == "application" && i.enabled)
+        .filter_map(|i| i.target.clone())
+        .filter(|p| !p.is_empty())
+        .take(6)
+        .collect();
+
     Ok(WorkspaceSummary {
         id: new_ws_id,
         name,
         description: src.description,
+        color: src.color,
         is_favorite: false,
         item_count: app_count,
         resource_count: res_count,
@@ -1139,6 +1337,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         created_at: now,
         updated_at: now,
         last_restored_at: None,
+        app_paths,
     })
 }
 
@@ -1616,10 +1815,20 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
 
     tx.commit().await?;
 
+    let app_paths: Vec<String> = parsed
+        .apps
+        .iter()
+        .filter(|a| a.enabled)
+        .filter_map(|a| a.target.clone())
+        .filter(|p| !p.is_empty())
+        .take(6)
+        .collect();
+
     Ok(WorkspaceSummary {
         id: ws_id,
         name: name.to_string(),
         description: parsed.description,
+        color: None,
         is_favorite: false,
         item_count: app_count,
         resource_count: res_count,
@@ -1627,6 +1836,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         created_at: now,
         updated_at: now,
         last_restored_at: None,
+        app_paths,
     })
 }
 
@@ -2094,7 +2304,7 @@ mod tests {
             .filter(|w| w.item_id == first_app.id)
             .count();
 
-        update_item(&db, &first_app.id, "reuse_or_launch", None, false)
+        update_item(&db, &first_app.id, "reuse_or_launch", None, false, None, None)
             .await
             .unwrap();
 
@@ -2111,28 +2321,48 @@ mod tests {
             .unwrap();
 
         set_favorite(&db, &s.id, true).await.unwrap();
-        update_meta(&db, &s.id, "开发主空间", Some("主力开发环境"), false)
-            .await
-            .unwrap();
+        update_meta(
+            &db,
+            &s.id,
+            "开发主空间",
+            Some("主力开发环境"),
+            false,
+            Some("#0071e3"),
+        )
+        .await
+        .unwrap();
 
         let detail = get(&db, &s.id).await.unwrap();
         assert!(detail.is_favorite);
         assert_eq!(detail.name, "开发主空间");
         assert_eq!(detail.description.as_deref(), Some("主力开发环境"));
+        assert_eq!(detail.color.as_deref(), Some("#0071e3"));
         assert!(!detail.auto_snapshot_enabled);
+
+        let batch = add_urls_batch(
+            &db,
+            &s.id,
+            &[
+                ("https://example.com".into(), Some("重复".into())),
+                ("github.com".into(), Some("GitHub".into())),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch, 1);
 
         let dup = duplicate(&db, &s.id, "开发备份").await.unwrap();
         assert_ne!(dup.id, s.id);
         assert_eq!(dup.name, "开发备份");
         assert_eq!(dup.item_count, 2);
-        assert_eq!(dup.resource_count, 1);
+        assert_eq!(dup.resource_count, 2);
         assert_eq!(dup.window_count, 3);
 
         let exported = export_json(&db, &s.id).await.unwrap();
         let imported = import_json(&db, &exported).await.unwrap();
         assert_ne!(imported.id, s.id);
         assert_eq!(imported.item_count, 2);
-        assert_eq!(imported.resource_count, 1);
+        assert_eq!(imported.resource_count, 2);
         assert_eq!(imported.window_count, 3);
 
         assert!(import_json(&db, "{bad json").await.is_err());

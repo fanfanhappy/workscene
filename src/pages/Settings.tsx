@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Camera,
   CheckCircle2,
   Copy,
   Cpu,
+  EyeOff,
   FolderOpen,
   Globe,
   HardDrive,
@@ -13,15 +14,16 @@ import {
   Monitor,
   Moon,
   Palette,
+  Plus,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   Sun,
   Terminal,
-  Wrench,
+  X,
 } from "lucide-react";
 import { api } from "@/services/api";
-import type { AdapterSuggestion, AppSettings } from "@/types/contract";
+import type { AppSettings } from "@/types/contract";
 import { confirmAction, toast, useUiStore, type ThemeMode } from "@/stores/ui.store";
 import {
   Badge,
@@ -32,31 +34,32 @@ import {
   Switch,
   Tabs,
 } from "@/components/ui";
+import { AppIcon, useAppIcons } from "@/components/AppIcon";
 
 type SettingsTab = "general" | "behavior" | "storage" | "adapters" | "about";
 
 const BUILTIN_ADAPTERS = [
   {
-    id: "vscode",
-    name: "VS Code / Cursor",
-    exes: "Code.exe · Code - Insiders.exe · Cursor.exe",
-    supported: ["进程启动", "窗口定位", "项目目录参数建议"],
-    limit: "不恢复未保存编辑缓冲区。",
+    id: "ide",
+    name: "主流 IDE / 代码编辑器",
+    exes: "Code.exe · Cursor.exe · Antigravity.exe · Windsurf.exe · Trae.exe · JetBrains (IDEA / PyCharm / WebStorm 等)",
+    supported: ["进程启动", "窗口定位", "自动用 IDE 打开文件夹资源"],
+    limit: "不恢复未保存的编辑缓冲区。",
     icon: Cpu,
   },
   {
     id: "terminal",
     name: "Windows Terminal / Shell",
-    exes: "WindowsTerminal.exe · wt.exe · pwsh.exe · cmd.exe",
-    supported: ["进程启动", "窗口定位", "工作目录参数建议"],
+    exes: "WindowsTerminal.exe · wt.exe · pwsh.exe · powershell.exe · cmd.exe",
+    supported: ["进程启动", "窗口定位", "支持 wt -d / pwsh -WorkingDirectory"],
     limit: "不恢复历史 Shell 内存态。",
     icon: Terminal,
   },
   {
     id: "browser",
-    name: "Chrome / Edge / Firefox / Brave",
-    exes: "chrome.exe · msedge.exe · firefox.exe · brave.exe",
-    supported: ["窗口定位", "显式网址 --new-window 建议"],
+    name: "主流浏览器",
+    exes: "chrome.exe · msedge.exe · firefox.exe · brave.exe · arc.exe · vivaldi.exe · opera.exe",
+    supported: ["最小化/正常窗口定位", "--new-window / -new-window", "本地书签夹导入"],
     limit: "不读取密码、Cookie 或私有会话库。",
     icon: Globe,
   },
@@ -70,25 +73,72 @@ const BUILTIN_ADAPTERS = [
   },
 ];
 
+const ADAPTER_KIND_LABEL: Record<string, string> = {
+  vscode: "L2 IDE 适配",
+  jetbrains: "L2 JetBrains 适配",
+  terminal: "L2 终端适配",
+  browser: "L2 浏览器适配",
+  explorer: "L2 资源管理器",
+  generic: "L1 通用定位",
+};
+
 export function SettingsPage() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<SettingsTab>("general");
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
-
-  const [testExe, setTestExe] = useState("Code.exe");
-  const [testTarget, setTestTarget] = useState("D:\\AI_Work\\WorkScene");
-  const [testRes, setTestRes] = useState<AdapterSuggestion | null>(null);
+  const [ignoreInput, setIgnoreInput] = useState("");
 
   const themeMode = useUiStore((s) => s.themeMode);
   const setThemeMode = useUiStore((s) => s.setThemeMode);
 
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settingsGet });
+  const workspaces = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: api.workspaceList,
+    staleTime: 5_000,
+  });
+  const liveCapture = useQuery({
+    queryKey: ["capture"],
+    queryFn: api.captureStart,
+    enabled: tab === "adapters",
+    staleTime: 10_000,
+    retry: 0,
+  });
   const stats = useQuery({ queryKey: ["storage-stats"], queryFn: api.storageStats });
   const info = useQuery({
     queryKey: ["app-info"],
     queryFn: api.getAppInfo,
     staleTime: 60_000,
+  });
+
+  // 汇总用户工作空间 + 当前桌面实际用到的软件，用于真实展示适配状态与一键忽略
+  const knownApps = useMemo(() => {
+    const map = new Map<string, { exe: string; path: string | null }>();
+    const addPath = (p: string | null | undefined, fallbackName?: string) => {
+      const exe = (p?.split(/[\\/]/).pop() ?? fallbackName ?? "").trim();
+      if (!exe) return;
+      const key = exe.toLowerCase();
+      if (!map.has(key) || (p && !map.get(key)?.path)) {
+        map.set(key, { exe, path: p ?? null });
+      }
+    };
+    for (const w of workspaces.data ?? []) {
+      for (const p of w.appPaths ?? []) addPath(p);
+    }
+    for (const win of liveCapture.data?.windows ?? []) {
+      addPath(win.processPath, win.processName);
+    }
+    return [...map.values()].sort((a, b) => a.exe.localeCompare(b.exe, "en"));
+  }, [workspaces.data, liveCapture.data]);
+
+  const appIcons = useAppIcons(knownApps.map((a) => a.path));
+  const classifyQuery = useQuery({
+    queryKey: ["adapter-classify", knownApps.map((a) => a.exe).join("|")],
+    queryFn: () => api.adapterClassifyBatch(knownApps.map((a) => a.exe)),
+    enabled: tab === "adapters" && knownApps.length > 0,
+    staleTime: 60_000,
+    retry: 0,
   });
 
   useEffect(() => {
@@ -102,6 +152,7 @@ export function SettingsPage() {
       setDraft(saved);
       qc.setQueryData(["settings"], saved);
       qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["capture"] });
       toast.success("设置已保存");
     },
     onError: (e) => {
@@ -122,16 +173,41 @@ export function SettingsPage() {
     onError: (e) => toast.danger("清理失败", String((e as Error).message)),
   });
 
-  const testSuggest = useMutation({
-    mutationFn: () => api.adapterSuggest(testExe.trim(), testTarget.trim() || null),
-    onSuccess: setTestRes,
-  });
-
   const patch = (next: Partial<AppSettings>) => {
     if (!draft) return;
     const merged = { ...draft, ...next };
     setDraft(merged);
     save.mutate(merged);
+  };
+
+  const normalizeExe = (raw: string) => {
+    const base = raw.split(/[\\/]/).pop()?.trim().toLowerCase() ?? "";
+    if (!base) return "";
+    return base.endsWith(".exe") ? base : `${base}.exe`;
+  };
+
+  const toggleIgnored = (rawExe: string) => {
+    if (!draft) return;
+    const key = normalizeExe(rawExe);
+    if (!key) return;
+    const cur = draft.ignoredProcesses ?? [];
+    const exists = cur.includes(key);
+    const next = exists ? cur.filter((x) => x !== key) : [...cur, key];
+    patch({ ignoredProcesses: next });
+  };
+
+  const addIgnoredFromInput = (e: React.FormEvent) => {
+    e.preventDefault();
+    const key = normalizeExe(ignoreInput);
+    if (!key || !draft) return;
+    const cur = draft.ignoredProcesses ?? [];
+    if (cur.includes(key)) {
+      toast.info(`${key} 已在忽略名单中`);
+      setIgnoreInput("");
+      return;
+    }
+    setIgnoreInput("");
+    patch({ ignoredProcesses: [...cur, key] });
   };
 
   if (settings.isPending || !draft) {
@@ -235,12 +311,23 @@ export function SettingsPage() {
                 </select>
               </div>
             </Row>
+            <Row
+              label="工作空间全局切屏热键（Ctrl + Alt + 1 ~ 5）"
+              hint="任何界面下按 Ctrl+Alt+1~5，直接切换前 5 个工作空间（收藏优先）"
+            >
+              <Switch
+                checked={draft.workspaceHotkeysEnabled}
+                onChange={(v) => patch({ workspaceHotkeysEnabled: v })}
+                ariaLabel="工作空间全局切屏热键"
+              />
+            </Row>
           </Card>
 
           <Card className="flex flex-col gap-2">
             <p className="text-body font-medium text-ink">应用内快捷键</p>
             <div className="grid gap-1.5 text-aux sm:grid-cols-2">
               {[
+                ["Ctrl + Alt + 1~5", "全局快速切换前 5 个工作空间"],
                 ["Ctrl + K", "打开快捷命令面板"],
                 ["Ctrl + S", "保存布局画布修改"],
                 ["方向键 / Shift+方向键", "布局画布微调窗口位置 (1% / 5%)"],
@@ -301,13 +388,43 @@ export function SettingsPage() {
             <p className="text-body font-medium text-ink">恢复默认行为</p>
             <Row
               label="默认自动启动未运行的应用"
-              hint="恢复预览弹窗的默认勾选状态，每次恢复前仍可临时切换"
+              hint="恢复预览页的默认勾选状态，每次恢复前仍可临时切换"
             >
               <Switch
                 checked={draft.restoreRelaunchDefault}
                 onChange={(v) => patch({ restoreRelaunchDefault: v })}
                 ariaLabel="默认自动启动未运行的应用"
               />
+            </Row>
+            <Row
+              label="默认开启专注模式（自动最小化无关窗口）"
+              hint="切换工作空间时自动把非本空间的窗口收进任务栏，绝不关闭软件"
+            >
+              <Switch
+                checked={draft.restoreFocusModeDefault}
+                onChange={(v) => patch({ restoreFocusModeDefault: v })}
+                ariaLabel="默认开启专注模式"
+              />
+            </Row>
+            <Row
+              label="启动 WorkScene 时自动恢复工作空间"
+              hint="搭配「开机启动」使用，开电脑后自动进入你的常用工作现场"
+            >
+              <select
+                value={draft.startupWorkspaceId ?? ""}
+                onChange={(e) =>
+                  patch({ startupWorkspaceId: e.target.value ? e.target.value : null })
+                }
+                className="h-8 max-w-[200px] rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+              >
+                <option value="">不自动恢复</option>
+                {(workspaces.data ?? []).map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.isFavorite ? "★ " : ""}
+                    {w.name}
+                  </option>
+                ))}
+              </select>
             </Row>
             <div className="flex items-start gap-2 rounded-md border border-line bg-canvas/55 px-3 py-2 text-aux text-ink-3">
               <ShieldCheck size={14} className="mt-0.5 shrink-0 text-success" />
@@ -413,36 +530,125 @@ export function SettingsPage() {
             })}
           </div>
 
-          <Card className="flex flex-col gap-2.5">
-            <p className="text-body font-medium text-ink">L2 启动参数建议检测（无副作用）</p>
-            <div className="grid gap-2 sm:grid-cols-[160px_1fr_auto]">
+          <Card className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-body font-semibold text-ink">
+                  <EyeOff size={14} className="text-ink-3" /> 全局捕获忽略名单
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  加入此名单的软件在扫描桌面、自动备份时会被自动跳过（不会关闭软件，随时可移出）
+                </p>
+              </div>
+              <Badge>{(draft.ignoredProcesses ?? []).length} 项</Badge>
+            </div>
+
+            <form onSubmit={addIgnoredFromInput} className="flex items-center gap-2">
               <input
-                value={testExe}
-                onChange={(e) => setTestExe(e.target.value)}
-                placeholder="Code.exe"
-                className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
-              />
-              <input
-                value={testTarget}
-                onChange={(e) => setTestTarget(e.target.value)}
-                placeholder="D:\Projects\App 或 https://example.com"
-                className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+                value={ignoreInput}
+                onChange={(e) => setIgnoreInput(e.target.value)}
+                placeholder="输入要忽略的进程名并回车，例如 WeChat.exe 或 FlClash"
+                className="h-8 flex-1 rounded-[8px] border border-line-strong/80 bg-canvas px-2.5 font-mono text-[11px] text-ink placeholder:text-ink-3 outline-none focus:border-accent"
               />
               <Button
+                type="submit"
                 size="sm"
                 variant="secondary"
-                disabled={testSuggest.isPending || !testExe.trim()}
-                onClick={() => testSuggest.mutate()}
+                disabled={save.isPending || !ignoreInput.trim()}
               >
-                <Wrench size={13} /> 检测
+                <Plus size={13} /> 添加忽略
+              </Button>
+            </form>
+
+            {(draft.ignoredProcesses ?? []).length === 0 ? (
+              <p className="rounded-[8px] border border-dashed border-line py-3 text-center text-[11px] text-ink-3">
+                当前没有忽略任何软件；也可以在下方「我常用软件的适配状态」里一键加入忽略。
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {(draft.ignoredProcesses ?? []).map((proc) => (
+                  <span
+                    key={proc}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-line bg-canvas/80 px-2.5 py-1 font-mono text-[11px] text-ink-2"
+                  >
+                    {proc}
+                    <button
+                      type="button"
+                      title={`移出忽略：${proc}`}
+                      onClick={() => toggleIgnored(proc)}
+                      className="cursor-pointer rounded-full p-0.5 text-ink-3 hover:bg-raised hover:text-danger"
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card padded={false} className="overflow-hidden">
+            <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+              <div>
+                <p className="text-body font-semibold text-ink">我常用软件的适配状态</p>
+                <p className="text-[11px] text-ink-3">
+                  来自当前桌面与已有工作空间；所有软件均默认支持 L1 启动与窗口定位
+                </p>
+              </div>
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={liveCapture.isFetching}
+                onClick={() => liveCapture.refetch()}
+              >
+                <RefreshCw
+                  size={12}
+                  className={liveCapture.isFetching ? "animate-spin" : ""}
+                />
+                刷新
               </Button>
             </div>
-            {testRes ? (
-              <p className="rounded-md border border-line bg-canvas/55 px-3 py-2 font-mono text-[11px] text-ink-2">
-                类型：{testRes.kind} ·{" "}
-                {testRes.args ? `建议参数：${testRes.args}` : "按 L1 通用启动与窗口定位处理"}
+
+            {knownApps.length === 0 ? (
+              <p className="px-4 py-6 text-center text-aux text-ink-3">
+                暂未检测到已捕获软件，捕获一次桌面后这里会自动展示。
               </p>
-            ) : null}
+            ) : (
+              <ul className="divide-y divide-line">
+                {knownApps.map((app) => {
+                  const kind = classifyQuery.data?.[app.exe] ?? "generic";
+                  const isL2 = kind !== "generic";
+                  const key = normalizeExe(app.exe);
+                  const ignored = (draft.ignoredProcesses ?? []).includes(key);
+                  return (
+                    <li
+                      key={key}
+                      className="flex items-center gap-2.5 px-4 py-2"
+                    >
+                      <AppIcon path={app.path} name={app.exe} icons={appIcons} size={18} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-aux font-medium text-ink">
+                          {app.exe.replace(/\.exe$/i, "")}
+                        </p>
+                        <p className="truncate font-mono text-[10px] text-ink-3">
+                          {app.path ?? app.exe}
+                        </p>
+                      </div>
+                      <Badge tone={isL2 ? "accent" : "neutral"}>
+                        {ADAPTER_KIND_LABEL[kind] ?? "L1 通用定位"}
+                      </Badge>
+                      <Button
+                        size="xs"
+                        variant={ignored ? "tinted" : "ghost"}
+                        onClick={() => toggleIgnored(app.exe)}
+                      >
+                        <EyeOff size={11} />
+                        {ignored ? "已忽略" : "忽略捕获"}
+                      </Button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </Card>
         </div>
       ) : null}

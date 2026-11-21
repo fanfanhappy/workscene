@@ -187,6 +187,8 @@ mod tests {
             z_order: 0,
             reuse_policy: "reuse_or_launch".into(),
             launch_args: None,
+            launch_priority: 0,
+            launch_delay_ms: 0,
         }
     }
 

@@ -23,6 +23,7 @@ import {
   Spinner,
 } from "@/components/ui";
 import { MonitorCanvas } from "@/components/MonitorCanvas";
+import { AppIcon, useAppIcons } from "@/components/AppIcon";
 
 export function CapturePage() {
   const navigate = useNavigate();
@@ -200,6 +201,7 @@ export function CapturePage() {
   };
 
   const hasExisting = (workspaces.data ?? []).length > 0;
+  const appIcons = useAppIcons((result?.windows ?? []).map((w) => w.processPath));
 
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
@@ -279,6 +281,12 @@ export function CapturePage() {
                             <Minus size={10} strokeWidth={3} />
                           ) : null}
                         </span>
+                        <AppIcon
+                          path={wins[0]?.processPath}
+                          name={app}
+                          icons={appIcons}
+                          size={16}
+                        />
                         <span className="text-aux font-semibold text-ink">{app}</span>
                       </span>
                       <span className="tabnum text-[11px] text-ink-3">

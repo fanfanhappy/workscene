@@ -7,18 +7,15 @@ import {
   Camera,
   History,
   LayoutDashboard,
-  Monitor,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   RotateCcw,
   Search,
   Settings,
-  Sun,
 } from "lucide-react";
 import { api } from "@/services/api";
 import type { RestoreReport, SnapshotSummary } from "@/types/contract";
-import { toast, useUiStore, type ThemeMode } from "@/stores/ui.store";
+import { toast, useUiStore } from "@/stores/ui.store";
 import { Button, ConfirmDialogHost, ToastHost } from "@/components/ui";
 import { CommandPalette } from "@/components/CommandPalette";
 
@@ -65,15 +62,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
     });
 
+    const unlistenDisplays = listen<number>("displays:changed", (e) => {
+      qc.invalidateQueries({ queryKey: ["displays"] });
+      qc.invalidateQueries({ queryKey: ["capture"] });
+      qc.invalidateQueries({ queryKey: ["preview"] });
+      toast.info(
+        `检测到显示器变化（当前 ${e.payload} 台）`,
+        "可一键恢复适合当前屏幕配置的工作空间",
+      );
+    });
+
     return () => {
       unlistenRestore.then((fn) => fn()).catch(() => undefined);
       unlistenSnap.then((fn) => fn()).catch(() => undefined);
       unlistenAuto.then((fn) => fn()).catch(() => undefined);
+      unlistenDisplays.then((fn) => fn()).catch(() => undefined);
     };
   }, [qc]);
 
-  const themeMode = useUiStore((s) => s.themeMode);
-  const setThemeMode = useUiStore((s) => s.setThemeMode);
   const syncSystemTheme = useUiStore((s) => s.syncSystemTheme);
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
@@ -208,8 +214,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        {/* 底部设置 + Apple 分段主题切换 */}
-        <div className="flex flex-col gap-2 border-t border-line p-2">
+        {/* 底部设置与版本标识（主题切换统一归口在「设置 -> 外观与热键」） */}
+        <div className="flex flex-col gap-1.5 border-t border-line p-2">
           <NavLink
             to="/settings"
             title={collapsed ? "设置" : undefined}
@@ -239,42 +245,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <PanelLeftOpen size={14} />
             </button>
           ) : (
-            <div className="flex flex-col gap-1.5 px-0.5">
-              <div
-                role="group"
-                aria-label="切换主题"
-                className="grid grid-cols-3 rounded-[8px] bg-raised/70 p-0.5"
-              >
-                {(
-                  [
-                    { id: "light", label: "浅色", icon: Sun },
-                    { id: "dark", label: "深色", icon: Moon },
-                    { id: "system", label: "自动", icon: Monitor },
-                  ] as { id: ThemeMode; label: string; icon: typeof Sun }[]
-                ).map(({ id, label, icon: Icon }) => {
-                  const active = themeMode === id;
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      title={label}
-                      onClick={() => setThemeMode(id)}
-                      className={`flex h-6 cursor-pointer items-center justify-center gap-1 rounded-[6px] text-[11px] font-medium transition-all ${
-                        active
-                          ? "apple-segment-active"
-                          : "text-ink-3 hover:text-ink-2"
-                      }`}
-                    >
-                      <Icon size={11} />
-                      <span>{label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="px-1 font-mono text-[10px] text-ink-3">
-                v{info.data?.version ?? "0.1.0"} · 本地离线优先
-              </p>
-            </div>
+            <p className="px-2.5 font-mono text-[10px] text-ink-3">
+              v{info.data?.version ?? "0.1.0"} · 本地离线优先
+            </p>
           )}
         </div>
       </aside>
