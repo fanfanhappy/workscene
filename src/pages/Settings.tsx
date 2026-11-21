@@ -88,6 +88,23 @@ export function SettingsPage() {
       </section>
 
       <section>
+        <SectionTitle title="启动" hint="开机启动写入当前用户的注册表 Run 项，不需要管理员权限" />
+        <Card className="flex flex-col gap-4">
+          <Row label="开机启动" hint="登录 Windows 后自动启动 WorkScene（最小化到托盘）">
+            <Toggle
+              checked={draft.autostart}
+              onChange={(v) => patch({ autostart: v })}
+            />
+          </Row>
+          {save.isError ? (
+            <p className="text-[11px] text-danger">
+              开机启动写入失败：{String((save.error as Error).message)}
+            </p>
+          ) : null}
+        </Card>
+      </section>
+
+      <section>
         <SectionTitle title="恢复" hint="恢复过程不会关闭你已打开的应用" />
         <Card className="flex flex-col gap-4">
           <Row label="默认自动启动缺失的应用" hint="恢复前仍可在预览页逐次关闭">

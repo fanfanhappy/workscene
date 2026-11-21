@@ -20,6 +20,9 @@ pub struct AppSettings {
     pub auto_keep: i64,
     pub auto_min_interval_secs: i64,
     pub restore_relaunch_default: bool,
+    /// 开机启动：真源是注册表（HKCU Run），这里只做展示与提交
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 impl Default for AppSettings {
@@ -30,6 +33,7 @@ impl Default for AppSettings {
             auto_keep: super::snapshots::AUTO_KEEP_PER_WORKSPACE as i64,
             auto_min_interval_secs: super::snapshots::AUTO_MIN_INTERVAL_MS / 1000,
             restore_relaunch_default: true,
+            autostart: false,
         }
     }
 }
@@ -196,6 +200,7 @@ mod tests {
                 auto_keep: 0,          // 应被夹到 1
                 auto_min_interval_secs: 1, // 应被夹到 10
                 restore_relaunch_default: false,
+                autostart: false,
             },
         )
         .await

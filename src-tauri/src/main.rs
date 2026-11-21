@@ -42,6 +42,11 @@ fn main() {
         workscene_lib::cli_snapshot(&name);
         return;
     }
+    if let Some(pos) = args.iter().position(|a| a == "--autostart") {
+        let mode = args.get(pos + 1).cloned().unwrap_or_else(|| "status".into());
+        workscene_lib::cli_autostart(&mode);
+        return;
+    }
 
     workscene_lib::run()
 }

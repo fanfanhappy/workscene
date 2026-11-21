@@ -333,7 +333,10 @@ pub fn adapter_suggest(exe_name: String, target: Option<String>) -> AdapterSugge
 
 #[tauri::command]
 pub async fn settings_get(db: State<'_, Db>) -> AppResult<settings::AppSettings> {
-    settings::get(&db).await
+    let mut s = settings::get(&db).await?;
+    // 开机启动的真源是注册表，不用数据库里的值覆盖
+    s.autostart = crate::win::autostart::is_enabled();
+    Ok(s)
 }
 
 #[tauri::command]
@@ -341,7 +344,15 @@ pub async fn settings_set(
     db: State<'_, Db>,
     settings: settings::AppSettings,
 ) -> AppResult<settings::AppSettings> {
-    settings::set(&db, &settings).await
+    // 先应用注册表，成功后才落库，避免界面显示"已开启"但实际没生效
+    let autostart_ok = crate::win::autostart::sync(settings.autostart);
+    let saved = settings::set(&db, &settings).await?;
+    if !autostart_ok {
+        return Err(AppError::msg(
+            "开机启动设置写入注册表失败（可能被组策略限制）",
+        ));
+    }
+    Ok(saved)
 }
 
 #[tauri::command]

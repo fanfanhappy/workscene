@@ -281,6 +281,8 @@ export interface AppSettings {
   autoKeep: number;
   autoMinIntervalSecs: number;
   restoreRelaunchDefault: boolean;
+  /** 开机启动：真源是注册表 HKCU Run */
+  autostart: boolean;
 }
 
 export interface StorageStats {

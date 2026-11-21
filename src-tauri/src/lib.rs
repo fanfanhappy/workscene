@@ -248,6 +248,33 @@ pub fn cli_snapshot(name: &str) {
     }
 }
 
+/// 开机启动诊断：`--autostart status|on|off`
+pub fn cli_autostart(mode: &str) {
+    match mode {
+        "on" => match win::autostart::set_enabled_verbose(true) {
+            Ok(()) => println!("已开启开机启动"),
+            Err(code) => println!("开启失败（Win32 错误码 {code}）"),
+        },
+        "off" => match win::autostart::set_enabled_verbose(false) {
+            Ok(()) => println!("已关闭开机启动"),
+            Err(code) => println!("关闭失败（Win32 错误码 {code}）"),
+        },
+        _ => {
+            println!(
+                "开机启动：{}",
+                if win::autostart::is_enabled() {
+                    "已开启"
+                } else {
+                    "未开启"
+                }
+            );
+            if let Some(cmd) = win::autostart::launch_command() {
+                println!("启动命令：{cmd}");
+            }
+        }
+    }
+}
+
 /// M1 闭环自检（含最大化状态）：
 /// 建两个受控模拟窗口（一个普通、一个最大化）→ 捕获 → 保存快照 → 破坏布局 →
 /// 按快照恢复 → 校验位置与最大化状态。

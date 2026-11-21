@@ -258,7 +258,10 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
             target_name: r.display_name.clone(),
             detail: match r.item_type.as_str() {
                 "url" => format!("将用默认浏览器打开 {}", r.target),
-                "folder" => format!("将用资源管理器打开 {}", r.target),
+                "folder" => match choose_opener(scene, r) {
+                    ResourceOpener::Ide(exe) => format!("将用 {} 打开 {}", exe, r.target),
+                    ResourceOpener::Default => format!("将用资源管理器打开 {}", r.target),
+                },
                 _ => format!("将用默认程序打开 {}", r.target),
             },
             status: if exists {
@@ -475,7 +478,7 @@ pub fn apply(
     // 资源恢复：窗口摆好之后再打开文件/文件夹/网址，避免被窗口抢走焦点
     for r in &scene.resources {
         let t0 = Instant::now();
-        let ok = open_resource(r);
+        let ok = open_resource(scene, r);
         let step = RestoreStepResult {
             step_type: "resource".into(),
             target_name: r.display_name.clone(),
@@ -719,6 +722,33 @@ fn verify(hwnd: HWND, target: &Target, state: ShowState) -> (i32, i32, i32) {
     (dx.max(dy).max(dw).max(dh), dx, dy)
 }
 
+/// 资源用谁打开：工作空间里带了 IDE 时，文件夹优先交给 IDE（L2/L3 的边界能力）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceOpener {
+    Default,
+    Ide(String),
+}
+
+pub fn choose_opener(scene: &SceneFile, r: &SceneResource) -> ResourceOpener {
+    if r.item_type != "folder" {
+        return ResourceOpener::Default;
+    }
+    for w in &scene.windows {
+        let Some(path) = w.process_path.as_ref() else {
+            continue;
+        };
+        let name = path
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        if matches!(name.as_str(), "code.exe" | "code - insiders.exe" | "cursor.exe") {
+            return ResourceOpener::Ide(path.clone());
+        }
+    }
+    ResourceOpener::Default
+}
+
 /// 资源是否可达：网址看协议，文件/文件夹看存在性
 fn resource_exists(r: &SceneResource) -> bool {
     match r.item_type.as_str() {
@@ -728,13 +758,20 @@ fn resource_exists(r: &SceneResource) -> bool {
 }
 
 /// 用系统默认关联打开资源（ShellExecuteW，"open" 动词）。
+/// 文件夹若同工作空间里带 IDE，则交给 IDE 打开（等价于 `code <dir>`）。
 /// 不走 cmd.exe，也不拼接命令行字符串。
-fn open_resource(r: &SceneResource) -> bool {
+fn open_resource(scene: &SceneFile, r: &SceneResource) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     const SW_SHOWNORMAL: i32 = 1;
 
     if !resource_exists(r) {
         return false;
+    }
+
+    if let ResourceOpener::Ide(exe) = choose_opener(scene, r) {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg(&r.target);
+        return cmd.spawn().is_ok();
     }
 
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
@@ -786,6 +823,39 @@ fn wait_for_process_window(exe: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opener_prefers_ide_for_folders_only() {
+        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Microsoft VS Code\Code.exe", 1);
+        let folder = SceneResource {
+            item_type: "folder".into(),
+            target: r"D:\work\app".into(),
+            display_name: "app".into(),
+        };
+        match choose_opener(&scene, &folder) {
+            ResourceOpener::Ide(exe) => assert!(exe.ends_with("Code.exe")),
+            ResourceOpener::Default => panic!("带 IDE 时文件夹应交给 IDE"),
+        }
+
+        // 文件/网址仍走默认关联
+        let file = SceneResource {
+            item_type: "file".into(),
+            target: r"D:\work\app\README.md".into(),
+            display_name: "README".into(),
+        };
+        assert_eq!(choose_opener(&scene, &file), ResourceOpener::Default);
+    }
+
+    #[test]
+    fn opener_falls_back_to_default_without_ide() {
+        let scene = scene_with("reuse_or_launch", r"C:\app\notepad.exe", 1);
+        let folder = SceneResource {
+            item_type: "folder".into(),
+            target: r"D:\work".into(),
+            display_name: "work".into(),
+        };
+        assert_eq!(choose_opener(&scene, &folder), ResourceOpener::Default);
+    }
 
     #[test]
     fn threshold_never_drops_below_base() {
