@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"WorkScene 主窗口的最小权限集合：仅使用核心能力，不开放 shell/fs 插件。","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging"]}}

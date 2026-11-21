@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+/*
+ * WorkScene 设计令牌
+ * 依据：前端 UI/UX 规范 v1.0 §15，并按评审 U3 修正了三处对比度：
+ *  - Primary 按钮文字改用深色（#101318 on #6C8FF5 = 6.10:1）
+ *  - Text Muted 提到 #828FA3（on Surface = 4.88:1）
+ *  - 控件边框拆出 line-strong #6B7482（vs Surface = 3.39:1），line 只作装饰分隔
+ */
+@theme {
+  --color-canvas: #101318;
+  --color-sidebar: #151a21;
+  --color-surface: #1b222c;
+  --color-raised: #252e3a;
+  --color-line: #303a47;
+  --color-line-strong: #6b7482;
+
+  --color-accent: #6c8ff5;
+  --color-accent-ink: #101318;
+  --color-success: #45b58b;
+  --color-warning: #e8ad57;
+  --color-danger: #e46c72;
+
+  --color-ink: #edf1f7;
+  --color-ink-2: #98a4b4;
+  --color-ink-3: #828fa3;
+
+  --font-sans: Inter, "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --text-title: 24px;
+  --text-module: 18px;
+  --text-card: 15px;
+  --text-body: 13px;
+  --text-aux: 12px;
+  --text-aux-en: 11px;
+}
+
+/* 浅色主题：同一组变量名，utility 自动跟随 */
+:root[data-theme="light"] {
+  --color-canvas: #f6f7f9;
+  --color-sidebar: #ffffff;
+  --color-surface: #ffffff;
+  --color-raised: #eef1f5;
+  --color-line: #d8dee7;
+  --color-line-strong: #6e7683;
+
+  --color-accent: #3b5bdb;
+  --color-accent-ink: #ffffff;
+  --color-success: #1f7a5a;
+  --color-warning: #96601a;
+  --color-danger: #b0363c;
+
+  --color-ink: #11151b;
+  --color-ink-2: #4a5566;
+  --color-ink-3: #5a6678;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  /* 桌面应用：界面文字不可选中，路径/日志等可选区域单独开启 */
+  body {
+    user-select: none;
+    cursor: default;
+  }
+
+  .selectable {
+    user-select: text;
+    cursor: text;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-line-strong);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* 焦点环：规范要求 2px 可见焦点环（§15.4） */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* 尊重系统「减少动画」（评审 S2） */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .tabnum {
+    font-variant-numeric: tabular-nums;
+  }
+}

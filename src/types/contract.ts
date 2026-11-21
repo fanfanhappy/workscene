@@ -1,0 +1,167 @@
+/**
+ * IPC 契约：与 src-tauri/src/core/models.rs 一一对应。
+ * 任何字段改动必须两侧同步，Rust 侧 serde 使用 camelCase。
+ */
+
+export type ShowState = "normal" | "maximized" | "minimized";
+
+export interface WindowInfo {
+  hwnd: number;
+  processId: number;
+  processPath: string | null;
+  processName: string;
+  processStartedAt: number | null;
+  title: string;
+  className: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dpi: number;
+  monitorKey: string | null;
+  isVisible: boolean;
+  isMinimized: boolean;
+  isMaximized: boolean;
+  showState: ShowState;
+}
+
+export interface DisplayInfo {
+  monitorKey: string;
+  deviceName: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  workX: number;
+  workY: number;
+  workWidth: number;
+  workHeight: number;
+  dpi: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+}
+
+/** 被过滤掉的窗口，保留用于诊断（文档 §8.3 要求保留排除原因） */
+export interface ExcludedWindow {
+  title: string;
+  className: string;
+  processName: string;
+  reason: string;
+}
+
+export interface CaptureResult {
+  capturedAt: number;
+  durationMs: number;
+  windows: WindowInfo[];
+  displays: DisplayInfo[];
+  excluded: ExcludedWindow[];
+  diagnostics: string[];
+}
+
+export interface SceneWindow {
+  processPath: string | null;
+  processName: string;
+  className: string;
+  title: string;
+  /** 相对目标显示器工作区的比例坐标，跨显示器分辨率仍然可用 */
+  monitorKey: string;
+  xRatio: number;
+  yRatio: number;
+  widthRatio: number;
+  heightRatio: number;
+  /** 捕获时的原始物理像素，仅用于诊断与比较 */
+  originalX: number;
+  originalY: number;
+  originalWidth: number;
+  originalHeight: number;
+  sourceDpi: number;
+  showState: ShowState;
+  zOrder: number;
+}
+
+export interface SceneFile {
+  schemaVersion: number;
+  id: string;
+  name: string;
+  capturedAt: number;
+  displays: DisplayInfo[];
+  windows: SceneWindow[];
+}
+
+export interface SceneSummary {
+  id: string;
+  name: string;
+  capturedAt: number;
+  windowCount: number;
+  displayCount: number;
+  path: string;
+}
+
+export type StepStatus =
+  | "success"
+  | "failed"
+  | "skipped"
+  | "timeout"
+  | "needsReview";
+
+export interface PreviewItem {
+  targetName: string;
+  detail: string;
+  status: StepStatus;
+  /** 匹配策略说明，让用户知道「凭什么被识别」 */
+  matchNote: string;
+}
+
+export interface RestorePreview {
+  sceneId: string;
+  sceneName: string;
+  items: PreviewItem[];
+  displayNotes: string[];
+  summary: { total: number; ready: number; warning: number; missing: number };
+}
+
+export interface RestoreStepResult {
+  targetName: string;
+  status: StepStatus;
+  message: string;
+  matchNote: string;
+  durationMs: number;
+  deltaX: number | null;
+  deltaY: number | null;
+  /** 显示状态（最大化/最小化）是否与快照一致 */
+  stateRestored: boolean;
+}
+
+export interface RestoreReport {
+  runId: string;
+  sceneId: string;
+  sceneName: string;
+  startedAt: number;
+  finishedAt: number;
+  totalSteps: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  steps: RestoreStepResult[];
+  displayNotes: string[];
+  /** 恢复前自动创建的保护快照，撤销时重新 apply 它 */
+  preRestoreSceneId: string | null;
+}
+
+export interface CorruptedScene {
+  file: string;
+  reason: string;
+}
+
+export interface SceneHealth {
+  corrupted: CorruptedScene[];
+}
+
+export interface AppInfo {
+  name: string;
+  version: string;
+  tauriVersion: string;
+  dpiAwareness: string;
+  dataDir: string;
+  snapshotDir: string;
+}
