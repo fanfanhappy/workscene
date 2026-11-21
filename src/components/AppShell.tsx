@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Moon,
   RotateCcw,
+  Settings,
   Sun,
 } from "lucide-react";
 import { api } from "@/services/api";
@@ -46,7 +47,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => setInfo(null));
   }, []);
 
-  const current = NAV.find((n) => (n.end ? location.pathname === n.to : location.pathname.startsWith(n.to)));
+  const allNav = [...NAV, { to: "/settings", label: "设置", icon: Settings }];
+  const current = allNav.find((n) =>
+    "end" in n && n.end ? location.pathname === n.to : location.pathname.startsWith(n.to),
+  );
 
   return (
     <div className="flex h-full">
@@ -80,6 +84,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </NavLink>
           ))}
         </nav>
+
+        <div className="border-t border-line p-2">
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              `flex h-9 items-center gap-2.5 rounded-md px-2.5 text-body transition-colors duration-150 ${
+                isActive ? "bg-raised text-ink" : "text-ink-2 hover:bg-raised/60 hover:text-ink"
+              }`
+            }
+          >
+            <Settings size={16} strokeWidth={2} />
+            设置
+          </NavLink>
+        </div>
 
         <div className="border-t border-line p-3">
           <button

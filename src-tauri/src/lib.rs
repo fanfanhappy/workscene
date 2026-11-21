@@ -64,14 +64,19 @@ pub fn run() {
 
             spawn_auto_snapshot(app.handle().clone());
 
-            // 诊断用：WORKSCENE_ROUTE=/workspaces 可直接打开指定页面（截图与回归用）
+            // 诊断用：WORKSCENE_ROUTE=/settings 可直接打开指定页面（截图与回归用）。
+            // 必须等 WebView 加载完再改 hash，否则会被 HashRouter 的初始化覆盖。
             if let Ok(route) = std::env::var("WORKSCENE_ROUTE") {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.eval(&format!(
-                        "window.location.hash = '{}';",
-                        route.replace('\'', "")
-                    ));
-                }
+                let win = app.get_webview_window("main");
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(2000));
+                    if let Some(w) = win {
+                        let _ = w.eval(&format!(
+                            "window.location.hash = '{}';",
+                            route.replace('\'', "")
+                        ));
+                    }
+                });
             }
             Ok(())
         })
@@ -103,6 +108,10 @@ pub fn run() {
             commands::recovery_hint,
             commands::recovery_dismiss,
             commands::adapter_suggest,
+            commands::settings_get,
+            commands::settings_set,
+            commands::storage_stats,
+            commands::storage_cleanup,
         ])
         .build(tauri::generate_context!())
         .expect("WorkScene 构建失败")
@@ -815,6 +824,11 @@ fn spawn_auto_snapshot(app: tauri::AppHandle) {
 }
 
 async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
+    let settings = data::settings::get(db).await?;
+    if !settings.auto_snapshot_enabled {
+        return Ok(());
+    }
+
     let Some(ws) = data::snapshots::active_workspace(db).await? else {
         return Ok(());
     };
@@ -831,13 +845,18 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<()> {
     }
 
     let capture = capture::scan()?;
-    let _ = data::snapshots::create_auto(
+    if data::snapshots::create_auto(
         db,
         &ws,
         &capture,
-        data::snapshots::AUTO_MIN_INTERVAL_MS,
+        settings.auto_min_interval_secs * 1000,
     )
-    .await?;
+    .await?
+    .is_some()
+    {
+        // 新写入后才需要按保留策略清理
+        let _ = data::snapshots::prune(db, &ws, settings.auto_keep as usize).await;
+    }
     Ok(())
 }
 

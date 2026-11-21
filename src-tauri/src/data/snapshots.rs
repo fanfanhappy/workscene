@@ -79,8 +79,6 @@ pub async fn create_auto(
     }
 
     let summary = create(db, workspace_id, "自动快照", "auto", "auto", capture, false).await?;
-    // 每次自动快照后按保留策略清理，保护快照与手动快照不参与淘汰
-    let _ = prune(db, workspace_id, AUTO_KEEP_PER_WORKSPACE).await;
     Ok(Some(summary))
 }
 

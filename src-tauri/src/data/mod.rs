@@ -1,5 +1,6 @@
 pub mod runs;
 pub mod session;
+pub mod settings;
 pub mod snapshots;
 pub mod workspaces;
 

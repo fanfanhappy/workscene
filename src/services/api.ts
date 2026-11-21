@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AdapterSuggestion,
   AppInfo,
+  AppSettings,
   CaptureResult,
   DisplayInfo,
   LayoutUpdate,
@@ -12,6 +13,7 @@ import type {
   SceneHealth,
   SnapshotDiff,
   SnapshotSummary,
+  StorageStats,
   WorkspaceDetail,
   WorkspaceSummary,
 } from "@/types/contract";
@@ -90,6 +92,11 @@ export const api = {
   recoveryDismiss: () => call<void>("recovery_dismiss"),
   adapterSuggest: (exeName: string, target: string | null) =>
     call<AdapterSuggestion>("adapter_suggest", { exeName, target }),
+
+  settingsGet: () => call<AppSettings>("settings_get"),
+  settingsSet: (settings: AppSettings) => call<AppSettings>("settings_set", { settings }),
+  storageStats: () => call<StorageStats>("storage_stats"),
+  storageCleanup: () => call<number>("storage_cleanup"),
   workspacePreview: (id: string) => call<RestorePreview>("workspace_preview", { id }),
   workspaceRestore: (id: string, relaunchMissing: boolean) =>
     call<RestoreReport>("workspace_restore", { id, relaunchMissing }),

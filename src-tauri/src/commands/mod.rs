@@ -5,6 +5,7 @@ use crate::core::models::{
 use crate::core::{AppError, AppResult};
 use crate::data::runs::{self, RunSummary};
 use crate::data::session;
+use crate::data::settings;
 use crate::data::snapshots::{self, SnapshotDiff, SnapshotSummary};
 use crate::data::workspaces::{self, WorkspaceDetail, WorkspaceSummary};
 use crate::data::Db;
@@ -314,4 +315,30 @@ pub fn adapter_suggest(exe_name: String, target: Option<String>) -> AdapterSugge
         kind: kind.as_str().to_string(),
         args: crate::adapters::suggest_args(&exe_name, target.as_deref()),
     }
+}
+
+// ---- 设置与存储（M8） ----
+
+#[tauri::command]
+pub async fn settings_get(db: State<'_, Db>) -> AppResult<settings::AppSettings> {
+    settings::get(&db).await
+}
+
+#[tauri::command]
+pub async fn settings_set(
+    db: State<'_, Db>,
+    settings: settings::AppSettings,
+) -> AppResult<settings::AppSettings> {
+    settings::set(&db, &settings).await
+}
+
+#[tauri::command]
+pub async fn storage_stats(db: State<'_, Db>) -> AppResult<settings::StorageStats> {
+    settings::storage_stats(&db).await
+}
+
+/// 按当前保留策略清理所有工作空间的旧自动快照
+#[tauri::command]
+pub async fn storage_cleanup(db: State<'_, Db>) -> AppResult<usize> {
+    settings::prune_all(&db).await
 }

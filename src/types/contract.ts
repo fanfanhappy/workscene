@@ -273,6 +273,23 @@ export interface AdapterSuggestion {
   args: string | null;
 }
 
+// ---- M8：设置与存储 ----
+
+export interface AppSettings {
+  autoSnapshotEnabled: boolean;
+  autoKeep: number;
+  autoMinIntervalSecs: number;
+  restoreRelaunchDefault: boolean;
+}
+
+export interface StorageStats {
+  dataDir: string;
+  dbBytes: number;
+  snapshotCount: number;
+  snapshotBytes: number;
+  runCount: number;
+}
+
 export interface RunSummary {  id: string;
   workspaceId: string | null;
   snapshotId: string | null;
