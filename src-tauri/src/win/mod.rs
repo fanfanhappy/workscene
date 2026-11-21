@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod display;
 pub mod dpi;
 pub mod filter;
+pub mod hotkey;
 pub mod mock;
 pub mod process;
 pub mod single_instance;

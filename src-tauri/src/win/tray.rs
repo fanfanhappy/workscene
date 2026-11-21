@@ -10,13 +10,6 @@ use crate::data;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
-
-/// 全局快捷键：Ctrl+Alt+W 唤起主窗口
-const HOTKEY_ID: i32 = 0x5753; // 'WS'
 
 pub fn show_main(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -102,25 +95,7 @@ pub fn intercept_close(app: &tauri::App) {
     });
 }
 
-/// 在独立线程里注册全局快捷键并跑消息循环
-pub fn spawn_hotkey(app: AppHandle) {
-    std::thread::spawn(move || unsafe {
-        let registered = RegisterHotKey(
-            std::ptr::null_mut(),
-            HOTKEY_ID,
-            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-            'W' as u32,
-        );
-        if registered == 0 {
-            eprintln!("全局快捷键 Ctrl+Alt+W 注册失败（可能被其它程序占用）");
-            return;
-        }
-
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            if msg.message == WM_HOTKEY {
-                show_main(&app);
-            }
-        }
-    });
+/// 在独立线程里注册全局快捷键并跑消息循环（实现已移到 win::hotkey）
+pub fn spawn_hotkey(app: AppHandle, preset: &str) {
+    crate::win::hotkey::spawn(app, crate::win::hotkey::parse_preset(preset));
 }

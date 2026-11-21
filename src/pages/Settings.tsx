@@ -105,6 +105,33 @@ export function SettingsPage() {
       </section>
 
       <section>
+        <SectionTitle title="快捷键" hint="改完立即生效，不需要重启" />
+        <Card className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-6">
+            <div>
+              <p className="flex items-center gap-2 text-body">
+                <Keyboard size={15} className="text-ink-3" />
+                唤起主窗口
+              </p>
+              <p className="mt-0.5 text-[11px] text-ink-3">
+                注册失败会被其它程序占用，界面会提示；选「关闭」则不注册任何热键
+              </p>
+            </div>
+            <select
+              value={draft.hotkey}
+              onChange={(e) => patch({ hotkey: e.target.value })}
+              className="h-8 rounded-sm border border-line-strong bg-canvas px-2 text-aux text-ink-2 outline-none focus:border-accent"
+            >
+              <option value="Ctrl+Alt+W">Ctrl + Alt + W</option>
+              <option value="Ctrl+Shift+W">Ctrl + Shift + W</option>
+              <option value="Ctrl+Alt+Space">Ctrl + Alt + Space</option>
+              <option value="">关闭</option>
+            </select>
+          </div>
+        </Card>
+      </section>
+
+      <section>
         <SectionTitle title="恢复" hint="恢复过程不会关闭你已打开的应用" />
         <Card className="flex flex-col gap-4">
           <Row label="默认自动启动缺失的应用" hint="恢复前仍可在预览页逐次关闭">
@@ -149,22 +176,6 @@ export function SettingsPage() {
         </Card>
       </section>
 
-      <section>
-        <SectionTitle title="快捷键" hint="当前为固定组合，暂不支持在界面里改" />
-        <Card className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <Keyboard size={16} className="text-ink-3" />
-            <span className="text-body">唤起主窗口</span>
-            <kbd className="rounded-sm border border-line-strong px-2 py-0.5 font-mono text-[11px] text-ink-2">
-              Ctrl + Alt + W
-            </kbd>
-            <Badge>全局</Badge>
-          </div>
-          <p className="text-[11px] text-ink-3">
-            修改需要在源码里改 `win::tray::spawn_hotkey` 后重新编译；如果组合被其它程序占用，注册会静默失败并写日志。
-          </p>
-        </Card>
-      </section>
 
       <section>
         <SectionTitle title="关于" />

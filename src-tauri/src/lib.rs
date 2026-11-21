@@ -60,7 +60,15 @@ pub fn run() {
 
             win::tray::build_tray(app)?;
             win::tray::intercept_close(app);
-            win::tray::spawn_hotkey(app.handle().clone());
+
+            // 快捷键以设置为准；设置里为空串表示关闭
+            let hotkey_preset = {
+                let db = app.state::<data::Db>().inner().clone();
+                tauri::async_runtime::block_on(data::settings::get(&db))
+                    .map(|s| s.hotkey)
+                    .unwrap_or_else(|_| "Ctrl+Alt+W".to_string())
+            };
+            win::tray::spawn_hotkey(app.handle().clone(), &hotkey_preset);
 
             spawn_auto_snapshot(app.handle().clone());
 

@@ -283,6 +283,8 @@ export interface AppSettings {
   restoreRelaunchDefault: boolean;
   /** 开机启动：真源是注册表 HKCU Run */
   autostart: boolean;
+  /** 全局快捷键预设，空串表示关闭 */
+  hotkey: string;
 }
 
 export interface StorageStats {

@@ -12,6 +12,7 @@ pub const KEY_AUTO_ENABLED: &str = "auto_snapshot_enabled";
 pub const KEY_AUTO_KEEP: &str = "auto_keep";
 pub const KEY_AUTO_INTERVAL: &str = "auto_min_interval_secs";
 pub const KEY_RELAUNCH_DEFAULT: &str = "restore_relaunch_default";
+pub const KEY_HOTKEY: &str = "hotkey";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +24,13 @@ pub struct AppSettings {
     /// 开机启动：真源是注册表（HKCU Run），这里只做展示与提交
     #[serde(default)]
     pub autostart: bool,
+    /// 全局快捷键预设；空串表示关闭
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+}
+
+fn default_hotkey() -> String {
+    "Ctrl+Alt+W".to_string()
 }
 
 impl Default for AppSettings {
@@ -34,6 +42,7 @@ impl Default for AppSettings {
             auto_min_interval_secs: super::snapshots::AUTO_MIN_INTERVAL_MS / 1000,
             restore_relaunch_default: true,
             autostart: false,
+            hotkey: default_hotkey(),
         }
     }
 }
@@ -43,6 +52,7 @@ impl AppSettings {
     pub fn sanitized(mut self) -> Self {
         self.auto_keep = self.auto_keep.clamp(1, 500);
         self.auto_min_interval_secs = self.auto_min_interval_secs.clamp(10, 86_400);
+        self.hotkey = crate::win::hotkey::normalize_preset(&self.hotkey);
         self
     }
 }
@@ -88,6 +98,9 @@ pub async fn get(db: &Db) -> AppResult<AppSettings> {
     if let Some(v) = read_raw(db, KEY_RELAUNCH_DEFAULT).await? {
         s.restore_relaunch_default = v == "true" || v == "1";
     }
+    if let Some(v) = read_raw(db, KEY_HOTKEY).await? {
+        s.hotkey = crate::win::hotkey::normalize_preset(&v);
+    }
 
     Ok(s.sanitized())
 }
@@ -104,6 +117,7 @@ pub async fn set(db: &Db, settings: &AppSettings) -> AppResult<AppSettings> {
         if s.restore_relaunch_default { "true" } else { "false" },
     )
     .await?;
+    write_raw(db, KEY_HOTKEY, &s.hotkey).await?;
 
     Ok(s)
 }
@@ -201,6 +215,7 @@ mod tests {
                 auto_min_interval_secs: 1, // 应被夹到 10
                 restore_relaunch_default: false,
                 autostart: false,
+                hotkey: "Ctrl+Shift+W".into(),
             },
         )
         .await

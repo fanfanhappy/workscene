@@ -356,9 +356,19 @@ pub async fn settings_set(
     // 先应用注册表，成功后才落库，避免界面显示"已开启"但实际没生效
     let autostart_ok = crate::win::autostart::sync(settings.autostart);
     let saved = settings::set(&db, &settings).await?;
+
+    // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程
+    let combo = crate::win::hotkey::parse_preset(&saved.hotkey);
+    let hotkey_ok = crate::win::hotkey::update(combo);
+
     if !autostart_ok {
         return Err(AppError::msg(
             "开机启动设置写入注册表失败（可能被组策略限制）",
+        ));
+    }
+    if !hotkey_ok && crate::win::hotkey::parse_preset(&saved.hotkey).is_some() {
+        return Err(AppError::msg(
+            "快捷键注册失败（可能被其它程序占用），已保存设置但本次未生效",
         ));
     }
     Ok(saved)
