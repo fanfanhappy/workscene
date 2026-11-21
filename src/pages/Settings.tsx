@@ -731,10 +731,17 @@ export function SettingsPage() {
             <li>· 权限边界：受 Windows UIPI 限制，普通权限下无法移动管理员提权窗口。</li>
             <li>· 能力边界：不支持 UWP 打包应用窗口恢复；不读取浏览器密码/Cookie 或应用内存缓冲区。</li>
           </ul>
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant="secondary"
+              onClick={() => useUiStore.getState().openOnboarding()}
+            >
+              <Sparkles size={13} /> 重新查看新手引导
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
               onClick={() => {
                 qc.invalidateQueries();
                 toast.success("已刷新缓存");

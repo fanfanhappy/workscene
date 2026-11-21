@@ -18,6 +18,7 @@ import type { RestoreReport, SnapshotSummary } from "@/types/contract";
 import { toast, useUiStore } from "@/stores/ui.store";
 import { Button, ConfirmDialogHost, ToastHost } from "@/components/ui";
 import { CommandPalette } from "@/components/CommandPalette";
+import { OnboardingModal } from "@/components/OnboardingModal";
 
 const NAV = [
   { to: "/", label: "总览", icon: LayoutDashboard, end: true },
@@ -290,6 +291,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </main>
 
       <CommandPalette />
+      <OnboardingModal />
       <ConfirmDialogHost />
       <ToastHost />
     </div>

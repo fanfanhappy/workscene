@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   Settings,
+  Sparkles,
   Sun,
 } from "lucide-react";
 import { api } from "@/services/api";
@@ -189,6 +190,15 @@ export function CommandPalette() {
           setOpen(false);
           toast.info("主题已设为跟随系统");
         },
+      },
+      {
+        id: "t-onboarding",
+        label: "重新播放新手引导",
+        description: "观看首次安装欢迎动画与 3 步上手指引",
+        category: "快捷操作",
+        keywords: "onboarding guide welcome 新手 引导 欢迎 动画",
+        icon: Sparkles,
+        run: () => useUiStore.getState().openOnboarding(),
       },
       {
         id: "t-refresh",

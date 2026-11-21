@@ -30,6 +30,7 @@ interface UiState {
   resolvedTheme: ResolvedTheme;
   sidebarCollapsed: boolean;
   commandPaletteOpen: boolean;
+  onboardingOpen: boolean;
   captureOpen: boolean;
   restoreWorkspaceId: string | null;
   toasts: ToastItem[];
@@ -42,6 +43,8 @@ interface UiState {
   toggleSidebar: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   toggleCommandPalette: () => void;
+  openOnboarding: () => void;
+  completeOnboarding: () => void;
   openCapture: () => void;
   closeCapture: () => void;
   openRestore: (workspaceId: string) => void;
@@ -56,6 +59,7 @@ interface UiState {
 
 const THEME_KEY = "workscene.theme";
 const SIDEBAR_KEY = "workscene.sidebarCollapsed";
+const ONBOARDING_KEY = "workscene.onboarding.v1";
 
 function getSystemTheme(): ResolvedTheme {
   if (typeof window === "undefined") return "dark";
@@ -88,6 +92,11 @@ function loadInitialSidebar(): boolean {
   return localStorage.getItem(SIDEBAR_KEY) === "1";
 }
 
+function loadInitialOnboardingOpen(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(ONBOARDING_KEY) !== "1";
+}
+
 const initialMode = loadInitialTheme();
 const initialResolved = resolveTheme(initialMode);
 applyDomTheme(initialResolved);
@@ -99,6 +108,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   resolvedTheme: initialResolved,
   sidebarCollapsed: loadInitialSidebar(),
   commandPaletteOpen: false,
+  onboardingOpen: loadInitialOnboardingOpen(),
   captureOpen: false,
   restoreWorkspaceId: null,
   toasts: [],
@@ -144,6 +154,15 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
+  openOnboarding: () => set({ onboardingOpen: true, commandPaletteOpen: false }),
+  completeOnboarding: () => {
+    try {
+      localStorage.setItem(ONBOARDING_KEY, "1");
+    } catch {
+      // ignore
+    }
+    set({ onboardingOpen: false });
+  },
   openCapture: () => set({ captureOpen: true, commandPaletteOpen: false }),
   closeCapture: () => set({ captureOpen: false }),
   openRestore: (workspaceId) =>
