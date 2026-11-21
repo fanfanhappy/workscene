@@ -18,6 +18,9 @@ impl Area {
 pub const MIN_W: f64 = 320.0;
 pub const MIN_H: f64 = 200.0;
 
+/// 最小可编辑尺寸（比例），与 UI 拖拽下限一致
+pub const MIN_RATIO: f64 = 0.08;
+
 /// 窗口矩形 → 相对工作区的比例坐标
 pub fn to_ratios(rect: Area, work: Area) -> (f64, f64, f64, f64) {
     let ww = if work.w <= 0.0 { 1.0 } else { work.w };
@@ -57,16 +60,33 @@ pub fn clamp(rect: Area, work: Area) -> Area {
     }
 }
 
-/// 比例坐标归一化到 [0,1] 且 x+w ≤ 1。
-/// 最大化的窗口实测会略大于工作区（含不可见边框，例如 -0.3% / 100.6%），
-/// 直接存盘会让 UI 显示出"负偏移"，而恢复时本来也会被 clamp，所以存盘即归一。
+/// 比例坐标归一化。
+///
+/// 允许轻微的负偏移与超出 1：真实窗口带不可见边框，最大化/贴边窗口实测会落在
+/// (-0.0086, 1.006) 这种位置。早期版本把它们夹成 0 会导致恢复时整体偏移
+/// （实测资源管理器被推了 33px）。这里只做"别离谱"的约束，是否可见交给
+/// `clamp_visible`。
 pub fn normalize_ratios(r: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
-    let clamp01 = |v: f64| v.clamp(0.0, 1.0);
-    let x = clamp01(r.0);
-    let y = clamp01(r.1);
-    let w = clamp01(r.2).min(1.0 - x).max(0.0);
-    let h = clamp01(r.3).min(1.0 - y).max(0.0);
+    let finite = |v: f64, fallback: f64| if v.is_finite() { v } else { fallback };
+    let x = finite(r.0, 0.0).clamp(-0.25, 1.0);
+    let y = finite(r.1, 0.0).clamp(-0.25, 1.0);
+    // 宽高缺失/非法时退化为占满工作区，而不是缩成一个点
+    let w = finite(r.2, 1.0).clamp(MIN_RATIO, 1.0);
+    let h = finite(r.3, 1.0).clamp(MIN_RATIO, 1.0);
     (x, y, w, h)
+}
+
+/// 至少要有 `visible` 比例的面积落在工作区内，不让窗口跑到看不见的地方。
+/// 与 `clamp` 的区别：不强制完全塞进工作区（否则贴边/带边框的窗口会被推移）。
+pub fn clamp_visible(rect: Area, work: Area) -> Area {
+    const VISIBLE: f64 = 0.3;
+    let min_w = (rect.w * VISIBLE).max(80.0);
+    let min_h = (rect.h * VISIBLE).max(60.0);
+
+    let x = rect.x.clamp(work.x - rect.w + min_w, work.x + work.w - min_w);
+    let y = rect.y.clamp(work.y - rect.h + min_h, work.y + work.h - min_h);
+
+    Area { x, y, ..rect }
 }
 
 /// 四舍五入到整数像素（SetWindowPos 只接受整数）
@@ -133,12 +153,34 @@ mod tests {
     }
 
     #[test]
-    fn normalize_ratios_clamps_maximized_overshoot() {
-        // 最大化窗口实测：x=-0.003, w=1.006
-        let (x, y, w, h) = normalize_ratios((-0.003, -0.005, 1.006, 1.011));
-        assert_eq!((x, y), (0.0, 0.0));
+    fn normalize_ratios_keeps_small_negative_offsets() {
+        // 真实窗口贴边时 x 可能略小于 0，不能夹掉（否则恢复会整体偏移）
+        let (x, y, w, h) = normalize_ratios((-0.0086, -0.005, 1.006, 1.011));
+        assert!((x + 0.0086).abs() < 1e-9, "轻微负偏移应保留");
+        assert!((y + 0.005).abs() < 1e-9);
         assert!(w <= 1.0 && h <= 1.0);
-        assert!((w - 1.0).abs() < 1e-9 && (h - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn normalize_ratios_rejects_absurd_values() {
+        let (x, y, w, h) = normalize_ratios((f64::NAN, 9.0, -1.0, f64::INFINITY));
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 1.0);
+        assert!(w >= MIN_RATIO);
+        assert!((h - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clamp_visible_allows_partial_offscreen_but_not_lost() {
+        // 贴左边、部分在屏幕外：允许保留
+        let rect = Area::new(-33.0, 220.0, 1709.0, 962.0);
+        let kept = clamp_visible(rect, WORK);
+        assert_eq!(kept.x, -33.0, "已经足够可见，不应被推动");
+
+        // 完全跑到屏幕外：拉回到至少可见 30%
+        let lost = Area::new(-2000.0, 220.0, 1709.0, 962.0);
+        let fixed = clamp_visible(lost, WORK);
+        assert!(fixed.x + fixed.w > WORK.x + 80.0, "必须回到可见区域");
     }
 
     #[test]

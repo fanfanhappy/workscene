@@ -548,8 +548,8 @@ pub struct LayoutUpdate {
     pub height_ratio: f64,
 }
 
-/// 最小可编辑尺寸，防止把窗口拖成一条线
-pub const MIN_RATIO: f64 = 0.08;
+/// 最小可编辑尺寸，防止把窗口拖成一条线（与 layout 保持一致）
+pub use crate::restore::layout::MIN_RATIO;
 
 /// 归一化 + 边界约束。UI 拖拽与直接调用命令都要过这一层。
 pub fn sanitize_layout(u: &LayoutUpdate) -> (f64, f64, f64, f64) {

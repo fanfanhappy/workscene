@@ -1381,13 +1381,16 @@ pub fn baseline_live(max_windows: usize) {
 
         let dx = (now.left - original.0).abs();
         let dy = (now.top - original.1).abs();
+        let dw = ((now.right - now.left) - original.2).abs();
+        let dh = ((now.bottom - now.top) - original.3).abs();
         let d = dx.max(dy);
-        let ok = d <= 8;
+        let size_delta = dw.max(dh);
+        let ok = d <= 8 && size_delta <= 8;
         measured += 1;
         if ok {
             passed += 1;
         }
-        worst = worst.max(d);
+        worst = worst.max(d.max(size_delta));
 
         lines.push(
             serde_json::json!({
@@ -1395,19 +1398,25 @@ pub fn baseline_live(max_windows: usize) {
                 "expected": [original.0, original.1, original.2, original.3],
                 "actual": [now.left, now.top, now.right - now.left, now.bottom - now.top],
                 "deltaPx": d,
+                "sizeDeltaPx": size_delta,
                 "ok": ok,
             })
             .to_string(),
         );
 
         println!(
-            "      HWND {:<10} 目标 ({}, {}) 实际 ({}, {}) 偏差 {}px {}",
+            "      HWND {:<10} 位置 ({}, {}) → ({}, {}) 偏差 {}px，尺寸 {}x{} → {}x{} 偏差 {}px {}",
             hwnd,
             original.0,
             original.1,
             now.left,
             now.top,
             d,
+            original.2,
+            original.3,
+            now.right - now.left,
+            now.bottom - now.top,
+            size_delta,
             if ok { "✓" } else { "✗" }
         );
     }

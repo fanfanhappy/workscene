@@ -1,4 +1,4 @@
-pub mod layout;
+﻿pub mod layout;
 pub mod matcher;
 
 use crate::core::models::{
@@ -8,7 +8,7 @@ use crate::core::models::{
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
 use crate::win::{display, filter, process, window};
-use layout::{clamp, from_ratios, round, Area};
+use layout::{clamp, clamp_visible, from_ratios, round, Area};
 use matcher::{match_window, Candidate};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,13 +128,18 @@ fn resolve_target(win: &SceneWindow, monitors: &[display::RawMonitor]) -> Target
         (m.work.right - m.work.left) as f64,
         (m.work.bottom - m.work.top) as f64,
     );
-    let area = clamp(
-        from_ratios(
-            (win.x_ratio, win.y_ratio, win.width_ratio, win.height_ratio),
-            work,
-        ),
+    let raw = from_ratios(
+        (win.x_ratio, win.y_ratio, win.width_ratio, win.height_ratio),
         work,
     );
+
+    // 显示器在：只保证"看得见"，允许贴边/略微超出（与捕获时一致）
+    // 显示器不在（回退到主屏）：完全夹进工作区，避免窗口落在看不见的地方
+    let area = if by_key.is_some() {
+        clamp_visible(raw, work)
+    } else {
+        clamp(raw, work)
+    };
 
     Target {
         rect: round(area),
@@ -369,14 +374,24 @@ pub fn apply(
             let elapsed = || t0.elapsed().as_millis() as i64;
 
             {
-                // 等应用自身把窗口改回去（Chromium/Electron 常见），再判定偏差
-                std::thread::sleep(Duration::from_millis(160));
-                let mut delta = verify(hwnd, &target_info, win.show_state);
+                // 先等 250ms 看是否直接到位（大多数应用）
+                let mut delta = wait_for_settle(
+                    hwnd,
+                    &target_info,
+                    win.show_state,
+                    threshold,
+                    Duration::from_millis(250),
+                );
                 if delta.0 > threshold {
-                    // 二次校正
+                    // 二次校正 + 更长的稳定窗口（慢应用 / 自己会挪窗口的应用）
                     place_window(hwnd, rect, win.show_state);
-                    std::thread::sleep(Duration::from_millis(200));
-                    delta = verify(hwnd, &target_info, win.show_state);
+                    delta = wait_for_settle(
+                        hwnd,
+                        &target_info,
+                        win.show_state,
+                        threshold,
+                        Duration::from_millis(900),
+                    );
                 }
 
                 let position_ok = delta.0 <= threshold;
@@ -690,6 +705,25 @@ fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState)
     }
 }
 
+/// 等窗口稳定后再判定：有些应用（资源管理器、部分 Electron）会在我们设置位置之后
+/// 异步把自己再挪一次。固定 sleep 160ms 采样会抓到"中间态"，把最终正确的恢复判成失败。
+fn wait_for_settle(
+    hwnd: HWND,
+    target: &Target,
+    state: ShowState,
+    threshold: i32,
+    budget: Duration,
+) -> (i32, i32, i32) {
+    let end = Instant::now() + budget;
+    let mut last = verify(hwnd, target, state);
+
+    while Instant::now() < end && last.0 > threshold {
+        std::thread::sleep(Duration::from_millis(150));
+        last = verify(hwnd, target, state);
+    }
+    last
+}
+
 /// 四边偏差：返回 (最大偏差, dx, dy)，尺寸偏差计入最大值（评审补充意见 D4）。
 ///
 /// 最大化窗口的 GetWindowRect 返回的是整块显示器（含不可见边框），
@@ -948,3 +982,4 @@ mod tests {
         assert_eq!(plans[0].count, 2, "always_launch 不管已开多少都新启");
     }
 }
+
