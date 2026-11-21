@@ -123,6 +123,7 @@ export const api = {
   restoreIsBusy: () => call<boolean>("restore_is_busy"),
   restoreCancel: () => call<boolean>("restore_cancel"),
   systemOpenDataDir: () => call<void>("system_open_data_dir"),
+  systemOpenStartupDir: () => call<void>("system_open_startup_dir"),
   dialogPickFile: (exeOnly = false) =>
     call<string | null>("dialog_pick_file", { exeOnly }),
   dialogPickFolder: () => call<string | null>("dialog_pick_folder"),

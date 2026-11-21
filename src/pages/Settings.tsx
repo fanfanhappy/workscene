@@ -160,7 +160,17 @@ export function SettingsPage() {
       const msg = String((e as Error).message);
       setError(msg);
       toast.danger("保存失败", msg);
-      qc.invalidateQueries({ queryKey: ["settings"] });
+      // 失败时以服务端为准重新取一次：开关不能停留在"看起来开了"的状态。
+      // 注意不能用缓存里的 settings.data（结构共享可能返回同一引用，draft 不会被重置）。
+      void (async () => {
+        try {
+          const fresh = await api.settingsGet();
+          qc.setQueryData(["settings"], fresh);
+          setDraft(fresh);
+        } catch {
+          if (settings.data) setDraft(settings.data);
+        }
+      })();
     },
   });
 
@@ -295,13 +305,38 @@ export function SettingsPage() {
           <Card className="flex flex-col gap-3.5">
             <Row
               label="随 Windows 开机启动"
-              hint="写入当前用户注册表 HKCU\Run，启动后最小化到系统托盘"
+              hint="仅对当前用户生效（无需管理员）；若被 Windows 安全中心拦截，可点右侧打开启动文件夹手动放入快捷方式"
             >
-              <Switch
-                checked={draft.autostart}
-                onChange={(v) => patch({ autostart: v })}
-                ariaLabel="开机启动"
-              />
+              <div className="flex items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() =>
+                    api
+                      .systemOpenStartupDir()
+                      .catch((e) => toast.danger("打开启动文件夹失败", String((e as Error).message)))
+                  }
+                  title="打开 Windows 当前用户启动文件夹"
+                >
+                  <FolderOpen size={12} /> 启动文件夹
+                </Button>
+                <div className="flex items-center gap-2">
+                  {error?.includes("开机启动") ? (
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() => void api.systemOpenStartupDir()}
+                    >
+                      打开启动文件夹
+                    </Button>
+                  ) : null}
+                  <Switch
+                    checked={draft.autostart}
+                    onChange={(v) => patch({ autostart: v })}
+                    ariaLabel="开机启动"
+                  />
+                </div>
+              </div>
             </Row>
 
             <Row

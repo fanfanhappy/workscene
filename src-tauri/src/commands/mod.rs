@@ -570,6 +570,12 @@ pub fn system_open_data_dir() -> AppResult<()> {
     Ok(())
 }
 
+/// 在资源管理器中打开当前用户的 Windows「启动」文件夹
+#[tauri::command]
+pub fn system_open_startup_dir() -> AppResult<()> {
+    crate::win::autostart::open_startup_folder().map_err(AppError::msg)
+}
+
 // ---- 快照（M5：Hybrid） ----
 
 #[tauri::command]
@@ -684,19 +690,49 @@ pub async fn settings_set(
     db: State<'_, Db>,
     settings: settings::AppSettings,
 ) -> AppResult<settings::AppSettings> {
-    // 先应用注册表，成功后才落库，避免界面显示"已开启"但实际没生效
-    let autostart_ok = crate::win::autostart::sync(settings.autostart);
-    let saved = settings::set(&db, &settings).await?;
+    apply_settings(&db, settings).await
+}
+
+/// 设置落库的唯一入口（命令与 CLI 共用）。
+///
+/// 关键不变量：**库里存的 autostart 必须等于系统里真实生效的状态**。
+/// 早期版本先落库、再报错，结果界面显示"已开启"而注册表/启动文件夹里什么都没有——
+/// 用户重启后才发现没生效。
+pub async fn apply_settings(
+    db: &Db,
+    mut settings: settings::AppSettings,
+) -> AppResult<settings::AppSettings> {
+    use crate::win::autostart;
+
+    // 仅当开机启动状态发生变化时同步系统启动项（避免改其它设置时被注册表策略误伤）
+    let mut autostart_err = None;
+    if settings.autostart != autostart::is_enabled() {
+        match autostart::sync_detailed(settings.autostart) {
+            Err((_, msg)) => autostart_err = Some(msg),
+            Ok(()) => {
+                // 写成功但读不回来，同样说明没生效，不能假装成功
+                if autostart::is_enabled() != settings.autostart {
+                    autostart_err = Some(
+                        "启动项写入后未能读回，可能被安全软件拦截。".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    // 落库前校正为真实状态：失败时库里留 false，界面刷新回来就是关的
+    settings.autostart = autostart::is_enabled();
+
+    let mut saved = settings::set(db, &settings).await?;
+    saved.autostart = settings.autostart;
     crate::win::filter::set_ignored_processes(&saved.ignored_processes);
 
     // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程
     let combo = crate::win::hotkey::parse_preset(&saved.hotkey);
     let hotkey_ok = crate::win::hotkey::update(combo, saved.workspace_hotkeys_enabled);
 
-    if !autostart_ok {
-        return Err(AppError::msg(
-            "开机启动设置写入注册表失败（可能被组策略限制）",
-        ));
+    if let Some(msg) = autostart_err {
+        return Err(AppError::msg(format!("开机启动设置失败：{msg}")));
     }
     if !hotkey_ok && crate::win::hotkey::parse_preset(&saved.hotkey).is_some() {
         return Err(AppError::msg(
@@ -715,4 +751,40 @@ pub async fn storage_stats(db: State<'_, Db>) -> AppResult<settings::StorageStat
 #[tauri::command]
 pub async fn storage_cleanup(db: State<'_, Db>) -> AppResult<usize> {
     settings::prune_all(&db).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 不变量：库里的 autostart 必须等于系统真实状态。
+    /// 这个环境里注册表/启动文件夹都写不进去，正好覆盖"写入失败"的分支：
+    /// 失败时库必须落 false 并返回错误，而不是留下一个"看起来已开启"的 true。
+    #[tokio::test]
+    async fn settings_never_persist_autostart_that_did_not_take_effect() {
+        let db = crate::data::in_memory().await.unwrap();
+        let mut input = settings::AppSettings::default();
+        input.autostart = !crate::win::autostart::is_enabled();
+
+        let result = apply_settings(&db, input.clone()).await;
+        let stored = settings::get(&db).await.unwrap();
+        let actual = crate::win::autostart::is_enabled();
+
+        assert_eq!(
+            stored.autostart, actual,
+            "库里的开机启动状态必须等于真实状态（库={}，真实={}）",
+            stored.autostart, actual
+        );
+
+        if stored.autostart != input.autostart {
+            assert!(
+                result.is_err(),
+                "没能改变真实状态时必须返回错误，否则界面会显示成功"
+            );
+            if let Err(e) = result {
+                let msg = format!("{e}");
+                assert!(msg.contains("开机启动"), "错误信息应指明是开机启动：{msg}");
+            }
+        }
+    }
 }

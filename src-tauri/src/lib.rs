@@ -66,6 +66,17 @@ pub fn run() {
                 tauri::async_runtime::block_on(data::settings::get(&db)).unwrap_or_default()
             };
             win::filter::set_ignored_processes(&init_settings.ignored_processes);
+
+            // 启动时校正开机启动状态：库里记着"已开启"不代表系统里真的有。
+            // （历史版本失败也落库，或用户在任务管理器/安全软件里手动删掉了启动项）
+            // 这里只记录真实状态，不主动写入任何启动项。
+            let actual_autostart = win::autostart::is_enabled();
+            if init_settings.autostart != actual_autostart {
+                let mut fixed = init_settings.clone();
+                fixed.autostart = actual_autostart;
+                let db = app.state::<data::Db>().inner().clone();
+                let _ = tauri::async_runtime::block_on(data::settings::set(&db, &fixed));
+            }
             win::tray::spawn_hotkey(
                 app.handle().clone(),
                 &init_settings.hotkey,
@@ -154,6 +165,7 @@ pub fn run() {
             commands::storage_stats,
             commands::storage_cleanup,
             commands::system_open_data_dir,
+            commands::system_open_startup_dir,
             commands::dialog_pick_file,
             commands::dialog_pick_folder,
         ])
@@ -300,14 +312,43 @@ pub fn cli_snapshot(name: &str) {
 
 /// 开机启动诊断：`--autostart status|on|off`
 pub fn cli_autostart(mode: &str) {
+    // 与 UI 走同一条路径（apply_settings），这样 CLI 也能验证"库里状态 == 真实状态"
+    let db = match tauri::async_runtime::block_on(data::init()) {
+        Ok(db) => Some(db),
+        Err(e) => {
+            eprintln!("[autostart] 数据库不可用，跳过状态落库：{e}");
+            None
+        }
+    };
+    let ensure_db = |enabled: bool, db: &Option<data::Db>| {
+        if let Some(db) = db {
+            let mut s: data::settings::AppSettings =
+                tauri::async_runtime::block_on(data::settings::get(db)).unwrap_or_default();
+            s.autostart = enabled;
+            let _ = tauri::async_runtime::block_on(commands::apply_settings(db, s));
+        }
+    };
+
     match mode {
         "on" => match win::autostart::set_enabled_verbose(true) {
-            Ok(()) => println!("已开启开机启动"),
-            Err(code) => println!("开启失败（Win32 错误码 {code}）"),
+            Ok(()) => {
+                ensure_db(true, &db);
+                println!("已开启开机启动");
+            }
+            Err(code) => {
+                ensure_db(true, &db);
+                println!("开启失败（Win32 错误码 {code}）");
+            }
         },
         "off" => match win::autostart::set_enabled_verbose(false) {
-            Ok(()) => println!("已关闭开机启动"),
-            Err(code) => println!("关闭失败（Win32 错误码 {code}）"),
+            Ok(()) => {
+                ensure_db(false, &db);
+                println!("已关闭开机启动");
+            }
+            Err(code) => {
+                ensure_db(false, &db);
+                println!("关闭失败（Win32 错误码 {code}）");
+            }
         },
         _ => {
             println!(
