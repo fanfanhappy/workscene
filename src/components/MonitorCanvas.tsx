@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { DisplayInfo, WindowInfo } from "@/types/contract";
 
 /**
@@ -21,6 +21,7 @@ export function MonitorCanvas({
   selectedHwnd?: number | null;
   onSelectWindow?: (w: WindowInfo) => void;
 }) {
+  const canvasId = useId();
   const [hoveredHwnd, setHoveredHwnd] = useState<number | null>(null);
 
   if (displays.length === 0) {
@@ -36,12 +37,16 @@ export function MonitorCanvas({
   const maxX = Math.max(...displays.map((d) => d.x + d.width));
   const maxY = Math.max(...displays.map((d) => d.y + d.height));
 
-  const pad = Math.max(24, (maxX - minX) * 0.02);
+  const spanW = Math.max(1, maxX - minX);
+  const pad = Math.max(24, spanW * 0.02);
+  const fontSize = Math.max(12, spanW / 52);
+  // 显示器标签画在屏幕下方的留白里，避免与窗口标签互相遮挡
+  const labelBand = fontSize * 1.9;
   const vbX = minX - pad;
   const vbY = minY - pad;
-  const vbW = Math.max(1, maxX - minX + pad * 2);
-  const vbH = Math.max(1, maxY - minY + pad * 2);
-  const fontSize = Math.max(12, vbW / 44);
+  const vbW = Math.max(1, spanW + pad * 2);
+  const vbH = Math.max(1, maxY - minY + pad * 2 + labelBand);
+  const gap = vbW / 520;
   const activeHwnd = hoveredHwnd ?? selectedHwnd ?? null;
 
   // 把激活窗口排到最后绘制，避免被其他窗口遮挡
@@ -55,10 +60,10 @@ export function MonitorCanvas({
 
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div className="overflow-hidden rounded-md border border-line bg-canvas/80 p-2">
+      <div className="overflow-hidden rounded-[10px] border border-line bg-canvas/80 p-2">
         <svg
           viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`}
-          style={{ width: "100%", height }}
+          style={{ width: "100%", height, display: "block" }}
           preserveAspectRatio="xMidYMid meet"
           role="img"
           aria-label="显示器与窗口布局预览"
@@ -88,13 +93,15 @@ export function MonitorCanvas({
                   strokeWidth={vbW / 700}
                 />
                 <text
-                  x={d.x + fontSize * 0.9}
-                  y={d.y + fontSize * 1.45}
-                  fill="var(--color-ink-3)"
+                  x={d.x + d.width / 2}
+                  y={d.y + d.height + fontSize * 1.35}
+                  textAnchor="middle"
+                  fill={active ? "var(--color-accent)" : "var(--color-ink-3)"}
                   fontSize={fontSize}
-                  fontFamily="var(--font-mono)"
+                  fontFamily="var(--font-sans)"
+                  fontWeight={d.isPrimary ? 600 : 500}
                 >
-                  {d.isPrimary ? "主屏" : "副屏"} {d.width}×{d.height} ·{" "}
+                  {d.isPrimary ? "主屏" : "副屏"} · {d.width}×{d.height} ·{" "}
                   {Math.round(d.scaleFactor * 100)}%
                 </text>
               </g>
@@ -105,13 +112,18 @@ export function MonitorCanvas({
             const isSel = w.hwnd === selectedHwnd;
             const isHover = w.hwnd === hoveredHwnd;
             const highlighted = isSel || isHover;
-            const rw = Math.max(40, w.width);
-            const rh = Math.max(30, w.height);
-            const labelFont = Math.max(24, Math.min(vbW / 54, rh * 0.24));
+            const rx0 = w.x + gap;
+            const ry0 = w.y + gap;
+            const rw = Math.max(40, w.width - gap * 2);
+            const rh = Math.max(30, w.height - gap * 2);
+            const avgDispW = vbW / Math.max(1, displays.length);
+            const labelFont = Math.max(22, Math.min(avgDispW / 38, rh * 0.22));
+            const barH = Math.min(rh * 0.3, labelFont * 1.7);
             const appLabel = (w.processName || w.title || "窗口").replace(/\.exe$/i, "");
             const stateTag = w.isMaximized ? " [全屏]" : w.isMinimized ? " [最小化]" : "";
-            const showLabel = rw >= labelFont * 3.5 && rh >= labelFont * 1.8;
-            const clipId = `mc-win-${i}-${w.hwnd}`;
+            const showLabel = rw >= labelFont * 3.2 && rh >= labelFont * 1.8;
+            const radius = vbW / 340;
+            const clipId = `mc-${canvasId}-${i}-${w.hwnd}`;
             return (
               <g
                 key={`${w.hwnd}-${i}`}
@@ -119,30 +131,53 @@ export function MonitorCanvas({
                 onMouseLeave={() => setHoveredHwnd((cur) => (cur === w.hwnd ? null : cur))}
                 onClick={() => onSelectWindow?.(w)}
                 className={onSelectWindow ? "cursor-pointer" : undefined}
+                style={{ transition: "opacity 150ms" }}
+                opacity={activeHwnd !== null && !highlighted ? 0.55 : 1}
               >
                 <defs>
                   <clipPath id={clipId}>
-                    <rect x={w.x} y={w.y} width={rw} height={rh} rx={vbW / 320} />
+                    <rect x={rx0} y={ry0} width={rw} height={rh} rx={radius} />
                   </clipPath>
                 </defs>
                 <rect
-                  x={w.x}
-                  y={w.y}
+                  x={rx0}
+                  y={ry0}
                   width={rw}
                   height={rh}
-                  rx={vbW / 320}
+                  rx={radius}
                   fill="var(--color-accent)"
-                  fillOpacity={highlighted ? 0.34 : 0.14}
-                  stroke="var(--color-accent)"
-                  strokeOpacity={highlighted ? 1 : 0.58}
-                  strokeWidth={highlighted ? vbW / 300 : vbW / 680}
+                  fillOpacity={highlighted ? 0.3 : 0.12}
                 >
                   <title>{`${w.title || w.processName} (${w.width}×${w.height})`}</title>
                 </rect>
+                {/* 模拟标题栏，让矩形更像真实窗口 */}
+                <rect
+                  x={rx0}
+                  y={ry0}
+                  width={rw}
+                  height={barH}
+                  clipPath={`url(#${clipId})`}
+                  fill="var(--color-accent)"
+                  fillOpacity={highlighted ? 0.5 : 0.24}
+                  style={{ pointerEvents: "none" }}
+                />
+                <rect
+                  x={rx0}
+                  y={ry0}
+                  width={rw}
+                  height={rh}
+                  rx={radius}
+                  fill="none"
+                  stroke="var(--color-accent)"
+                  strokeOpacity={highlighted ? 1 : 0.55}
+                  strokeWidth={highlighted ? vbW / 320 : vbW / 720}
+                  style={{ pointerEvents: "none" }}
+                />
                 {showLabel ? (
                   <text
-                    x={w.x + labelFont * 0.65}
-                    y={w.y + labelFont * 1.35}
+                    x={rx0 + labelFont * 0.55}
+                    y={ry0 + barH / 2}
+                    dominantBaseline="central"
                     clipPath={`url(#${clipId})`}
                     fill={highlighted ? "var(--color-ink)" : "var(--color-ink-2)"}
                     fontSize={labelFont}

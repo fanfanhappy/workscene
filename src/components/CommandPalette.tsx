@@ -212,7 +212,10 @@ export function CommandPalette() {
         category: "快捷操作",
         keywords: "onboarding guide welcome 新手 引导 欢迎 动画",
         icon: Sparkles,
-        run: () => useUiStore.getState().openOnboarding(),
+        run: () => {
+          setOpen(false);
+          useUiStore.getState().openOnboarding();
+        },
       },
       {
         id: "t-refresh",
@@ -235,9 +238,13 @@ export function CommandPalette() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) {
-      // 未输入关键词时：保留前 6 条工作空间命令 + 全部页面/快捷命令，避免空间多时挤掉系统命令
-      const ws = commands.filter((c) => c.category === "工作空间").slice(0, 6);
-      const others = commands.filter((c) => c.category !== "工作空间");
+      // 未输入关键词时：保留前 4 条工作空间与恢复命令 + 全部页面/快捷命令，避免空间多时挤掉系统命令
+      const ws = commands
+        .filter((c) => c.category === "工作空间" || c.category === "恢复")
+        .slice(0, 6);
+      const others = commands.filter(
+        (c) => c.category !== "工作空间" && c.category !== "恢复",
+      );
       return [...ws, ...others];
     }
     const terms = q.split(/\s+/);

@@ -67,6 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       qc.invalidateQueries({ queryKey: ["displays"] });
       qc.invalidateQueries({ queryKey: ["capture"] });
       qc.invalidateQueries({ queryKey: ["preview"] });
+      qc.invalidateQueries({ queryKey: ["ws-profiles"] });
       toast.info(
         `检测到显示器变化（当前 ${e.payload} 台）`,
         "可一键恢复适合当前屏幕配置的工作空间",
@@ -280,7 +281,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           ) : (
             <p className="px-2.5 font-mono text-[10px] text-ink-3">
-              v{info.data?.version ?? "1.1.0"} · 本地离线优先
+              v{info.data?.version ?? "1.1.1"} · 本地离线优先
             </p>
           )}
         </div>

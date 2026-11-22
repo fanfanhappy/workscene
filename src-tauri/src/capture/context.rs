@@ -194,10 +194,11 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// 按 IDE 窗口标题段（如 `App.tsx - WorkScene - Cursor`）精确匹配目录基名
+/// 按 IDE 窗口标题分隔符（` - ` / ` — ` / ` – `）精确匹配目录基名，支持含连字符的项目名（如 my-app）
 pub fn match_title_to_workspace(title: &str, workspaces: &[String]) -> Option<String> {
-    let segments: Vec<&str> = title
-        .split(['—', '–', '-'])
+    let normalized = title.replace(" — ", " - ").replace(" – ", " - ");
+    let segments: Vec<&str> = normalized
+        .split(" - ")
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
@@ -212,30 +213,57 @@ pub fn match_title_to_workspace(title: &str, workspaces: &[String]) -> Option<St
     None
 }
 
-/// 静默查询当前已打开的 Windows 文件资源管理器文件夹路径
+/// 静默查询当前已打开的 Windows 文件资源管理器文件夹路径（带 3 秒超时与 UNC 跳过，永不阻塞）
 fn query_explorer_folders() -> Vec<String> {
+    use std::io::Read;
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $p=$_.Document.Folder.Self.Path; if ($p -and (Test-Path -LiteralPath $p -PathType Container)) { Write-Output $p } } catch {} }";
-    let output = std::process::Command::new("powershell")
+    let script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $p=$_.Document.Folder.Self.Path; if ($p -and -not $p.StartsWith('\\\\')) { Write-Output $p } } catch {} }";
+    let Ok(mut child) = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    let Ok(out) = output else {
+        .spawn()
+    else {
         return Vec::new();
     };
-    if !out.status.success() {
-        return Vec::new();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Vec::new();
+                }
+                let mut stdout = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                return stdout
+                    .lines()
+                    .map(|l| l.trim().trim_start_matches('\u{feff}'))
+                    .filter(|l| !l.is_empty() && !l.starts_with(r"\\") && Path::new(l).is_dir())
+                    .map(|l| l.to_string())
+                    .collect();
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Vec::new();
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                return Vec::new();
+            }
+        }
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && Path::new(l).is_dir())
-        .map(|l| l.to_string())
-        .collect()
 }
 
 #[cfg(test)]

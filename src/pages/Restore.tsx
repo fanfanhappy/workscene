@@ -87,12 +87,14 @@ export function RestorePage() {
   });
 
   useEffect(() => {
-    if (settings.data && !relaunchSynced) {
-      setRelaunch(settings.data.restoreRelaunchDefault);
-      setFocusMode(settings.data.restoreFocusModeDefault);
+    if (!relaunchSynced && (settings.data || settings.isError)) {
+      if (settings.data) {
+        setRelaunch(settings.data.restoreRelaunchDefault);
+        setFocusMode(settings.data.restoreFocusModeDefault);
+      }
       setRelaunchSynced(true);
     }
-  }, [settings.data, relaunchSynced]);
+  }, [settings.data, settings.isError, relaunchSynced]);
 
   const workspaces = useQuery({
     queryKey: ["workspaces"],
@@ -285,7 +287,7 @@ export function RestorePage() {
     },
   });
 
-  const running = run.isPending || retryFailed.isPending;
+  const running = run.isPending || retryFailed.isPending || undo.isPending;
 
   useEffect(() => {
     if (!running) return;

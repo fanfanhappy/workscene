@@ -60,12 +60,15 @@ export function CapturePage() {
   }, [workspaces.data, targetWsId, saveMode]);
 
   const scannedOnce = useRef(false);
+  const detectSeqRef = useRef(0);
 
   const scan = useMutation({
     mutationFn: api.captureStart,
     onMutate: () => {
       setError(null);
       setHighlightedHwnd(null);
+      setDetectedCtx([]);
+      setSelectedCtx(new Set());
     },
     onSuccess: (data) => {
       qc.setQueryData(["capture"], data);
@@ -94,10 +97,12 @@ export function CapturePage() {
           d.getMinutes(),
         ).padStart(2, "0")}`;
       });
-      // 异步探测 L2 上下文（资源管理器已打开文件夹 + VS Code/Cursor/Trae 等 IDE 项目目录）
+      // 异步探测 L2 上下文（资源管理器已打开文件夹 + VS Code/Cursor/Trae 等 IDE 项目目录），带序号防竞态
+      const seq = ++detectSeqRef.current;
       api
         .captureDetectContext(data.windows)
         .then((items) => {
+          if (detectSeqRef.current !== seq) return;
           setDetectedCtx(items);
           setSelectedCtx(new Set(items.map((it) => it.target)));
         })
@@ -126,7 +131,43 @@ export function CapturePage() {
       };
       if (subset.windows.length === 0) throw new Error("请至少勾选一个窗口");
 
-      const pickedFolders = detectedCtx.filter((c) => selectedCtx.has(c.target));
+      const pickedCtx = detectedCtx.filter((c) => selectedCtx.has(c.target));
+      const applyDetectedContext = async (wsId: string) => {
+        if (pickedCtx.length === 0) return;
+        const folders = pickedCtx.filter((c) => c.kind !== "ide_project");
+        const ideProjects = pickedCtx.filter((c) => c.kind === "ide_project");
+        for (const ctx of folders) {
+          await api
+            .workspaceItemAdd(wsId, "folder", ctx.target, ctx.displayName)
+            .catch(() => undefined);
+        }
+        if (ideProjects.length > 0) {
+          const detail = await api.workspaceGet(wsId).catch(() => null);
+          if (detail) {
+            for (const proj of ideProjects) {
+              const appItem = detail.items.find(
+                (it) =>
+                  it.itemType === "application" &&
+                  (it.displayName.toLowerCase() === proj.sourceApp.toLowerCase() ||
+                    (it.target ?? "").toLowerCase().endsWith(proj.sourceApp.toLowerCase())),
+              );
+              if (appItem && !appItem.launchArgs) {
+                const arg = proj.target.includes(" ") ? `"${proj.target}"` : proj.target;
+                await api
+                  .workspaceItemUpdate(
+                    appItem.id,
+                    appItem.reusePolicy,
+                    arg,
+                    appItem.enabled,
+                    appItem.launchPriority,
+                    appItem.launchDelayMs,
+                  )
+                  .catch(() => undefined);
+              }
+            }
+          }
+        }
+      };
 
       if (saveMode === "update") {
         if (!targetWsId) throw new Error("请选择要更新的工作空间");
@@ -139,11 +180,7 @@ export function CapturePage() {
         });
         if (!ok) return null;
         const updated = await api.workspaceUpdateFromCapture(targetWsId, subset);
-        for (const ctx of pickedFolders) {
-          await api
-            .workspaceItemAdd(updated.id, "folder", ctx.target, ctx.displayName)
-            .catch(() => undefined);
-        }
+        await applyDetectedContext(updated.id);
         return {
           id: updated.id,
           name: updated.name,
@@ -156,11 +193,7 @@ export function CapturePage() {
       const trimmed = name.trim();
       if (!trimmed) throw new Error("请给工作空间起个名字");
       const created = await api.workspaceCreate(trimmed, subset);
-      for (const ctx of pickedFolders) {
-        await api
-          .workspaceItemAdd(created.id, "folder", ctx.target, ctx.displayName)
-          .catch(() => undefined);
-      }
+      await applyDetectedContext(created.id);
       return {
         id: created.id,
         name: created.name,

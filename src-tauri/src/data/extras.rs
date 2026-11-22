@@ -287,7 +287,7 @@ pub fn run_hook_command(cmd: &str) {
         .spawn();
 }
 
-/// 内联编辑已有资源项（文件 / 文件夹 / 网址）的名称或目标地址
+/// 内联编辑已有资源项（文件 / 文件夹 / 网址）的名称或目标地址（含 URL 协议校验与重复检测）
 pub async fn update_resource_item(
     db: &Db,
     workspace_id: &str,
@@ -299,29 +299,66 @@ pub async fn update_resource_item(
     if clean_target.is_empty() {
         return Err(AppError::msg("目标路径或网址不能为空"));
     }
+
+    let row = sqlx::query(
+        "SELECT item_type FROM workspace_items
+         WHERE id = ? AND workspace_id = ? AND item_type IN ('file', 'folder', 'url')",
+    )
+    .bind(item_id)
+    .bind(workspace_id)
+    .fetch_optional(&db.pool)
+    .await?;
+    let Some(r) = row else {
+        return Err(AppError::msg("未找到可编辑的资源项"));
+    };
+    let item_type: String = r.get("item_type");
+
+    let final_target = if item_type == "url" {
+        let lower = clean_target.to_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err(AppError::msg("网址必须以 http:// 或 https:// 开头"));
+        }
+        clean_target.to_string()
+    } else {
+        clean_target.to_string()
+    };
+
     let clean_name = display_name.trim();
     let final_name = if clean_name.is_empty() {
-        clean_target
+        final_target.as_str()
     } else {
         clean_name
     };
     let now = now_ms();
+
     let res = sqlx::query(
         "UPDATE workspace_items
          SET display_name = ?, target = ?, identity_key = ?, updated_at = ?
-         WHERE id = ? AND workspace_id = ? AND item_type IN ('file', 'folder', 'url')",
+         WHERE id = ? AND workspace_id = ? AND item_type = ?",
     )
     .bind(final_name)
-    .bind(clean_target)
-    .bind(clean_target.to_lowercase())
+    .bind(&final_target)
+    .bind(final_target.to_lowercase())
     .bind(now)
     .bind(item_id)
     .bind(workspace_id)
+    .bind(&item_type)
     .execute(&db.pool)
-    .await?;
+    .await;
 
-    if res.rows_affected() == 0 {
-        return Err(AppError::msg("未找到可编辑的资源项"));
+    match res {
+        Ok(done) if done.rows_affected() > 0 => {
+            let _ = sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(workspace_id)
+                .execute(&db.pool)
+                .await;
+            Ok(())
+        }
+        Ok(_) => Err(AppError::msg("未找到可编辑的资源项")),
+        Err(e) if e.to_string().contains("UNIQUE") => {
+            Err(AppError::msg("该目标已存在于当前工作空间的资源列表中"))
+        }
+        Err(e) => Err(e.into()),
     }
-    Ok(())
 }

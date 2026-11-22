@@ -72,7 +72,8 @@ pub fn frame_inset(hwnd: HWND) -> (i32, i32, i32, i32) {
         return (0, 0, 0, 0);
     }
     let mut raw: RECT = unsafe { std::mem::zeroed() };
-    if unsafe { GetWindowRect(hwnd, &mut raw) } == 0 {
+    let ok = unsafe { super::dpi::with_pmv2_context(|| GetWindowRect(hwnd, &mut raw) != 0) };
+    if !ok {
         return (0, 0, 0, 0);
     }
     let Some(ext) = extended_frame_bounds(hwnd) else {
@@ -242,6 +243,17 @@ pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
 /// showCmd 与 rcNormalPosition，最后写回。反过来的话 GetWindowPlacement
 /// 会把 showCmd 覆盖成窗口当前状态，最大化永远不会生效（评审补充意见 D1）。
 pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowState) -> bool {
+    // 普通窗口直接走屏幕坐标：先还原非最大化/非最小化状态，再用 SetWindowPos + 实时 DWM 隐形边框补偿，
+    // 彻底避开 SetWindowPlacement.rcNormalPosition 在顶部/左侧任务栏下的工作区坐标偏移问题。
+    if state == ShowState::Normal {
+        if is_zoomed(hwnd) || is_iconic(hwnd) {
+            unsafe {
+                ShowWindow(hwnd, SW_SHOWNORMAL);
+            }
+        }
+        return set_window_rect(hwnd, x, y, w, h);
+    }
+
     let mut wp: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
     wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
 
@@ -249,22 +261,16 @@ pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowSt
         GetWindowPlacement(hwnd, &mut wp);
     }
 
-    let (cx, cy, cw, ch) = if state == ShowState::Normal {
-        compensate_visual_rect(hwnd, x, y, w, h)
-    } else {
-        (x, y, w, h)
-    };
-
     wp.showCmd = match state {
         ShowState::Maximized => SW_SHOWMAXIMIZED as u32,
         ShowState::Minimized => SW_SHOWMINNOACTIVE as u32,
         ShowState::Normal => SW_SHOWNORMAL as u32,
     };
     wp.rcNormalPosition = RECT {
-        left: cx,
-        top: cy,
-        right: cx + cw,
-        bottom: cy + ch,
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
     };
 
     unsafe {

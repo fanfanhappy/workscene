@@ -123,9 +123,21 @@ export function OverviewPage() {
     return m;
   }, [workspaces.data]);
 
-  const wsIconPaths = useMemo(
-    () => (workspaces.data ?? []).slice(0, 6).flatMap((w) => w.appPaths ?? []),
+  const recentWorkspaces = useMemo(
+    () =>
+      (workspaces.data ?? [])
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.lastRestoredAt ?? b.updatedAt) - (a.lastRestoredAt ?? a.updatedAt),
+        )
+        .slice(0, 6),
     [workspaces.data],
+  );
+
+  const wsIconPaths = useMemo(
+    () => recentWorkspaces.flatMap((w) => w.appPaths ?? []),
+    [recentWorkspaces],
   );
   const appIcons = useAppIcons(wsIconPaths);
 
@@ -327,14 +339,7 @@ export function OverviewPage() {
             />
           ) : (
             <div className="grid gap-2.5 sm:grid-cols-2">
-              {(workspaces.data ?? [])
-                .slice()
-                .sort(
-                  (a, b) =>
-                    (b.lastRestoredAt ?? b.updatedAt) - (a.lastRestoredAt ?? a.updatedAt),
-                )
-                .slice(0, 6)
-                .map((w) => (
+              {recentWorkspaces.map((w) => (
                 <Card
                   key={w.id}
                   interactive

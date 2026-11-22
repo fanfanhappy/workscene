@@ -112,6 +112,8 @@ export function SettingsPage() {
     queryFn: api.getAppInfo,
     staleTime: 60_000,
   });
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
   // 汇总用户工作空间 + 当前桌面实际用到的软件，用于真实展示适配状态与一键忽略
   const knownApps = useMemo(() => {
@@ -584,8 +586,10 @@ export function SettingsPage() {
                     const date = new Date().toISOString().slice(0, 10);
                     a.href = url;
                     a.download = `WorkScene-backup-${date}.json`;
+                    document.body.appendChild(a);
                     a.click();
-                    URL.revokeObjectURL(url);
+                    a.remove();
+                    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
                     toast.success("全量备份已导出", `已下载 WorkScene-backup-${date}.json`);
                   } catch (e) {
                     toast.danger("导出备份失败", String((e as Error).message));
@@ -801,7 +805,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "1.1.0"}
+              WorkScene v{info.data?.version ?? "1.1.1"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -815,7 +819,9 @@ export function SettingsPage() {
             <Button
               size="sm"
               variant="secondary"
+              disabled={checkingUpdate}
               onClick={async () => {
+                setCheckingUpdate(true);
                 try {
                   const res = await fetch(
                     "https://api.github.com/repos/fanfanhappy/workscene/releases/latest",
@@ -823,25 +829,50 @@ export function SettingsPage() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const data = (await res.json()) as { tag_name?: string; html_url?: string };
                   const latest = (data.tag_name ?? "").replace(/^v/i, "");
-                  const current = (info.data?.version ?? "1.1.0").replace(/^v/i, "");
-                  if (!latest || latest === current) {
+                  const current = (info.data?.version ?? "1.1.1").replace(/^v/i, "");
+                  const toParts = (v: string) =>
+                    v.split(".").map((n) => Number.parseInt(n, 10) || 0);
+                  const a = toParts(latest);
+                  const b = toParts(current);
+                  let cmp = 0;
+                  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                    if ((a[i] ?? 0) !== (b[i] ?? 0)) {
+                      cmp = (a[i] ?? 0) - (b[i] ?? 0);
+                      break;
+                    }
+                  }
+                  if (!latest || cmp <= 0) {
+                    setUpdateInfo(null);
                     toast.success("已是最新版本", `当前版本 v${current}`);
                   } else {
-                    toast.info(
-                      `发现新版本 v${latest}`,
-                      `请前往 github.com/fanfanhappy/workscene/releases 下载更新`,
-                    );
+                    const url =
+                      data.html_url || "https://github.com/fanfanhappy/workscene/releases/latest";
+                    setUpdateInfo({ version: latest, url });
+                    toast.info(`发现新版本 v${latest}`, "点击下方链接可前往 GitHub 下载");
                   }
                 } catch {
                   toast.warning(
                     "检查更新失败",
                     "请检查网络或直接访问 github.com/fanfanhappy/workscene/releases",
                   );
+                } finally {
+                  setCheckingUpdate(false);
                 }
               }}
             >
-              <RefreshCw size={13} /> 检查新版本
+              <RefreshCw size={13} className={checkingUpdate ? "animate-spin" : ""} />
+              {checkingUpdate ? "检查中…" : "检查新版本"}
             </Button>
+            {updateInfo ? (
+              <a
+                href={updateInfo.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded-[7px] border border-accent/40 bg-accent/10 px-2.5 py-1 text-aux font-medium text-accent hover:bg-accent/15"
+              >
+                下载 v{updateInfo.version} ↗
+              </a>
+            ) : null}
             <Button
               size="sm"
               variant="secondary"

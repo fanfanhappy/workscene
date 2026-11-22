@@ -53,7 +53,11 @@ fn parse_delay_ms(adapter_config_json: Option<&str>) -> i64 {
     };
     serde_json::from_str::<serde_json::Value>(raw)
         .ok()
-        .and_then(|v| v.get("delayMs").and_then(|d| d.as_i64()))
+        .and_then(|v| {
+            v.get("delayMs")
+                .or_else(|| v.get("launchDelayMs"))
+                .and_then(|d| d.as_i64())
+        })
         .unwrap_or(0)
         .clamp(0, 15_000)
 }
@@ -1353,11 +1357,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
 
         if item.item_type == "application" {
             app_count += 1;
-            let adapter_json = if item.launch_delay_ms > 0 {
-                Some(serde_json::json!({ "launchDelayMs": item.launch_delay_ms }).to_string())
-            } else {
-                None
-            };
+            let adapter_json = encode_delay_ms(item.launch_delay_ms);
             sqlx::query(
                 "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
                  VALUES (?, ?, ?, ?, 8000)",
@@ -1806,11 +1806,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         .execute(&mut *tx)
         .await?;
 
-        let adapter_json = if app.launch_delay_ms > 0 {
-            Some(serde_json::json!({ "launchDelayMs": app.launch_delay_ms }).to_string())
-        } else {
-            None
-        };
+        let adapter_json = encode_delay_ms(app.launch_delay_ms);
         sqlx::query(
             "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
              VALUES (?, ?, NULL, ?, 8000)",
@@ -1858,6 +1854,18 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
             r.display_name.trim().to_string()
         };
 
+        // 安全校验：外部导入的 file/folder 资源若指向 UNC 网络共享或可执行脚本/程序，默认停用
+        let lower_target = target.to_lowercase();
+        let risky_resource = r.item_type != "url"
+            && (lower_target.starts_with(r"\\")
+                || lower_target.starts_with("//")
+                || [
+                    ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi", ".lnk", ".scr", ".com",
+                ]
+                .iter()
+                .any(|ext| lower_target.ends_with(ext)));
+        let res_enabled = r.enabled && !risky_resource;
+
         sqlx::query(
             "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
                 identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
@@ -1870,7 +1878,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         .bind(target.to_lowercase())
         .bind(target)
         .bind(&r.item_type)
-        .bind(if r.enabled { 1 } else { 0 })
+        .bind(if res_enabled { 1 } else { 0 })
         .bind(app_count + res_count)
         .bind(now)
         .bind(now)
@@ -2062,11 +2070,7 @@ pub async fn recapture(
         .execute(&mut *tx)
         .await?;
 
-        let adapter_json = if delay_ms > 0 {
-            Some(serde_json::json!({ "launchDelayMs": delay_ms }).to_string())
-        } else {
-            None
-        };
+        let adapter_json = encode_delay_ms(delay_ms);
         sqlx::query(
             "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
              VALUES (?, ?, ?, ?, 8000)",
@@ -2354,11 +2358,7 @@ pub async fn create_from_scene(
         .execute(&mut *tx)
         .await?;
 
-        let adapter_json = if w.launch_delay_ms > 0 {
-            Some(serde_json::json!({ "launchDelayMs": w.launch_delay_ms }).to_string())
-        } else {
-            None
-        };
+        let adapter_json = encode_delay_ms(w.launch_delay_ms as i64);
         sqlx::query(
             "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
              VALUES (?, ?, ?, ?, 8000)",

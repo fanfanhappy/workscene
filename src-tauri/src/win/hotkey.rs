@@ -82,13 +82,15 @@ static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 /// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入零轮询阻塞消息循环
 pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: bool) {
     let (tx, rx) = channel::<HotkeyRequest>();
+    let (ready_tx, ready_rx) = sync_channel::<()>(0);
     let _ = SENDER.set(Mutex::new(tx));
 
     std::thread::spawn(move || unsafe {
-        // 强制初始化当前线程消息队列，再公开 thread id 供 PostThreadMessageW 立即唤醒
+        // 强制初始化当前线程消息队列，再公开 thread id 并通知主线程就绪，消除启动竞态
         let mut init_msg: MSG = std::mem::zeroed();
         PeekMessageW(&mut init_msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
         THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
+        let _ = ready_tx.send(());
 
         let mut current_main = register(initial);
         let mut current_slots = if workspace_slots {
@@ -142,6 +144,7 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
             }
         }
     });
+    let _ = ready_rx.recv_timeout(std::time::Duration::from_millis(500));
 }
 
 /// 运行中切换快捷键配置（设置页调用）：通过 PostThreadMessageW 立即唤醒阻塞线程并返回真实 RegisterHotKey 结果

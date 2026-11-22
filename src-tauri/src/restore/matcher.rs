@@ -83,8 +83,11 @@ pub fn score_window(
 ) -> f64 {
     let mut score = 0.0;
 
-    match (norm_path(&target.process_path), norm_path(&cand.process_path)) {
-        (Some(a), Some(b)) if a == b => score += 0.55,
+    let exact_path = match (norm_path(&target.process_path), norm_path(&cand.process_path)) {
+        (Some(a), Some(b)) if a == b => {
+            score += 0.55;
+            true
+        }
         _ => {
             // 路径不可读（受保护进程）时退化为进程名匹配，权重明显更低
             if !target.process_name.is_empty()
@@ -92,10 +95,16 @@ pub fn score_window(
             {
                 score += 0.22;
             }
+            false
         }
-    }
+    };
 
-    if target.class_name == cand.class_name && !target.class_name.is_empty() {
+    if !target.class_name.is_empty() {
+        if target.class_name == cand.class_name {
+            score += 0.25;
+        }
+    } else if exact_path {
+        // 手动添加的 .exe 应用尚未捕获过 class_name：在进程路径 100% 精确一致时允许直接匹配排版
         score += 0.25;
     }
 

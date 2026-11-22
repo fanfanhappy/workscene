@@ -85,7 +85,7 @@ export function Card({
         padded ? "p-3.5" : ""
       } ${
         interactive
-          ? "cursor-pointer transition-all duration-150 hover:border-line-strong hover:bg-surface/95 active:scale-[0.995]"
+          ? "apple-card-interactive cursor-pointer transition-[border-color,box-shadow,transform] duration-150 hover:border-line-strong active:scale-[0.995]"
           : ""
       } ${className}`}
     >
@@ -189,7 +189,7 @@ export function SectionTitle({
   action?: ReactNode;
 }) {
   return (
-    <div className="mb-2 flex items-end justify-between gap-3">
+    <div className="mb-2 flex min-h-[26px] items-center justify-between gap-3">
       <div className="min-w-0">
         <h2 className="text-card font-semibold tracking-tight text-ink">{title}</h2>
         {hint ? <p className="mt-0.5 text-[11px] text-ink-3">{hint}</p> : null}
@@ -417,7 +417,7 @@ export function Dialog({
 
   const content = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+      className="animate-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

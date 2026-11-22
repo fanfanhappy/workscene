@@ -117,6 +117,7 @@ export function WorkspacesPage() {
   const [metaDesc, setMetaDesc] = useState("");
   const [metaAutoSnap, setMetaAutoSnap] = useState(true);
   const [metaColor, setMetaColor] = useState<string | null>(null);
+  const [metaHotkeySlot, setMetaHotkeySlot] = useState<number | null>(null);
 
   const [dupOpen, setDupOpen] = useState(false);
   const [dupName, setDupName] = useState("");
@@ -166,6 +167,13 @@ export function WorkspacesPage() {
   useEffect(() => {
     if (detail.data) setDraft(detail.data.windows);
   }, [detail.data]);
+
+  useEffect(() => {
+    if (metaOpen && detail.data) {
+      const slot = (list.data ?? []).find((w) => w.id === detail.data!.id)?.hotkeySlot ?? null;
+      setMetaHotkeySlot(slot);
+    }
+  }, [metaOpen, detail.data, list.data]);
 
   const layoutDirty = useMemo(() => {
     if (!detail.data) return false;
@@ -265,14 +273,20 @@ export function WorkspacesPage() {
   });
 
   const updateMeta = useMutation({
-    mutationFn: () =>
-      api.workspaceUpdateMeta(
-        detail.data!.id,
+    mutationFn: async () => {
+      const id = detail.data!.id;
+      await api.workspaceUpdateMeta(
+        id,
         metaName.trim(),
         metaDesc.trim() || null,
         metaAutoSnap,
         metaColor,
-      ),
+      );
+      const currentSlot = (list.data ?? []).find((w) => w.id === id)?.hotkeySlot ?? null;
+      if (currentSlot !== metaHotkeySlot) {
+        await api.workspaceSetHotkeySlot(id, metaHotkeySlot);
+      }
+    },
     onSuccess: () => {
       const id = detail.data?.id;
       const nextName = metaName.trim();
@@ -1108,7 +1122,10 @@ export function WorkspacesPage() {
                   onSave={() => saveLayout.mutate()}
                   saving={saveLayout.isPending}
                 />
-                <DisplayProfilesBar workspaceId={detail.data.id} />
+                <DisplayProfilesBar
+                  workspaceId={detail.data.id}
+                  onBeforeSave={layoutDirty ? () => saveLayout.mutateAsync() : undefined}
+                />
               </div>
             ) : (
               <Card className="flex items-center gap-2 text-aux text-ink-3">
@@ -1221,7 +1238,7 @@ export function WorkspacesPage() {
                 }}
                 onError={setError}
               />
-              <WorkspaceHooksCard workspaceId={detail.data.id} />
+              <WorkspaceHooksCard key={detail.data.id} workspaceId={detail.data.id} />
             </div>
           ) : null}
         </>
@@ -1304,22 +1321,8 @@ export function WorkspacesPage() {
               </p>
             </div>
             <select
-              value={
-                (list.data ?? []).find((w) => w.id === detail.data?.id)?.hotkeySlot ?? ""
-              }
-              onChange={(e) => {
-                if (!detail.data) return;
-                const val = e.target.value ? Number(e.target.value) : null;
-                api
-                  .workspaceSetHotkeySlot(detail.data.id, val)
-                  .then(() => {
-                    qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
-                    toast.success(
-                      val ? `已绑定快捷键 Ctrl+Alt+${val}` : "已取消快捷键绑定",
-                    );
-                  })
-                  .catch((err) => toast.danger("绑定失败", String((err as Error).message)));
-              }}
+              value={metaHotkeySlot ?? ""}
+              onChange={(e) => setMetaHotkeySlot(e.target.value ? Number(e.target.value) : null)}
               className="h-8 rounded-[7px] border border-line-strong bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
             >
               <option value="">不绑定</option>
@@ -1569,6 +1572,13 @@ function ResourcesCard({
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchTab, setBatchTab] = useState<"paste" | "bookmarks">("paste");
   const [batchText, setBatchText] = useState("");
+  const [editingRes, setEditingRes] = useState<{
+    id: string;
+    itemType: string;
+    name: string;
+    target: string;
+  } | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
 
   const bookmarks = useQuery({
     queryKey: ["browser-bookmarks"],
@@ -1881,24 +1891,14 @@ function ResourcesCard({
                 <Button
                   size="xs"
                   variant="ghost"
-                  onClick={async () => {
-                    const nextTarget = window.prompt("修改路径或网址：", it.target ?? "");
-                    if (nextTarget === null || !nextTarget.trim()) return;
-                    const nextName =
-                      window.prompt("修改显示名称：", it.displayName) ?? it.displayName;
-                    try {
-                      await api.workspaceResourceUpdate(
-                        workspaceId,
-                        it.id,
-                        nextName.trim() || it.displayName,
-                        nextTarget.trim(),
-                      );
-                      onChanged();
-                      toast.success("已更新资源项");
-                    } catch (e) {
-                      toast.danger("更新失败", String((e as Error).message));
-                    }
-                  }}
+                  onClick={() =>
+                    setEditingRes({
+                      id: it.id,
+                      itemType: it.itemType,
+                      name: it.displayName,
+                      target: it.target ?? "",
+                    })
+                  }
                   title="编辑"
                   className="text-ink-3 hover:text-accent"
                 >
@@ -1927,12 +1927,92 @@ function ResourcesCard({
           })}
         </ul>
       )}
+
+      <Dialog
+        open={Boolean(editingRes)}
+        onClose={() => setEditingRes(null)}
+        title="编辑资源项"
+        maxWidth="max-w-md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setEditingRes(null)}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              disabled={editSaving || !editingRes?.target.trim()}
+              onClick={async () => {
+                if (!editingRes) return;
+                let target = editingRes.target.trim();
+                if (editingRes.itemType === "url") {
+                  if (!/^https?:\/\//i.test(target)) target = `https://${target}`;
+                  try {
+                    new URL(target);
+                  } catch {
+                    toast.danger("网址格式无效", "请输入正确的网址，例如 https://github.com");
+                    return;
+                  }
+                }
+                setEditSaving(true);
+                try {
+                  await api.workspaceResourceUpdate(
+                    workspaceId,
+                    editingRes.id,
+                    editingRes.name.trim() || target,
+                    target,
+                  );
+                  setEditingRes(null);
+                  onChanged();
+                  toast.success("已更新资源项");
+                } catch (e) {
+                  toast.danger("更新失败", String((e as Error).message));
+                } finally {
+                  setEditSaving(false);
+                }
+              }}
+            >
+              {editSaving ? <Spinner /> : null}
+              保存
+            </Button>
+          </>
+        }
+      >
+        {editingRes ? (
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-aux font-medium text-ink">显示名称</span>
+              <input
+                value={editingRes.name}
+                onChange={(e) => setEditingRes({ ...editingRes, name: e.target.value })}
+                className="h-9 rounded-[8px] border border-line-strong bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-aux font-medium text-ink">
+                {editingRes.itemType === "url" ? "网址 (URL)" : "本机路径"}
+              </span>
+              <input
+                autoFocus
+                value={editingRes.target}
+                onChange={(e) => setEditingRes({ ...editingRes, target: e.target.value })}
+                className="h-9 rounded-[8px] border border-line-strong bg-canvas px-3 font-mono text-aux text-ink outline-none focus:border-accent"
+              />
+            </label>
+          </div>
+        ) : null}
+      </Dialog>
     </Card>
   );
 }
 
 /** 多屏幕拓扑布局方案条：按不同屏幕组合保存/管理专属窗口排布 */
-function DisplayProfilesBar({ workspaceId }: { workspaceId: string }) {
+function DisplayProfilesBar({
+  workspaceId,
+  onBeforeSave,
+}: {
+  workspaceId: string;
+  onBeforeSave?: () => Promise<unknown>;
+}) {
   const qc = useQueryClient();
   const profiles = useQuery({
     queryKey: ["ws-profiles", workspaceId],
@@ -1940,7 +2020,12 @@ function DisplayProfilesBar({ workspaceId }: { workspaceId: string }) {
   });
 
   const saveProfile = useMutation({
-    mutationFn: () => api.workspaceProfileSave(workspaceId),
+    mutationFn: async () => {
+      if (onBeforeSave) {
+        await onBeforeSave();
+      }
+      return api.workspaceProfileSave(workspaceId);
+    },
     onSuccess: (p) => {
       qc.invalidateQueries({ queryKey: ["ws-profiles", workspaceId] });
       toast.success("已保存当前屏幕组合布局", `${p.label}（${p.windowCount} 窗口）`);
@@ -1991,8 +2076,17 @@ function DisplayProfilesBar({ workspaceId }: { workspaceId: string }) {
               {p.isCurrent ? <Badge tone="accent">当前匹配</Badge> : null}
               <button
                 type="button"
-                onClick={() => deleteProfile.mutate(p.displaySignature)}
-                className="ml-0.5 cursor-pointer text-ink-3 hover:text-danger"
+                disabled={deleteProfile.isPending}
+                onClick={async () => {
+                  const ok = await confirmAction({
+                    title: `删除屏幕布局方案「${p.label}」？`,
+                    description: "删除后将回退使用工作空间默认布局。",
+                    confirmLabel: "删除",
+                    variant: "danger",
+                  });
+                  if (ok) deleteProfile.mutate(p.displaySignature);
+                }}
+                className="ml-0.5 cursor-pointer text-ink-3 hover:text-danger disabled:opacity-40"
                 title="删除此屏幕方案"
               >
                 <Trash2 size={11} />
@@ -2026,12 +2120,15 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
   }, [hooksQuery.data]);
 
   const saveHooks = useMutation({
-    mutationFn: () =>
-      api.workspaceHooksSet(workspaceId, {
-        enabled,
-        preRestoreCmd: preCmd,
-        postCloseCmd: postCmd,
-      }),
+    mutationFn: (override?: { enabled: boolean; preRestoreCmd: string; postCloseCmd: string }) =>
+      api.workspaceHooksSet(
+        workspaceId,
+        override ?? {
+          enabled,
+          preRestoreCmd: preCmd,
+          postCloseCmd: postCmd,
+        },
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["ws-hooks", workspaceId] });
       toast.success("自动化钩子已保存");
@@ -2048,7 +2145,17 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
             可选在「一键恢复前」或「一键收工后」静默运行本机命令（如启动本地服务、切换环境），默认关闭
           </p>
         </div>
-        <Switch checked={enabled} onChange={setEnabled} ariaLabel="启用生命周期钩子" />
+        <Switch
+          checked={enabled}
+          disabled={saveHooks.isPending}
+          onChange={(next) => {
+            setEnabled(next);
+            if (!next && hooksQuery.data?.enabled) {
+              saveHooks.mutate({ enabled: false, preRestoreCmd: preCmd, postCloseCmd: postCmd });
+            }
+          }}
+          ariaLabel="启用生命周期钩子"
+        />
       </div>
       {enabled ? (
         <div className="flex flex-col gap-2.5 border-t border-line pt-2.5">
@@ -2075,21 +2182,13 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
               size="xs"
               variant="primary"
               disabled={saveHooks.isPending}
-              onClick={() => saveHooks.mutate()}
+              onClick={() => saveHooks.mutate(undefined)}
             >
               保存钩子配置
             </Button>
           </div>
         </div>
-      ) : (
-        hooksQuery.data?.enabled ? (
-          <div className="flex justify-end">
-            <Button size="xs" variant="secondary" onClick={() => saveHooks.mutate()}>
-              确认关闭
-            </Button>
-          </div>
-        ) : null
-      )}
+      ) : null}
     </Card>
   );
 }

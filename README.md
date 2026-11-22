@@ -2,7 +2,7 @@
 
 Windows 10/11 本地优先桌面工作现场管理器：把你常用的软件、窗口摆法、显示器配置、文件/文件夹与网页打包成「工作空间」，随时一键切换整套桌面现场。
 
-## 核心亮点（v1.1.0 正式版）
+## 核心亮点（v1.1.1 正式版）
 
 - **毫秒级现场捕获**：自动识别正常、最大化与最小化窗口（含 Chrome / Edge 等浏览器），支持真实 `.exe` 软件图标展示与全局捕获忽略名单。
 - **可视化画布与一键排布**：拖拽微调窗口位置与尺寸、跨显示器比例换算、支持 **左右平分 / 左大右小 / 三列均分 / 四宫格 / 居中叠放** 快捷排版、`Ctrl+Z/Y` 撤销重做与 `Ctrl+S` 保存。
@@ -15,16 +15,16 @@ Windows 10/11 本地优先桌面工作现场管理器：把你常用的软件、
 
 前往 [Releases](https://github.com/fanfanhappy/workscene/releases) 下载：
 
-- **安装版**：`WorkScene_1.1.0_x64-setup.exe`（NSIS 当前用户安装，无需管理员权限）
-- **便携版**：`WorkScene-1.1.0-portable.zip`（解压后双击 `start.cmd` 即可运行，数据存同目录 `data/`）
+- **安装版**：`WorkScene_1.1.1_x64-setup.exe`（NSIS 当前用户安装，无需管理员权限）
+- **便携版**：`WorkScene-1.1.1-portable.zip`（解压后双击 `start.cmd` 即可运行，数据存同目录 `data/`）
 
-> 提示：v1.1.0 尚未进行代码签名，首次运行如遇 Windows SmartScreen 拦截，点击「更多信息 → 仍要运行」即可。
+> 提示：v1.1.1 尚未进行代码签名，首次运行如遇 Windows SmartScreen 拦截，点击「更多信息 → 仍要运行」即可。
 
 ## 技术栈
 
 Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4 · TanStack Query · Zustand · Rust（`windows-sys` / Win32）· SQLite（SQLx WAL）
 
-## 状态：v1.1.0 正式发布
+## 状态：v1.1.1 正式发布
 
 - 发布说明与已知限制：`docs/RELEASE.md`
 - 工程验证：Rust **71 项单元测试全通过** + 前端 `tsc --noEmit` / `vite build` 0 警告（路由级代码分割，主包 382 KB）
