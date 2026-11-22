@@ -1,0 +1,113 @@
+name: Release WorkScene
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Build Tauri application and NSIS installer
+        run: pnpm tauri build
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $ver = $tag.TrimStart('v')
+          $stage = "dist-portable/WorkScene-$ver-portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "src-tauri/target/release/workscene.exe" "$stage/WorkScene.exe"
+
+          @(
+            "@echo off",
+            "cd /d `"%~dp0`"",
+            "start `"`" `"WorkScene.exe`""
+          ) | Set-Content -Path "$stage/start.cmd" -Encoding ASCII
+
+          @(
+            "WorkScene $tag 绿色便携版",
+            "",
+            "使用方式：",
+            "1. 直接双击 WorkScene.exe（或 start.cmd）即可运行，无需安装。",
+            "2. 所有数据均保存在当前用户目录（%APPDATA%\WorkScene），完全本地离线。",
+            "3. 如 Windows SmartScreen 提示未知发布者，点击「更多信息」->「仍要运行」即可。"
+          ) | Set-Content -Path "$stage/启动说明.txt" -Encoding UTF8
+
+          $zipPath = "dist-portable/WorkScene-$ver-portable.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -CompressionLevel Optimal
+
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          echo "RELEASE_VER=$ver" >> $env:GITHUB_ENV
+          echo "PORTABLE_ZIP=$zipPath" >> $env:GITHUB_ENV
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $ver = $env:RELEASE_VER
+          $nsis = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
+          $zip = (Resolve-Path $env:PORTABLE_ZIP).Path
+
+          if (-not $nsis) {
+            throw "NSIS installer not found under src-tauri/target/release/bundle/nsis/"
+          }
+
+          $exists = $true
+          try {
+            gh release view $tag *> $null
+          } catch {
+            $exists = $false
+          }
+          if ($LASTEXITCODE -ne 0) { $exists = $false }
+
+          if ($exists) {
+            gh release upload $tag $nsis $zip --clobber
+          } else {
+            gh release create $tag $nsis $zip `
+              --title "WorkScene $tag" `
+              --notes-file "docs/RELEASE.md"
+          }
