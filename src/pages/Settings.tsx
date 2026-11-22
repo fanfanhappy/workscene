@@ -801,7 +801,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "0.1.0"}
+              WorkScene v{info.data?.version ?? "1.0.0"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>

@@ -275,7 +275,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           ) : (
             <p className="px-2.5 font-mono text-[10px] text-ink-3">
-              v{info.data?.version ?? "0.1.0"} · 本地离线优先
+              v{info.data?.version ?? "1.0.0"} · 本地离线优先
             </p>
           )}
         </div>

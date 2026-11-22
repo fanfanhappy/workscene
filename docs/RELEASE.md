@@ -1,7 +1,7 @@
-# WorkScene v0.1.0 发布说明
+# WorkScene v1.0.0 正式版发布说明
 
 - 日期：2026-11-22
-- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_0.1.0_x64-setup.exe` 与免安装便携版 `WorkScene-0.1.0-portable.zip`）
+- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.0.0_x64-setup.exe` 与免安装便携版 `WorkScene-1.0.0-portable.zip`）
 - 数据：100% 本地离线（`%LOCALAPPDATA%\WorkScene` 或便携目录 `data\`），无遥测、无云同步、不截屏、不读取浏览器密码/Cookie
 
 ## 交付内容
