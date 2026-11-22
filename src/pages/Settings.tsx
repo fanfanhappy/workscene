@@ -801,7 +801,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "1.0.0"}
+              WorkScene v{info.data?.version ?? "1.1.0"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -812,6 +812,36 @@ export function SettingsPage() {
             <li>· 能力边界：不支持 UWP 打包应用窗口恢复；不读取浏览器密码/Cookie 或应用内存缓冲区。</li>
           </ul>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  const res = await fetch(
+                    "https://api.github.com/repos/fanfanhappy/workscene/releases/latest",
+                  );
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                  const data = (await res.json()) as { tag_name?: string; html_url?: string };
+                  const latest = (data.tag_name ?? "").replace(/^v/i, "");
+                  const current = (info.data?.version ?? "1.1.0").replace(/^v/i, "");
+                  if (!latest || latest === current) {
+                    toast.success("已是最新版本", `当前版本 v${current}`);
+                  } else {
+                    toast.info(
+                      `发现新版本 v${latest}`,
+                      `请前往 github.com/fanfanhappy/workscene/releases 下载更新`,
+                    );
+                  }
+                } catch {
+                  toast.warning(
+                    "检查更新失败",
+                    "请检查网络或直接访问 github.com/fanfanhappy/workscene/releases",
+                  );
+                }
+              }}
+            >
+              <RefreshCw size={13} /> 检查新版本
+            </Button>
             <Button
               size="sm"
               variant="secondary"

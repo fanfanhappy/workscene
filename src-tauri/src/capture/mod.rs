@@ -1,3 +1,5 @@
+pub mod context;
+
 use crate::core::models::{
     CaptureResult, DisplayInfo, ExcludedWindow, ShowState, WindowInfo,
 };
@@ -110,7 +112,8 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         let effective = if raw.show_state != ShowState::Normal && restored_valid {
             raw.restored_rect
         } else {
-            raw.rect
+            // 普通窗口优先用 DWM 真实可见边界，消除 Win10/11 约 7px 透明阴影边框导致的贴边缝隙
+            window::extended_frame_bounds(raw.hwnd).unwrap_or(raw.rect)
         };
 
         let mon = display::monitor_for_rect(&effective, &monitors);

@@ -105,6 +105,13 @@ export function MonitorCanvas({
             const isSel = w.hwnd === selectedHwnd;
             const isHover = w.hwnd === hoveredHwnd;
             const highlighted = isSel || isHover;
+            const rw = Math.max(40, w.width);
+            const rh = Math.max(30, w.height);
+            const labelFont = Math.max(24, Math.min(vbW / 54, rh * 0.24));
+            const appLabel = (w.processName || w.title || "窗口").replace(/\.exe$/i, "");
+            const stateTag = w.isMaximized ? " [全屏]" : w.isMinimized ? " [最小化]" : "";
+            const showLabel = rw >= labelFont * 3.5 && rh >= labelFont * 1.8;
+            const clipId = `mc-win-${i}-${w.hwnd}`;
             return (
               <g
                 key={`${w.hwnd}-${i}`}
@@ -113,20 +120,40 @@ export function MonitorCanvas({
                 onClick={() => onSelectWindow?.(w)}
                 className={onSelectWindow ? "cursor-pointer" : undefined}
               >
+                <defs>
+                  <clipPath id={clipId}>
+                    <rect x={w.x} y={w.y} width={rw} height={rh} rx={vbW / 320} />
+                  </clipPath>
+                </defs>
                 <rect
                   x={w.x}
                   y={w.y}
-                  width={Math.max(40, w.width)}
-                  height={Math.max(30, w.height)}
+                  width={rw}
+                  height={rh}
                   rx={vbW / 320}
                   fill="var(--color-accent)"
-                  fillOpacity={highlighted ? 0.34 : 0.13}
-                  stroke={highlighted ? "var(--color-accent)" : "var(--color-accent)"}
-                  strokeOpacity={highlighted ? 1 : 0.55}
-                  strokeWidth={highlighted ? vbW / 320 : vbW / 700}
+                  fillOpacity={highlighted ? 0.34 : 0.14}
+                  stroke="var(--color-accent)"
+                  strokeOpacity={highlighted ? 1 : 0.58}
+                  strokeWidth={highlighted ? vbW / 300 : vbW / 680}
                 >
                   <title>{`${w.title || w.processName} (${w.width}×${w.height})`}</title>
                 </rect>
+                {showLabel ? (
+                  <text
+                    x={w.x + labelFont * 0.65}
+                    y={w.y + labelFont * 1.35}
+                    clipPath={`url(#${clipId})`}
+                    fill={highlighted ? "var(--color-ink)" : "var(--color-ink-2)"}
+                    fontSize={labelFont}
+                    fontWeight={highlighted ? 600 : 500}
+                    fontFamily="var(--font-sans)"
+                    style={{ pointerEvents: "none" }}
+                  >
+                    {appLabel}
+                    {stateTag}
+                  </text>
+                ) : null}
               </g>
             );
           })}

@@ -4,10 +4,16 @@
 //! 所以改快捷键必须由持有消息循环的那个线程去 Unregister/Register，
 //! 设置页只能通过通道把"换成哪个组合"发过去。
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Mutex, OnceLock};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
-use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetMessageW, PeekMessageW, PostThreadMessageW, MSG, PM_NOREMOVE, WM_APP, WM_HOTKEY,
+};
+
+const WM_HOTKEY_RELOAD: u32 = WM_APP + 0x42;
 
 pub const HOTKEY_ID: i32 = 0x5753; // 'WS'
 pub const HOTKEY_WS_BASE: i32 = 0x5760; // Ctrl+Alt+1 .. Ctrl+Alt+9
@@ -71,13 +77,19 @@ struct HotkeyRequest {
 }
 
 static SENDER: OnceLock<Mutex<Sender<HotkeyRequest>>> = OnceLock::new();
+static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入消息循环
+/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入零轮询阻塞消息循环
 pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: bool) {
     let (tx, rx) = channel::<HotkeyRequest>();
     let _ = SENDER.set(Mutex::new(tx));
 
     std::thread::spawn(move || unsafe {
+        // 强制初始化当前线程消息队列，再公开 thread id 供 PostThreadMessageW 立即唤醒
+        let mut init_msg: MSG = std::mem::zeroed();
+        PeekMessageW(&mut init_msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
+
         let mut current_main = register(initial);
         let mut current_slots = if workspace_slots {
             register_ws_slots()
@@ -85,60 +97,54 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
             false
         };
 
-        loop {
-            while let Ok(req) = rx.try_recv() {
-                let next = req.config;
-                if current_main {
-                    unregister();
-                    current_main = false;
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_HOTKEY_RELOAD {
+                while let Ok(req) = rx.try_recv() {
+                    let next = req.config;
+                    if current_main {
+                        unregister();
+                        current_main = false;
+                    }
+                    let main_ok = match next.main_combo {
+                        Some(c) => {
+                            current_main = register(Some(c));
+                            current_main
+                        }
+                        None => true,
+                    };
+
+                    let mut slots_ok = true;
+                    if current_slots != next.workspace_slots {
+                        if current_slots {
+                            unregister_ws_slots();
+                            current_slots = false;
+                        } else {
+                            current_slots = register_ws_slots();
+                            slots_ok = current_slots;
+                        }
+                    }
+
+                    let _ = req.reply.send(main_ok && slots_ok);
                 }
-                let main_ok = match next.main_combo {
-                    Some(c) => {
-                        current_main = register(Some(c));
-                        current_main
-                    }
-                    None => true,
-                };
-
-                let mut slots_ok = true;
-                if current_slots != next.workspace_slots {
-                    if current_slots {
-                        unregister_ws_slots();
-                        current_slots = false;
-                    } else {
-                        current_slots = register_ws_slots();
-                        slots_ok = current_slots;
-                    }
-                }
-
-                let _ = req.reply.send(main_ok && slots_ok);
-            }
-
-            // 用 PeekMessage 而不是阻塞的 GetMessage，才能定期检查通道
-            let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_HOTKEY {
-                    let id = msg.wParam as i32;
-                    if id == HOTKEY_ID {
-                        crate::win::tray::show_main(&app);
-                    } else if (HOTKEY_WS_BASE..HOTKEY_WS_BASE + WS_HOTKEY_COUNT as i32).contains(&id)
-                    {
-                        // 槽位从 1 开始，与设置页显示的 Ctrl+Alt+1..9 对齐
-                        let slot = (id - HOTKEY_WS_BASE) as i64 + 1;
-                        let handle = app.clone();
-                        std::thread::spawn(move || {
-                            crate::win::tray::restore_workspace_by_slot(&handle, slot);
-                        });
-                    }
+            } else if msg.message == WM_HOTKEY {
+                let id = msg.wParam as i32;
+                if id == HOTKEY_ID {
+                    crate::win::tray::show_main(&app);
+                } else if (HOTKEY_WS_BASE..HOTKEY_WS_BASE + WS_HOTKEY_COUNT as i32).contains(&id)
+                {
+                    let slot = (id - HOTKEY_WS_BASE) as i64 + 1;
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        crate::win::tray::restore_workspace_by_slot(&handle, slot);
+                    });
                 }
             }
-
-            std::thread::sleep(std::time::Duration::from_millis(60));
         }
     });
 }
 
-/// 运行中切换快捷键配置（设置页调用）：同步等待热键线程返回真实 RegisterHotKey 结果
+/// 运行中切换快捷键配置（设置页调用）：通过 PostThreadMessageW 立即唤醒阻塞线程并返回真实 RegisterHotKey 结果
 pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
     let Some(tx) = SENDER.get() else {
         return false;
@@ -159,6 +165,12 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
         .unwrap_or(false);
     if !sent {
         return false;
+    }
+    let tid = THREAD_ID.load(Ordering::Acquire);
+    if tid != 0 {
+        unsafe {
+            PostThreadMessageW(tid, WM_HOTKEY_RELOAD, 0, 0);
+        }
     }
     reply_rx
         .recv_timeout(std::time::Duration::from_millis(800))

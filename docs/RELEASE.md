@@ -1,8 +1,17 @@
-# WorkScene v1.0.0 正式版发布说明
+# WorkScene v1.1.0 正式版发布说明
 
 - 日期：2026-11-22
-- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.0.0_x64-setup.exe` 与免安装便携版 `WorkScene-1.0.0-portable.zip`）
+- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.1.0_x64-setup.exe` 与免安装便携版 `WorkScene-1.1.0-portable.zip`）
 - 数据：100% 本地离线（`%LOCALAPPDATA%\WorkScene` 或便携目录 `data\`），无遥测、无云同步、不截屏、不读取浏览器密码/Cookie
+
+## v1.1.0 重磅升级
+
+- **真正的 L2 上下文自动捕获**：扫描桌面时自动识别已打开的 Windows 文件资源管理器文件夹路径，以及 VS Code / Cursor / Windsurf / Trae / Antigravity 当前打开的项目目录，勾选即可一键保存为工作空间资源。
+- **像素级 0px 贴边分屏**：引入 `DWMWA_EXTENDED_FRAME_BOUNDS` 隐形阴影边框自动补偿，消除 Win10/11 左右分屏与贴边留缝问题。
+- **多屏幕拓扑布局方案（Display Profiles）**：同一工作空间可为「单屏 / 双屏 / 扩展屏」分别保存独立窗口排布，恢复时按当前显示器组合自动匹配。
+- **生命周期钩子（进阶自动化）**：支持为工作空间可选配置「一键恢复前 / 一键收工后」本地命令（默认关闭），轻松联动本地开发服务或环境切换。
+- **零轮询热键线程 & 后台状态反馈**：全局快捷键线程升级为阻塞式 `GetMessageW` + `PostThreadMessageW`（0 轮询 CPU 唤醒，< 1ms 响应）；托盘恢复异常或繁忙时实时通知前端并更新托盘提示。
+- **画布与交互升级**：`MonitorCanvas` 缩略图直接展示软件名与全屏/最小化标识；编辑工作空间信息弹窗直接支持绑定 `Ctrl+Alt+1~9` 快捷槽；资源列表支持内联编辑与删除确认；「设置 → 关于」新增手动检查 GitHub 新版本。
 
 ## 交付内容
 

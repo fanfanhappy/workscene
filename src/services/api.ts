@@ -205,6 +205,37 @@ export const api = {
 
   runList: (limit = 20) => call<RunSummary[]>("run_list", { limit }),
   runSteps: (runId: string) => call<RunStepRow[]>("run_steps", { runId }),
+
+  captureDetectContext: (windows: import("@/types/contract").WindowInfo[]) =>
+    call<import("@/types/contract").DetectedContext[]>("capture_detect_context", { windows }),
+  workspaceProfileList: (workspaceId: string) =>
+    call<import("@/types/contract").DisplayProfileSummary[]>("workspace_profile_list", {
+      workspaceId,
+    }),
+  workspaceProfileSave: (workspaceId: string) =>
+    call<import("@/types/contract").DisplayProfileSummary>("workspace_profile_save", {
+      workspaceId,
+    }),
+  workspaceProfileDelete: (workspaceId: string, displaySignature: string) =>
+    call<void>("workspace_profile_delete", { workspaceId, displaySignature }),
+  workspaceHooksGet: (workspaceId: string) =>
+    call<import("@/types/contract").WorkspaceHooks>("workspace_hooks_get", { workspaceId }),
+  workspaceHooksSet: (
+    workspaceId: string,
+    hooks: import("@/types/contract").WorkspaceHooks,
+  ) => call<void>("workspace_hooks_set", { workspaceId, hooks }),
+  workspaceResourceUpdate: (
+    workspaceId: string,
+    itemId: string,
+    displayName: string,
+    target: string,
+  ) =>
+    call<void>("workspace_resource_update", {
+      workspaceId,
+      itemId,
+      displayName,
+      target,
+    }),
 };
 
 /** 统一的时间展示，避免各页面自己格式化 */

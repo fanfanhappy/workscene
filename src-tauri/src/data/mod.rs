@@ -1,3 +1,4 @@
+pub mod extras;
 pub mod runs;
 pub mod session;
 pub mod settings;
@@ -41,6 +42,8 @@ pub async fn init() -> AppResult<Db> {
         .await
         .map_err(|e| AppError::msg(format!("数据库迁移失败：{e}")))?;
 
+    extras::ensure_schema(&pool).await?;
+
     Ok(Db { pool })
 }
 
@@ -61,6 +64,8 @@ pub async fn in_memory() -> AppResult<Db> {
         .run(&pool)
         .await
         .map_err(|e| AppError::msg(format!("迁移失败：{e}")))?;
+
+    extras::ensure_schema(&pool).await?;
 
     Ok(Db { pool })
 }

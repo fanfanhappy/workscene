@@ -316,13 +316,23 @@ pub async fn bookmarks_list_folders() -> AppResult<Vec<crate::win::bookmarks::Bo
         .map_err(|e| AppError::msg(format!("读取书签目录异常：{e}")))
 }
 
-/// 一键收工：向当前打开且属于该工作空间的窗口发送标准 WM_CLOSE（绝不强杀进程）
+/// 一键收工：向当前打开且属于该工作空间的窗口发送标准 WM_CLOSE（绝不强杀进程）；
+/// 若该工作空间启用了收工后钩子命令，则在发送关闭请求后静默执行。
 #[tauri::command]
 pub async fn workspace_close_windows(db: State<'_, Db>, id: String) -> AppResult<usize> {
     let scene = workspaces::to_scene(&db, &id).await?;
-    tauri::async_runtime::spawn_blocking(move || crate::restore::close_workspace_windows(&scene))
+    let hooks = crate::data::extras::get_hooks(&db, &id)
         .await
-        .map_err(|e| AppError::msg(format!("关闭窗口异常：{e}")))?
+        .unwrap_or_default();
+    let closed = tauri::async_runtime::spawn_blocking(move || {
+        crate::restore::close_workspace_windows(&scene)
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("关闭窗口异常：{e}")))??;
+    if hooks.enabled && !hooks.post_close_cmd.trim().is_empty() {
+        crate::data::extras::run_hook_command(&hooks.post_close_cmd);
+    }
+    Ok(closed)
 }
 
 /// 导入前预检：只看不写，供 UI 提示"这份文件会启动什么"
@@ -355,7 +365,15 @@ pub async fn workspace_restore(
     let _guard = crate::restore::try_acquire()
         .ok_or_else(|| AppError::msg("已有恢复任务在执行，请等它结束再试"))?;
 
-    let scene = workspaces::to_scene(&db, &id).await?;
+    let mut scene = workspaces::to_scene(&db, &id).await?;
+    // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标
+    let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
+    // 若该工作空间启用了恢复前钩子命令，先静默触发
+    if let Ok(hooks) = crate::data::extras::get_hooks(&db, &id).await {
+        if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
+            crate::data::extras::run_hook_command(&hooks.pre_restore_cmd);
+        }
+    }
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
     let focus = focus_mode.unwrap_or(false);
 
@@ -511,7 +529,15 @@ pub async fn workspace_restore_retry(
         return Err(AppError::msg("没有需要重试的项目"));
     }
 
-    let scene = workspaces::to_scene(&db, &id).await?;
+    let mut scene = workspaces::to_scene(&db, &id).await?;
+    // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标
+    let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
+    // 若该工作空间启用了恢复前钩子命令，先静默触发
+    if let Ok(hooks) = crate::data::extras::get_hooks(&db, &id).await {
+        if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
+            crate::data::extras::run_hook_command(&hooks.pre_restore_cmd);
+        }
+    }
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
 
     let scene_for_task = scene.clone();
@@ -834,6 +860,78 @@ pub async fn workspace_import_all(
         crate::win::tray::refresh_menu(&app).await;
     }
     Ok(imported)
+}
+
+/// L2 上下文自动捕获：识别当前桌面打开的 IDE 项目目录与资源管理器文件夹路径
+#[tauri::command]
+pub async fn capture_detect_context(
+    windows: Vec<crate::core::models::WindowInfo>,
+) -> AppResult<Vec<crate::capture::context::DetectedContext>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::capture::context::detect_from_windows(&windows)
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("上下文识别异常：{e}")))
+}
+
+/// 多显示器拓扑布局：列出工作空间已保存的所有屏幕布局方案
+#[tauri::command]
+pub async fn workspace_profile_list(
+    db: State<'_, Db>,
+    workspace_id: String,
+) -> AppResult<Vec<crate::data::extras::DisplayProfileSummary>> {
+    crate::data::extras::list_display_profiles(&db, &workspace_id).await
+}
+
+/// 多显示器拓扑布局：将当前布局保存为当前屏幕组合的专属方案
+#[tauri::command]
+pub async fn workspace_profile_save(
+    db: State<'_, Db>,
+    workspace_id: String,
+) -> AppResult<crate::data::extras::DisplayProfileSummary> {
+    crate::data::extras::save_display_profile(&db, &workspace_id).await
+}
+
+/// 多显示器拓扑布局：删除指定屏幕拓扑方案
+#[tauri::command]
+pub async fn workspace_profile_delete(
+    db: State<'_, Db>,
+    workspace_id: String,
+    display_signature: String,
+) -> AppResult<()> {
+    crate::data::extras::delete_display_profile(&db, &workspace_id, &display_signature).await
+}
+
+/// 读取工作空间生命周期钩子配置
+#[tauri::command]
+pub async fn workspace_hooks_get(
+    db: State<'_, Db>,
+    workspace_id: String,
+) -> AppResult<crate::data::extras::WorkspaceHooks> {
+    crate::data::extras::get_hooks(&db, &workspace_id).await
+}
+
+/// 保存工作空间生命周期钩子配置
+#[tauri::command]
+pub async fn workspace_hooks_set(
+    db: State<'_, Db>,
+    workspace_id: String,
+    hooks: crate::data::extras::WorkspaceHooks,
+) -> AppResult<()> {
+    crate::data::extras::set_hooks(&db, &workspace_id, &hooks).await
+}
+
+/// 内联编辑资源项（文件 / 文件夹 / 网址）的名称或目标
+#[tauri::command]
+pub async fn workspace_resource_update(
+    db: State<'_, Db>,
+    workspace_id: String,
+    item_id: String,
+    display_name: String,
+    target: String,
+) -> AppResult<()> {
+    crate::data::extras::update_resource_item(&db, &workspace_id, &item_id, &display_name, &target)
+        .await
 }
 
 #[cfg(test)]

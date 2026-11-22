@@ -13,11 +13,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 type DwmGetWindowAttributeFn =
     unsafe extern "system" fn(HWND, u32, *mut core::ffi::c_void, u32) -> i32;
 
-/// 动态加载 dwmapi!DwmGetWindowAttribute，检测跨虚拟桌面或挂起 UWP 的 Cloaked 幽灵窗口
-fn is_cloaked(hwnd: HWND) -> bool {
-    const DWMWA_CLOAKED: u32 = 14;
+fn dwm_get_attr_fn() -> Option<DwmGetWindowAttributeFn> {
     static FN: OnceLock<Option<DwmGetWindowAttributeFn>> = OnceLock::new();
-    let f = *FN.get_or_init(|| unsafe {
+    *FN.get_or_init(|| unsafe {
         let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
         let module = LoadLibraryW(dll.as_ptr());
         if module.is_null() {
@@ -25,8 +23,13 @@ fn is_cloaked(hwnd: HWND) -> bool {
         }
         let proc = GetProcAddress(module, b"DwmGetWindowAttribute\0".as_ptr());
         proc.map(|p| std::mem::transmute::<_, DwmGetWindowAttributeFn>(p))
-    });
-    let Some(dwm_get) = f else {
+    })
+}
+
+/// 动态加载 dwmapi!DwmGetWindowAttribute，检测跨虚拟桌面或挂起 UWP 的 Cloaked 幽灵窗口
+fn is_cloaked(hwnd: HWND) -> bool {
+    const DWMWA_CLOAKED: u32 = 14;
+    let Some(dwm_get) = dwm_get_attr_fn() else {
         return false;
     };
     let mut cloaked: u32 = 0;
@@ -39,6 +42,53 @@ fn is_cloaked(hwnd: HWND) -> bool {
         )
     };
     hr == 0 && cloaked != 0
+}
+
+/// 获取窗口的真实可见边框（去除 Win10/11 约 7px 透明阴影边框）
+pub fn extended_frame_bounds(hwnd: HWND) -> Option<RECT> {
+    const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    let dwm_get = dwm_get_attr_fn()?;
+    let mut ext: RECT = unsafe { std::mem::zeroed() };
+    let hr = unsafe {
+        super::dpi::with_pmv2_context(|| {
+            dwm_get(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut ext as *mut RECT).cast(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+        })
+    };
+    if hr == 0 && ext.right > ext.left && ext.bottom > ext.top {
+        Some(ext)
+    } else {
+        None
+    }
+}
+
+/// 计算 Win10/11 隐形阴影边框厚度 `(left, top, right, bottom)`，用于贴边分屏 0px 像素补偿
+pub fn frame_inset(hwnd: HWND) -> (i32, i32, i32, i32) {
+    if is_iconic(hwnd) || is_zoomed(hwnd) {
+        return (0, 0, 0, 0);
+    }
+    let mut raw: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut raw) } == 0 {
+        return (0, 0, 0, 0);
+    }
+    let Some(ext) = extended_frame_bounds(hwnd) else {
+        return (0, 0, 0, 0);
+    };
+    let left = (ext.left - raw.left).clamp(0, 24);
+    let top = (ext.top - raw.top).clamp(0, 24);
+    let right = (raw.right - ext.right).clamp(0, 24);
+    let bottom = (raw.bottom - ext.bottom).clamp(0, 24);
+    (left, top, right, bottom)
+}
+
+/// 把目标视觉矩形按隐形边框厚度外扩，让可见窗口边缘严格贴合目标位置
+pub fn compensate_visual_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+    let (l, t, r, b) = frame_inset(hwnd);
+    (x - l, y - t, w + l + r, h + t + b)
 }
 
 /// 原始窗口信息：只含系统直接给出的字段，不做任何业务判断。
@@ -170,22 +220,23 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
 pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_NOZORDER: u32 = 0x0004;
+    let (cx, cy, cw, ch) = compensate_visual_rect(hwnd, x, y, w, h);
     unsafe {
         super::dpi::with_pmv2_context(|| {
             windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
                 hwnd,
                 std::ptr::null_mut(),
-                x,
-                y,
-                w,
-                h,
+                cx,
+                cy,
+                cw,
+                ch,
                 SWP_NOACTIVATE | SWP_NOZORDER,
             ) != 0
         })
     }
 }
 
-/// 恢复显示状态（最大化 / 最小化 / 普通）与还原矩形。
+/// 恢复显示状态（最大化 / 最小化 / 普通）与还原矩形（自动补偿 DWM 隐形边框）。
 ///
 /// 关键顺序：先读当前 WINDOWPLACEMENT 以保留系统维护的字段，**再**覆盖
 /// showCmd 与 rcNormalPosition，最后写回。反过来的话 GetWindowPlacement
@@ -198,16 +249,22 @@ pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowSt
         GetWindowPlacement(hwnd, &mut wp);
     }
 
+    let (cx, cy, cw, ch) = if state == ShowState::Normal {
+        compensate_visual_rect(hwnd, x, y, w, h)
+    } else {
+        (x, y, w, h)
+    };
+
     wp.showCmd = match state {
         ShowState::Maximized => SW_SHOWMAXIMIZED as u32,
         ShowState::Minimized => SW_SHOWMINNOACTIVE as u32,
         ShowState::Normal => SW_SHOWNORMAL as u32,
     };
     wp.rcNormalPosition = RECT {
-        left: x,
-        top: y,
-        right: x + w,
-        bottom: y + h,
+        left: cx,
+        top: cy,
+        right: cx + cw,
+        bottom: cy + ch,
     };
 
     unsafe {
@@ -231,6 +288,11 @@ pub fn is_iconic(hwnd: HWND) -> bool {
 }
 
 pub fn current_rect(hwnd: HWND) -> Option<RECT> {
+    if !is_iconic(hwnd) && !is_zoomed(hwnd) {
+        if let Some(ext) = extended_frame_bounds(hwnd) {
+            return Some(ext);
+        }
+    }
     let mut r: RECT = unsafe { std::mem::zeroed() };
     if unsafe { GetWindowRect(hwnd, &mut r) } != 0 {
         Some(r)

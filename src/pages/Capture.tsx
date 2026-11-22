@@ -11,7 +11,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api } from "@/services/api";
-import type { CaptureResult, WindowInfo, WorkspaceSummary } from "@/types/contract";
+import type { CaptureResult, DetectedContext, WindowInfo, WorkspaceSummary } from "@/types/contract";
 import { confirmAction, toast } from "@/stores/ui.store";
 import {
   Badge,
@@ -37,6 +37,8 @@ export function CapturePage() {
   const [name, setName] = useState("");
   const [showExcluded, setShowExcluded] = useState(false);
   const [highlightedHwnd, setHighlightedHwnd] = useState<number | null>(null);
+  const [detectedCtx, setDetectedCtx] = useState<DetectedContext[]>([]);
+  const [selectedCtx, setSelectedCtx] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   const workspaces = useQuery({
@@ -92,6 +94,14 @@ export function CapturePage() {
           d.getMinutes(),
         ).padStart(2, "0")}`;
       });
+      // 异步探测 L2 上下文（资源管理器已打开文件夹 + VS Code/Cursor/Trae 等 IDE 项目目录）
+      api
+        .captureDetectContext(data.windows)
+        .then((items) => {
+          setDetectedCtx(items);
+          setSelectedCtx(new Set(items.map((it) => it.target)));
+        })
+        .catch(() => undefined);
     },
     onError: (e) => {
       const msg = String((e as Error).message);
@@ -116,6 +126,8 @@ export function CapturePage() {
       };
       if (subset.windows.length === 0) throw new Error("请至少勾选一个窗口");
 
+      const pickedFolders = detectedCtx.filter((c) => selectedCtx.has(c.target));
+
       if (saveMode === "update") {
         if (!targetWsId) throw new Error("请选择要更新的工作空间");
         const targetName =
@@ -127,6 +139,11 @@ export function CapturePage() {
         });
         if (!ok) return null;
         const updated = await api.workspaceUpdateFromCapture(targetWsId, subset);
+        for (const ctx of pickedFolders) {
+          await api
+            .workspaceItemAdd(updated.id, "folder", ctx.target, ctx.displayName)
+            .catch(() => undefined);
+        }
         return {
           id: updated.id,
           name: updated.name,
@@ -139,6 +156,11 @@ export function CapturePage() {
       const trimmed = name.trim();
       if (!trimmed) throw new Error("请给工作空间起个名字");
       const created = await api.workspaceCreate(trimmed, subset);
+      for (const ctx of pickedFolders) {
+        await api
+          .workspaceItemAdd(created.id, "folder", ctx.target, ctx.displayName)
+          .catch(() => undefined);
+      }
       return {
         id: created.id,
         name: created.name,
@@ -499,6 +521,49 @@ export function CapturePage() {
                   onSelectWindow={(w) => setHighlightedHwnd(w.hwnd)}
                 />
               </div>
+
+              {detectedCtx.length > 0 ? (
+                <div className="flex flex-col gap-1.5 rounded-[10px] border border-accent/25 bg-accent/5 p-2.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-medium text-ink">
+                      自动识别到 {detectedCtx.length} 个项目/文件夹上下文
+                    </span>
+                    <span className="text-ink-3">保存时将一并加入资源列表</span>
+                  </div>
+                  <div className="flex max-h-28 flex-col gap-1 overflow-y-auto">
+                    {detectedCtx.map((ctx) => {
+                      const on = selectedCtx.has(ctx.target);
+                      return (
+                        <label
+                          key={ctx.target}
+                          className="flex cursor-pointer items-center gap-2 rounded-[7px] bg-canvas/80 px-2 py-1 text-[11px] hover:bg-raised/60"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() =>
+                              setSelectedCtx((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(ctx.target)) next.delete(ctx.target);
+                                else next.add(ctx.target);
+                                return next;
+                              })
+                            }
+                            className="accent-accent"
+                          />
+                          <Badge tone={ctx.kind === "ide_project" ? "accent" : "neutral"}>
+                            {ctx.kind === "ide_project" ? "IDE 项目" : "文件夹"}
+                          </Badge>
+                          <span className="truncate font-medium text-ink">{ctx.displayName}</span>
+                          <span className="ml-auto truncate font-mono text-[10px] text-ink-3">
+                            {ctx.target}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
 
               {uncertainCount > 0 ? (
                 <div className="flex items-start gap-2 rounded-[9px] border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-warning">

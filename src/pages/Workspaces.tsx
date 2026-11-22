@@ -1098,15 +1098,18 @@ export function WorkspacesPage() {
 
           {tab === "layout" ? (
             displays.data ? (
-              <LayoutEditor
-                displays={displays.data}
-                windows={draft}
-                dirty={layoutDirty}
-                onChange={setDraft}
-                onReset={() => setDraft(detail.data!.windows)}
-                onSave={() => saveLayout.mutate()}
-                saving={saveLayout.isPending}
-              />
+              <div className="flex flex-col gap-3">
+                <LayoutEditor
+                  displays={displays.data}
+                  windows={draft}
+                  dirty={layoutDirty}
+                  onChange={setDraft}
+                  onReset={() => setDraft(detail.data!.windows)}
+                  onSave={() => saveLayout.mutate()}
+                  saving={saveLayout.isPending}
+                />
+                <DisplayProfilesBar workspaceId={detail.data.id} />
+              </div>
             ) : (
               <Card className="flex items-center gap-2 text-aux text-ink-3">
                 <Spinner /> 读取显示器…
@@ -1208,15 +1211,18 @@ export function WorkspacesPage() {
           ) : null}
 
           {tab === "resources" ? (
-            <ResourcesCard
-              workspaceId={detail.data.id}
-              items={resourceItems}
-              onChanged={() => {
-                qc.invalidateQueries({ queryKey: ["workspace", activeId] });
-                qc.invalidateQueries({ queryKey: ["workspaces"] });
-              }}
-              onError={setError}
-            />
+            <div className="flex flex-col gap-3.5">
+              <ResourcesCard
+                workspaceId={detail.data.id}
+                items={resourceItems}
+                onChanged={() => {
+                  qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+                  qc.invalidateQueries({ queryKey: ["workspaces"] });
+                }}
+                onError={setError}
+              />
+              <WorkspaceHooksCard workspaceId={detail.data.id} />
+            </div>
           ) : null}
         </>
       ) : null}
@@ -1289,6 +1295,40 @@ export function WorkspacesPage() {
                 );
               })}
             </div>
+          </div>
+          <div className="flex items-center justify-between border-t border-line pt-3">
+            <div>
+              <p className="text-body font-medium text-ink">全局快捷槽（Ctrl + Alt + 1 ~ 9）</p>
+              <p className="text-[11px] text-ink-3">
+                直接在此为当前工作空间绑定快捷切屏数字键
+              </p>
+            </div>
+            <select
+              value={
+                (list.data ?? []).find((w) => w.id === detail.data?.id)?.hotkeySlot ?? ""
+              }
+              onChange={(e) => {
+                if (!detail.data) return;
+                const val = e.target.value ? Number(e.target.value) : null;
+                api
+                  .workspaceSetHotkeySlot(detail.data.id, val)
+                  .then(() => {
+                    qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+                    toast.success(
+                      val ? `已绑定快捷键 Ctrl+Alt+${val}` : "已取消快捷键绑定",
+                    );
+                  })
+                  .catch((err) => toast.danger("绑定失败", String((err as Error).message)));
+              }}
+              className="h-8 rounded-[7px] border border-line-strong bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+            >
+              <option value="">不绑定</option>
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+                <option key={n} value={n}>
+                  Ctrl + Alt + {n}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="flex items-center justify-between border-t border-line pt-3">
             <div>
@@ -1841,7 +1881,42 @@ function ResourcesCard({
                 <Button
                   size="xs"
                   variant="ghost"
-                  onClick={() => remove.mutate(it.id)}
+                  onClick={async () => {
+                    const nextTarget = window.prompt("修改路径或网址：", it.target ?? "");
+                    if (nextTarget === null || !nextTarget.trim()) return;
+                    const nextName =
+                      window.prompt("修改显示名称：", it.displayName) ?? it.displayName;
+                    try {
+                      await api.workspaceResourceUpdate(
+                        workspaceId,
+                        it.id,
+                        nextName.trim() || it.displayName,
+                        nextTarget.trim(),
+                      );
+                      onChanged();
+                      toast.success("已更新资源项");
+                    } catch (e) {
+                      toast.danger("更新失败", String((e as Error).message));
+                    }
+                  }}
+                  title="编辑"
+                  className="text-ink-3 hover:text-accent"
+                >
+                  <Pencil size={12} />
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={remove.isPending}
+                  onClick={async () => {
+                    const ok = await confirmAction({
+                      title: `移除资源「${it.displayName}」？`,
+                      description: "仅从工作空间列表中移除，不会删除本机文件。",
+                      confirmLabel: "移除",
+                      variant: "danger",
+                    });
+                    if (ok) remove.mutate(it.id);
+                  }}
                   title="移除"
                   className="text-ink-3 hover:text-danger"
                 >
@@ -1851,6 +1926,169 @@ function ResourcesCard({
             );
           })}
         </ul>
+      )}
+    </Card>
+  );
+}
+
+/** 多屏幕拓扑布局方案条：按不同屏幕组合保存/管理专属窗口排布 */
+function DisplayProfilesBar({ workspaceId }: { workspaceId: string }) {
+  const qc = useQueryClient();
+  const profiles = useQuery({
+    queryKey: ["ws-profiles", workspaceId],
+    queryFn: () => api.workspaceProfileList(workspaceId),
+  });
+
+  const saveProfile = useMutation({
+    mutationFn: () => api.workspaceProfileSave(workspaceId),
+    onSuccess: (p) => {
+      qc.invalidateQueries({ queryKey: ["ws-profiles", workspaceId] });
+      toast.success("已保存当前屏幕组合布局", `${p.label}（${p.windowCount} 窗口）`);
+    },
+    onError: (e) => toast.danger("保存屏幕方案失败", String((e as Error).message)),
+  });
+
+  const deleteProfile = useMutation({
+    mutationFn: (sig: string) => api.workspaceProfileDelete(workspaceId, sig),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ws-profiles", workspaceId] });
+      toast.success("已删除屏幕布局方案");
+    },
+    onError: (e) => toast.danger("删除失败", String((e as Error).message)),
+  });
+
+  return (
+    <Card className="flex flex-col gap-2.5 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-aux font-semibold text-ink">多屏幕拓扑布局方案</p>
+          <p className="text-[11px] text-ink-3">
+            同一工作空间可为「单屏 / 双屏 / 扩展屏」分别保存排布，恢复时按当前显示器自动匹配
+          </p>
+        </div>
+        <Button
+          size="xs"
+          variant="secondary"
+          disabled={saveProfile.isPending}
+          onClick={() => saveProfile.mutate()}
+        >
+          <Plus size={12} /> 保存为当前屏幕组合布局
+        </Button>
+      </div>
+      {(profiles.data ?? []).length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {(profiles.data ?? []).map((p) => (
+            <div
+              key={p.displaySignature}
+              className={`inline-flex items-center gap-1.5 rounded-[8px] border px-2.5 py-1 text-[11px] ${
+                p.isCurrent
+                  ? "border-accent/40 bg-accent/10 text-accent"
+                  : "border-line bg-canvas/70 text-ink-2"
+              }`}
+            >
+              <span className="font-medium">{p.label}</span>
+              <span className="text-ink-3">({p.windowCount}窗)</span>
+              {p.isCurrent ? <Badge tone="accent">当前匹配</Badge> : null}
+              <button
+                type="button"
+                onClick={() => deleteProfile.mutate(p.displaySignature)}
+                className="ml-0.5 cursor-pointer text-ink-3 hover:text-danger"
+                title="删除此屏幕方案"
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
+/** 生命周期钩子卡片：可选配置恢复前 / 收工后本地命令 */
+function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
+  const qc = useQueryClient();
+  const hooksQuery = useQuery({
+    queryKey: ["ws-hooks", workspaceId],
+    queryFn: () => api.workspaceHooksGet(workspaceId),
+  });
+
+  const [enabled, setEnabled] = useState(false);
+  const [preCmd, setPreCmd] = useState("");
+  const [postCmd, setPostCmd] = useState("");
+
+  useEffect(() => {
+    if (hooksQuery.data) {
+      setEnabled(hooksQuery.data.enabled);
+      setPreCmd(hooksQuery.data.preRestoreCmd);
+      setPostCmd(hooksQuery.data.postCloseCmd);
+    }
+  }, [hooksQuery.data]);
+
+  const saveHooks = useMutation({
+    mutationFn: () =>
+      api.workspaceHooksSet(workspaceId, {
+        enabled,
+        preRestoreCmd: preCmd,
+        postCloseCmd: postCmd,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ws-hooks", workspaceId] });
+      toast.success("自动化钩子已保存");
+    },
+    onError: (e) => toast.danger("保存失败", String((e as Error).message)),
+  });
+
+  return (
+    <Card className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-body font-semibold text-ink">生命周期钩子（进阶自动化）</p>
+          <p className="text-[11px] text-ink-3">
+            可选在「一键恢复前」或「一键收工后」静默运行本机命令（如启动本地服务、切换环境），默认关闭
+          </p>
+        </div>
+        <Switch checked={enabled} onChange={setEnabled} ariaLabel="启用生命周期钩子" />
+      </div>
+      {enabled ? (
+        <div className="flex flex-col gap-2.5 border-t border-line pt-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-medium text-ink-2">恢复前执行命令（可选）</span>
+            <input
+              value={preCmd}
+              onChange={(e) => setPreCmd(e.target.value)}
+              placeholder="例如：docker start dev-db"
+              className="h-8 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] font-medium text-ink-2">收工后执行命令（可选）</span>
+            <input
+              value={postCmd}
+              onChange={(e) => setPostCmd(e.target.value)}
+              placeholder="例如：docker stop dev-db"
+              className="h-8 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+            />
+          </label>
+          <div className="flex justify-end">
+            <Button
+              size="xs"
+              variant="primary"
+              disabled={saveHooks.isPending}
+              onClick={() => saveHooks.mutate()}
+            >
+              保存钩子配置
+            </Button>
+          </div>
+        </div>
+      ) : (
+        hooksQuery.data?.enabled ? (
+          <div className="flex justify-end">
+            <Button size="xs" variant="secondary" onClick={() => saveHooks.mutate()}>
+              确认关闭
+            </Button>
+          </div>
+        ) : null
       )}
     </Card>
   );

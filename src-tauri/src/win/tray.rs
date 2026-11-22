@@ -132,12 +132,19 @@ pub fn restore_workspace_by_id(app: &AppHandle, workspace_id: &str) {
 /// 托盘一键恢复：按全局设置自动启动缺失程序及专注模式，恢复前自动备份，结果落库并通知前端
 fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
     let Some(_guard) = crate::restore::try_acquire() else {
+        let _ = app.emit("tray:notice", "已有恢复任务正在进行，请稍后再试");
         return;
     };
     let db = app.state::<data::Db>().inner().clone();
 
     let res = tauri::async_runtime::block_on(async {
-        let scene = data::workspaces::to_scene(&db, workspace_id).await?;
+        let mut scene = data::workspaces::to_scene(&db, workspace_id).await?;
+        let _ = data::extras::apply_matching_profile(&db, workspace_id, &mut scene).await;
+        if let Ok(hooks) = data::extras::get_hooks(&db, workspace_id).await {
+            if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
+                data::extras::run_hook_command(&hooks.pre_restore_cmd);
+            }
+        }
         let snapshot_id = data::workspaces::latest_snapshot(&db, workspace_id).await?;
         let settings = data::settings::get(&db).await.unwrap_or_default();
         let relaunch = settings.restore_relaunch_default;
@@ -179,8 +186,20 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
         Ok::<_, crate::core::AppError>(report)
     });
 
-    if let Ok(report) = res {
-        let _ = app.emit("tray:restore_done", &report);
+    match res {
+        Ok(report) => {
+            if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                let tip = format!(
+                    "WorkScene · 最近恢复「{}」({}/{})",
+                    report.scene_name, report.succeeded, report.total_steps
+                );
+                let _ = tray.set_tooltip(Some(&tip));
+            }
+            let _ = app.emit("tray:restore_done", &report);
+        }
+        Err(e) => {
+            let _ = app.emit("tray:notice", format!("后台恢复失败：{e}"));
+        }
     }
 }
 

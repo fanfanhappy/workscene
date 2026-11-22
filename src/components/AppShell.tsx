@@ -73,11 +73,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       );
     });
 
+    const unlistenNotice = listen<string>("tray:notice", (e) => {
+      toast.warning("后台任务提示", e.payload);
+    });
+
     return () => {
       unlistenRestore.then((fn) => fn()).catch(() => undefined);
       unlistenSnap.then((fn) => fn()).catch(() => undefined);
       unlistenAuto.then((fn) => fn()).catch(() => undefined);
       unlistenDisplays.then((fn) => fn()).catch(() => undefined);
+      unlistenNotice.then((fn) => fn()).catch(() => undefined);
     };
   }, [qc]);
 
@@ -275,7 +280,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           ) : (
             <p className="px-2.5 font-mono text-[10px] text-ink-3">
-              v{info.data?.version ?? "1.0.0"} · 本地离线优先
+              v{info.data?.version ?? "1.1.0"} · 本地离线优先
             </p>
           )}
         </div>

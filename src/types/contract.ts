@@ -380,3 +380,27 @@ export interface ImportPreview {
   /** 文件里带了启动参数，导入时会被剥离 */
   appsWithArgs: string[];
 }
+
+/** L2 上下文自动捕获条目（IDE 项目目录 / 资源管理器打开的文件夹） */
+export interface DetectedContext {
+  kind: "folder" | "ide_project" | string;
+  sourceApp: string;
+  displayName: string;
+  target: string;
+}
+
+/** 多显示器拓扑布局方案摘要 */
+export interface DisplayProfileSummary {
+  displaySignature: string;
+  label: string;
+  windowCount: number;
+  updatedAt: number;
+  isCurrent: boolean;
+}
+
+/** 工作空间生命周期钩子 */
+export interface WorkspaceHooks {
+  preRestoreCmd: string;
+  postCloseCmd: string;
+  enabled: boolean;
+}
