@@ -38,15 +38,15 @@ import type {
   WorkspaceSummary,
   WorkspaceWindow,
 } from "@/types/contract";
-import { confirmAction, toast } from "@/stores/ui.store";
+import { confirmAction, toast, useUiStore } from "@/stores/ui.store";
 import { LayoutEditor, toLayoutUpdates } from "@/components/LayoutEditor";
 import {
   AppIcon,
   AppIconStrip,
   useAppIcons,
-  WORKSPACE_COLORS,
   WorkspaceColorDot,
 } from "@/components/AppIcon";
+import { WORKSPACE_COLORS } from "@/constants/colors";
 import {
   Badge,
   Button,
@@ -184,6 +184,12 @@ export function WorkspacesPage() {
       );
     });
   }, [detail.data, draft]);
+
+  // 同步未保存状态到全局，拦截侧栏导航与 Ctrl+K 跳转避免改动丢失
+  useEffect(() => {
+    useUiStore.getState().setHasUnsavedLayout(Boolean(activeId) && layoutDirty);
+    return () => useUiStore.getState().setHasUnsavedLayout(false);
+  }, [activeId, layoutDirty]);
 
   const filteredList = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -704,6 +710,14 @@ export function WorkspacesPage() {
                     <h3 className="flex min-w-0 items-center gap-1.5 text-[14px] font-semibold text-ink">
                       <WorkspaceColorDot color={w.color} />
                       <span className="truncate">{w.name}</span>
+                      {w.hotkeySlot ? (
+                        <kbd
+                          title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
+                          className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
+                        >
+                          Alt+{w.hotkeySlot}
+                        </kbd>
+                      ) : null}
                     </h3>
                     <button
                       type="button"

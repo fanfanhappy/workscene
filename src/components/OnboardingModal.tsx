@@ -222,7 +222,7 @@ export function OnboardingModal() {
                     icon: Play,
                     color: "text-[#30d158] bg-[#30d158]/14",
                     title: "一键切换整套现场",
-                    desc: "点「一键恢复」、右键系统托盘或直接按 Ctrl+Alt+1~5，自动拉起未开软件并精准摆回原位。",
+                    desc: "点「一键恢复」、右键系统托盘或直接按 Ctrl+Alt+1~9 快捷槽，自动拉起未开软件并精准摆回原位。",
                   },
                 ].map((item) => {
                   const Icon = item.icon;
@@ -339,7 +339,7 @@ export function OnboardingModal() {
               <div className="mt-4 grid w-full grid-cols-2 gap-2 text-left text-aux">
                 {[
                   ["Ctrl + Alt + W", "随时唤起主窗口"],
-                  ["Ctrl + Alt + 1~5", "秒切前 5 个空间"],
+                  ["Ctrl + Alt + 1~9", "秒切已绑定快捷槽"],
                   ["Ctrl + K", "聚焦搜索与命令"],
                   ["右键托盘图标", "不弹主窗一键恢复"],
                 ].map(([k, desc]) => (

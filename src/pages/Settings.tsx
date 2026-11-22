@@ -241,13 +241,6 @@ export function SettingsPage() {
 
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
-      <div>
-        <h1 className="text-module font-semibold tracking-tight text-ink">设置与适配</h1>
-        <p className="text-aux text-ink-3">
-          主题外观、自动快照、系统热键、存储维护与 L2 应用适配规则
-        </p>
-      </div>
-
       {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
 
       <Tabs
@@ -284,7 +277,7 @@ export function SettingsPage() {
                       setThemeMode(id);
                       toast.info(`已切换为${label}`);
                     }}
-                    className={`flex cursor-pointer flex-col gap-1 rounded-md border p-2.5 text-left transition-colors ${
+                    className={`flex cursor-pointer flex-col gap-1 rounded-[10px] border p-2.5 text-left transition-colors ${
                       selected
                         ? "border-accent bg-accent/10"
                         : "border-line bg-canvas/50 hover:border-line-strong"
@@ -310,7 +303,7 @@ export function SettingsPage() {
               <div className="flex items-center gap-2">
                 <Button
                   size="xs"
-                  variant="ghost"
+                  variant={error?.includes("开机启动") ? "secondary" : "ghost"}
                   onClick={() =>
                     api
                       .systemOpenStartupDir()
@@ -320,22 +313,11 @@ export function SettingsPage() {
                 >
                   <FolderOpen size={12} /> 启动文件夹
                 </Button>
-                <div className="flex items-center gap-2">
-                  {error?.includes("开机启动") ? (
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() => void api.systemOpenStartupDir()}
-                    >
-                      打开启动文件夹
-                    </Button>
-                  ) : null}
-                  <Switch
-                    checked={draft.autostart}
-                    onChange={(v) => patch({ autostart: v })}
-                    ariaLabel="开机启动"
-                  />
-                </div>
+                <Switch
+                  checked={draft.autostart}
+                  onChange={(v) => patch({ autostart: v })}
+                  ariaLabel="开机启动"
+                />
               </div>
             </Row>
 
@@ -348,7 +330,7 @@ export function SettingsPage() {
                 <select
                   value={draft.hotkey}
                   onChange={(e) => patch({ hotkey: e.target.value })}
-                  className="h-8 rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+                  className="h-8 rounded-[8px] border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
                 >
                   <option value="Ctrl+Alt+W">Ctrl + Alt + W</option>
                   <option value="Ctrl+Shift+W">Ctrl + Shift + W</option>
@@ -359,7 +341,7 @@ export function SettingsPage() {
             </Row>
             <Row
               label="工作空间快捷槽（Ctrl + Alt + 1 ~ 9）"
-              hint="按下后直接恢复该槽绑定的工作空间；具体绑定在下方「工作空间快捷槽」里设置"
+              hint="按下后直接恢复该槽绑定的工作空间；下方可直接为每个数字键绑定固定空间"
             >
               <Switch
                 checked={draft.workspaceHotkeysEnabled}
@@ -367,6 +349,54 @@ export function SettingsPage() {
                 ariaLabel="工作空间全局切屏热键"
               />
             </Row>
+          </Card>
+
+          <Card className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="flex items-center gap-1.5 text-body font-semibold text-ink">
+                  <Keyboard size={14} className="text-ink-3" /> 工作空间快捷槽绑定
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  Ctrl+Alt+1..9 直接恢复对应工作空间；绑定跟着工作空间走，删除别的空间不会串号
+                </p>
+              </div>
+              <Badge tone="accent">{wsList.filter((w) => w.hotkeySlot).length} 个已绑定</Badge>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+              {Array.from({ length: 9 }, (_, i) => i + 1).map((slot) => (
+                <div
+                  key={slot}
+                  className="flex items-center gap-2 rounded-[8px] border border-line/70 bg-canvas/60 px-2 py-1.5"
+                >
+                  <kbd className="shrink-0 rounded-[5px] border border-line-strong bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink-2">
+                    Ctrl+Alt+{slot}
+                  </kbd>
+                  <select
+                    value={wsList.find((w) => w.hotkeySlot === slot)?.id ?? ""}
+                    disabled={setSlot.isPending}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      const current = wsList.find((w) => w.hotkeySlot === slot);
+                      if (nextId) {
+                        setSlot.mutate({ id: nextId, slot });
+                      } else if (current) {
+                        setSlot.mutate({ id: current.id, slot: null });
+                      }
+                    }}
+                    className="h-7 min-w-0 flex-1 rounded-[6px] border border-line-strong/70 bg-canvas px-1.5 text-[11px] text-ink-2 outline-none focus:border-accent"
+                  >
+                    <option value="">未绑定</option>
+                    {wsList.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
           </Card>
 
           <Card className="flex flex-col gap-2">
@@ -382,10 +412,10 @@ export function SettingsPage() {
               ].map(([k, desc]) => (
                 <div
                   key={k}
-                  className="flex items-center justify-between gap-2 rounded-md border border-line/70 bg-canvas/45 px-2.5 py-1.5"
+                  className="flex items-center justify-between gap-2 rounded-[8px] border border-line/70 bg-canvas/45 px-2.5 py-1.5"
                 >
                   <span className="text-ink-2">{desc}</span>
-                  <kbd className="shrink-0 rounded-sm border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink">
+                  <kbd className="shrink-0 rounded-[5px] border border-line bg-surface px-1.5 py-0.5 font-mono text-[10px] text-ink">
                     {k}
                   </kbd>
                 </div>
@@ -461,7 +491,7 @@ export function SettingsPage() {
                 onChange={(e) =>
                   patch({ startupWorkspaceId: e.target.value ? e.target.value : null })
                 }
-                className="h-8 max-w-[200px] rounded-md border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
+                className="h-8 max-w-[200px] rounded-[8px] border border-line-strong/80 bg-canvas px-2 text-aux text-ink outline-none focus:border-accent"
               >
                 <option value="">不自动恢复</option>
                 {(workspaces.data ?? []).map((w) => (
@@ -472,7 +502,7 @@ export function SettingsPage() {
                 ))}
               </select>
             </Row>
-            <div className="flex items-start gap-2 rounded-md border border-line bg-canvas/55 px-3 py-2 text-aux text-ink-3">
+            <div className="flex items-start gap-2 rounded-[10px] border border-line bg-canvas/55 px-3 py-2 text-aux text-ink-3">
               <ShieldCheck size={14} className="mt-0.5 shrink-0 text-success" />
               恢复前始终自动生成保护快照；绝不静默关闭已打开应用；窗口匹配歧义时宁可跳过不误移。
             </div>
@@ -493,7 +523,7 @@ export function SettingsPage() {
           <div className="flex flex-col gap-1.5 border-t border-line pt-3">
             <span className="text-aux text-ink-3">本机数据目录</span>
             <div className="flex flex-wrap items-center gap-2">
-              <code className="selectable min-w-0 flex-1 truncate rounded-md border border-line bg-canvas px-2.5 py-1.5 font-mono text-[11px] text-ink-2">
+              <code className="selectable min-w-0 flex-1 truncate rounded-[8px] border border-line bg-canvas px-2.5 py-1.5 font-mono text-[11px] text-ink-2">
                 {stats.data?.dataDir ?? info.data?.dataDir ?? "—"}
               </code>
               <Button
@@ -630,58 +660,6 @@ export function SettingsPage() {
                 ))}
               </div>
             )}
-          </Card>
-
-          <Card className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p className="flex items-center gap-1.5 text-body font-semibold text-ink">
-                  <Keyboard size={14} className="text-ink-3" /> 工作空间快捷槽
-                </p>
-                <p className="mt-0.5 text-[11px] text-ink-3">
-                  Ctrl+Alt+1..9 直接恢复对应工作空间；绑定跟着工作空间走，删除别的空间不会串号
-                </p>
-              </div>
-              <Badge>{wsList.filter((w) => w.hotkeySlot).length} 个已绑定</Badge>
-            </div>
-
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
-              {Array.from({ length: 9 }, (_, i) => i + 1).map((slot) => (
-                <div
-                  key={slot}
-                  className="flex items-center gap-2 rounded-[8px] border border-line/70 bg-canvas/60 px-2 py-1.5"
-                >
-                  <kbd className="shrink-0 rounded border border-line-strong px-1.5 py-0.5 font-mono text-[10px] text-ink-2">
-                    Ctrl+Alt+{slot}
-                  </kbd>
-                  <select
-                    value={wsList.find((w) => w.hotkeySlot === slot)?.id ?? ""}
-                    disabled={setSlot.isPending}
-                    onChange={(e) => {
-                      const nextId = e.target.value;
-                      // 槽位独占由后端保证：绑到被占用的槽时，原占用者会被自动解绑
-                      const current = wsList.find((w) => w.hotkeySlot === slot);
-                      if (nextId) {
-                        setSlot.mutate({ id: nextId, slot });
-                      } else if (current) {
-                        setSlot.mutate({ id: current.id, slot: null });
-                      }
-                    }}
-                    className="h-7 min-w-0 flex-1 rounded border border-line-strong/70 bg-canvas px-1.5 text-[11px] text-ink-2 outline-none focus:border-accent"
-                  >
-                    <option value="">未绑定</option>
-                    {wsList.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-            <p className="text-[11px] text-ink-3">
-              槽位需要在设置里开启「工作空间数字快捷键」后才会注册；未绑定的槽按下时只会把主窗口叫出来。
-            </p>
           </Card>
 
           <Card padded={false} className="overflow-hidden">
@@ -848,7 +826,7 @@ function NumberInput({
           if (e.key === "Enter") e.currentTarget.blur();
         }}
         inputMode="numeric"
-        className="tabnum h-8 w-18 rounded-md border border-line-strong/80 bg-canvas px-2 text-right font-mono text-body text-ink outline-none focus:border-accent"
+        className="tabnum h-8 w-18 rounded-[8px] border border-line-strong/80 bg-canvas px-2 text-right font-mono text-body text-ink outline-none focus:border-accent"
       />
       <span className="text-aux text-ink-3">{suffix}</span>
     </span>
@@ -857,7 +835,7 @@ function NumberInput({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-line bg-canvas/55 px-3 py-2">
+    <div className="rounded-[9px] border border-line bg-canvas/55 px-3 py-2">
       <p className="text-[11px] text-ink-3">{label}</p>
       <p className="tabnum mt-0.5 text-card font-semibold text-ink">{value}</p>
     </div>

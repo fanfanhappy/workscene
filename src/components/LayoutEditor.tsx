@@ -526,8 +526,14 @@ export function LayoutEditor({
             variant="primary"
             disabled={!dirty || saving}
             onClick={onSave}
+            title="保存布局 (Ctrl+S)"
           >
             <Save size={13} /> {saving ? "保存中…" : "保存布局"}
+            {dirty && !saving ? (
+              <kbd className="ml-0.5 rounded-[4px] bg-white/18 px-1 font-mono text-[9px] text-white/90">
+                Ctrl+S
+              </kbd>
+            ) : null}
           </Button>
         </div>
       </div>

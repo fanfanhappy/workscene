@@ -1,24 +1,33 @@
 # WorkScene
 
-Windows 桌面工作现场管理器：保存整个工作现场（应用、窗口布局、显示器配置），需要时一键恢复。
+Windows 10/11 本地优先桌面工作现场管理器：把你常用的软件、窗口摆法、显示器配置、文件/文件夹与网页打包成「工作空间」，随时一键切换整套桌面现场。
 
-依据文档：
+## 核心亮点（v0.1.0）
 
-- PRD / 技术架构 `WorkScene_Product_Requirements_and_Technical_Architecture_v1.0.docx`
-- 前端 UI/UX 规范 `WorkScene_Frontend_UI_UX_Design_Guidelines_v1.0.docx`
-- 评审：`docs/reviews/`（v1.0 评审、UI/UX 评审、补充意见）
-- 决策记录：`docs/adr/`（文件存储、匹配权重）
-- 恢复契约：`docs/RESTORE_CONTRACT.md`
+- **毫秒级现场捕获**：自动识别正常、最大化与最小化窗口（含 Chrome / Edge 等浏览器），支持真实 `.exe` 软件图标展示与全局捕获忽略名单。
+- **可视化画布与一键排布**：拖拽微调窗口位置与尺寸、跨显示器比例换算、支持 **左右平分 / 左大右小 / 三列均分 / 四宫格 / 居中叠放** 快捷排版、`Ctrl+Z/Y` 撤销重做与 `Ctrl+S` 保存。
+- **智能一键恢复 & 专注模式**：自动补齐未启动应用（支持优先启动与延迟等待）、精准定位窗口不抢焦点、可选「专注模式」收起非本空间窗口、一键「收工」优雅关闭本空间窗口，每次恢复前自动创建保护快照随时可撤销。
+- **文件、文件夹与书签联动**：原生 Windows 文件/文件夹选择框、多行批量粘贴网址、一键只读导入本机 Chrome / Edge 书签文件夹（绝不读取密码、Cookie 或历史记录）。
+- **高频快捷入口**：Apple macOS 风格浅色/深色/跟随系统双主题、首次安装欢迎动画与交互式指引、`Ctrl+K` 聚焦搜索、系统托盘一键切现场、持久化绑定的 `Ctrl+Alt+1~9` 工作空间快捷槽。
+- **100% 本地离线**：所有数据保存在本机（SQLite + 不可变 JSON 快照），零遥测、不截屏、不上传。
+
+## 下载与使用
+
+前往 [Releases](https://github.com/fanfanhappy/workscene/releases) 下载：
+
+- **安装版**：`WorkScene_0.1.0_x64-setup.exe`（NSIS 当前用户安装，无需管理员权限）
+- **便携版**：`WorkScene-0.1.0-portable.zip`（解压后双击 `start.cmd` 即可运行，数据存同目录 `data/`）
+
+> 提示：v0.1.0 尚未进行代码签名，首次运行如遇 Windows SmartScreen 拦截，点击「更多信息 → 仍要运行」即可。
 
 ## 技术栈
 
-Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4（设计令牌）· TanStack Query · Rust（windows-sys / Win32）· 快照为 JSON（ADR-0001 说明为何 M1 不建库）
+Tauri 2 · React 19 + TypeScript · Vite 6 · Tailwind CSS 4 · TanStack Query · Zustand · Rust（`windows-sys` / Win32）· SQLite（SQLx WAL）
 
-## 状态：v0.1.0 交付（M1–M13 完成）
+## 状态：v0.1.0 正式发布
 
 - 发布说明与已知限制：`docs/RELEASE.md`
-- 安装包：`src-tauri/target/release/bundle/nsis/WorkScene_0.1.0_x64-setup.exe`（未签名）
-- 自检：46 个单测 + 5 个 CLI 自检全部通过；真实窗口基线 3/3、0px
+- 工程验证：Rust **67 项单元测试全通过** + 前端 `tsc --noEmit` / `vite build` 0 警告（路由级代码分割，主包 379 KB）
 
 ## 里程碑进度
 

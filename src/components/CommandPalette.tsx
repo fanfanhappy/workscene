@@ -18,7 +18,7 @@ import {
   Sun,
 } from "lucide-react";
 import { api } from "@/services/api";
-import { toast, useUiStore } from "@/stores/ui.store";
+import { confirmAction, toast, useUiStore } from "@/stores/ui.store";
 import { Badge } from "@/components/ui";
 
 interface PaletteCommand {
@@ -72,6 +72,20 @@ export function CommandPalette() {
   const commands = useMemo<PaletteCommand[]>(() => {
     const go = (to: string) => {
       setOpen(false);
+      if (useUiStore.getState().hasUnsavedLayout) {
+        void confirmAction({
+          title: "放弃未保存的窗口摆法？",
+          description: "离开当前页面将丢弃尚未保存的窗口位置调整。",
+          confirmLabel: "放弃并离开",
+          variant: "danger",
+        }).then((ok) => {
+          if (ok) {
+            useUiStore.getState().setHasUnsavedLayout(false);
+            navigate(to);
+          }
+        });
+        return;
+      }
       navigate(to);
     };
 

@@ -31,6 +31,7 @@ interface UiState {
   sidebarCollapsed: boolean;
   commandPaletteOpen: boolean;
   onboardingOpen: boolean;
+  hasUnsavedLayout: boolean;
   captureOpen: boolean;
   restoreWorkspaceId: string | null;
   toasts: ToastItem[];
@@ -45,6 +46,7 @@ interface UiState {
   toggleCommandPalette: () => void;
   openOnboarding: () => void;
   completeOnboarding: () => void;
+  setHasUnsavedLayout: (dirty: boolean) => void;
   openCapture: () => void;
   closeCapture: () => void;
   openRestore: (workspaceId: string) => void;
@@ -109,6 +111,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   sidebarCollapsed: loadInitialSidebar(),
   commandPaletteOpen: false,
   onboardingOpen: loadInitialOnboardingOpen(),
+  hasUnsavedLayout: false,
   captureOpen: false,
   restoreWorkspaceId: null,
   toasts: [],
@@ -163,6 +166,7 @@ export const useUiStore = create<UiState>((set, get) => ({
     }
     set({ onboardingOpen: false });
   },
+  setHasUnsavedLayout: (dirty) => set({ hasUnsavedLayout: dirty }),
   openCapture: () => set({ captureOpen: true, commandPaletteOpen: false }),
   closeCapture: () => set({ captureOpen: false }),
   openRestore: (workspaceId) =>

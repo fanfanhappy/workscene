@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { api } from "@/services/api";
 import type { RestoreReport, SnapshotSummary } from "@/types/contract";
-import { toast, useUiStore } from "@/stores/ui.store";
+import { confirmAction, toast, useUiStore } from "@/stores/ui.store";
 import { Button, ConfirmDialogHost, ToastHost } from "@/components/ui";
 import { CommandPalette } from "@/components/CommandPalette";
 import { OnboardingModal } from "@/components/OnboardingModal";
@@ -85,6 +85,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
+
+  /** 若布局画布有未保存改动，跨页导航前弹出确认，避免静默丢失 */
+  const guardedNavigate = async (to: string) => {
+    if (location.pathname === to) return;
+    if (useUiStore.getState().hasUnsavedLayout) {
+      const ok = await confirmAction({
+        title: "放弃未保存的窗口摆法？",
+        description: "离开当前页面将丢弃尚未保存的窗口位置调整。",
+        confirmLabel: "放弃并离开",
+        variant: "danger",
+      });
+      if (!ok) return;
+      useUiStore.getState().setHasUnsavedLayout(false);
+    }
+    navigate(to);
+  };
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: light)");
@@ -180,6 +196,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 key={to}
                 to={to}
                 end={end}
+                onClick={(e) => {
+                  if (useUiStore.getState().hasUnsavedLayout && location.pathname !== to) {
+                    e.preventDefault();
+                    void guardedNavigate(to);
+                  }
+                }}
                 title={collapsed ? label : undefined}
                 aria-label={label}
                 className={({ isActive }) =>
@@ -219,6 +241,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex flex-col gap-1.5 border-t border-line p-2">
           <NavLink
             to="/settings"
+            onClick={(e) => {
+              if (useUiStore.getState().hasUnsavedLayout && location.pathname !== "/settings") {
+                e.preventDefault();
+                void guardedNavigate("/settings");
+              }
+            }}
             title={collapsed ? "设置" : undefined}
             aria-label="设置"
             className={({ isActive }) =>
@@ -275,7 +303,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
 
             {location.pathname !== "/capture" ? (
-              <Button size="sm" variant="primary" onClick={() => navigate("/capture")}>
+              <Button size="sm" variant="primary" onClick={() => void guardedNavigate("/capture")}>
                 <Camera size={13} />
                 <span>捕获现场</span>
               </Button>

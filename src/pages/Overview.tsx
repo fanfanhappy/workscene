@@ -329,6 +329,14 @@ export function OverviewPage() {
                           <Star size={12} className="shrink-0 fill-warning text-warning" />
                         ) : null}
                         <span className="truncate">{w.name}</span>
+                        {w.hotkeySlot ? (
+                          <kbd
+                            title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
+                            className="shrink-0 rounded-[5px] border border-line bg-canvas px-1 py-0.2 font-mono text-[10px] font-medium text-ink-3"
+                          >
+                            Alt+{w.hotkeySlot}
+                          </kbd>
+                        ) : null}
                       </h3>
                       <span className="shrink-0 text-[11px] text-ink-3">
                         {formatRelative(w.lastRestoredAt ?? w.createdAt)}

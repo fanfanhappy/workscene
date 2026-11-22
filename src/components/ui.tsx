@@ -158,6 +158,27 @@ export function Spinner({ className = "" }: { className?: string }) {
   );
 }
 
+/** 轻量 Apple 风格页面加载骨架屏，避免切页时布局闪烁 */
+export function PageSkeleton() {
+  return (
+    <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5 animate-pulse">
+      <div className="h-8 w-52 rounded-[9px] bg-raised/70" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="h-36 rounded-[12px] border border-line bg-surface p-4"
+          >
+            <div className="h-4 w-2/3 rounded-[6px] bg-raised/80" />
+            <div className="mt-3 h-3 w-1/2 rounded-[6px] bg-raised/60" />
+            <div className="mt-7 h-7 w-24 rounded-[8px] bg-raised/70" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SectionTitle({
   title,
   hint,
