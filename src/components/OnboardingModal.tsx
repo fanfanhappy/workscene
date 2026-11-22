@@ -65,15 +65,20 @@ export function OnboardingModal() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        e.stopImmediatePropagation();
         complete();
       } else if (e.key === "ArrowRight" && step < TOTAL_STEPS - 1) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
         setStep((s) => s + 1);
       } else if (e.key === "ArrowLeft" && step > 0) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
         setStep((s) => s - 1);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, step, complete]);
 
   if (!open) return null;

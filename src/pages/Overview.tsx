@@ -90,15 +90,20 @@ export function OverviewPage() {
   });
 
   const recoverLast = useMutation({
-    mutationFn: (snapshotId: string) => api.snapshotRestore(snapshotId, false),
+    mutationFn: (snapshotId: string) => api.snapshotRestore(snapshotId, true),
     onSuccess: (report) => {
       dismissHint.mutate();
       qc.invalidateQueries({ queryKey: ["workspaces"] });
       qc.invalidateQueries({ queryKey: ["runs"] });
-      if (report.failed === 0) {
-        toast.success("已恢复上次现场", `成功 ${report.succeeded} · 跳过 ${report.skipped}`);
+      if (report.failed === 0 && report.skipped === 0) {
+        toast.success("已恢复上次现场", `共完成 ${report.succeeded} 项`);
+      } else if (report.succeeded > 0) {
+        toast.warning(
+          "上次现场部分恢复",
+          `成功 ${report.succeeded} · 跳过 ${report.skipped} · 失败 ${report.failed}`,
+        );
       } else {
-        toast.warning("上次现场部分恢复", `成功 ${report.succeeded} · 失败 ${report.failed}`);
+        toast.danger("上次现场恢复未成功", `失败 ${report.failed} · 跳过 ${report.skipped}`);
       }
     },
     onError: (e) => toast.danger("恢复失败", String((e as Error).message)),
@@ -259,27 +264,35 @@ export function OverviewPage() {
 
           <Card className="flex flex-1 flex-col gap-2">
             <span className="text-card font-semibold text-ink">显示器</span>
-            <ul className="flex flex-col gap-1.5">
-              {(capture.data?.displays ?? []).map((d: DisplayInfo) => (
-                <li
-                  key={d.monitorKey}
-                  className="flex items-center gap-2.5 rounded-[8px] bg-canvas/70 px-2.5 py-2"
-                >
-                  <Monitor size={14} className="shrink-0 text-accent" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-aux font-medium text-ink">
-                        {d.isPrimary ? "主显示器" : "副显示器"}
-                      </span>
-                      <Badge>{Math.round(d.scaleFactor * 100)}%</Badge>
+            {capture.isPending && !capture.data ? (
+              <div className="flex items-center gap-2 py-3 text-aux text-ink-3">
+                <Spinner /> 检测显示器中…
+              </div>
+            ) : (capture.data?.displays ?? []).length === 0 ? (
+              <p className="py-3 text-aux text-ink-3">暂未读取到显示器信息</p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {(capture.data?.displays ?? []).map((d: DisplayInfo) => (
+                  <li
+                    key={d.monitorKey}
+                    className="flex items-center gap-2.5 rounded-[8px] bg-canvas/70 px-2.5 py-2"
+                  >
+                    <Monitor size={14} className="shrink-0 text-accent" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-aux font-medium text-ink">
+                          {d.isPrimary ? "主显示器" : "副显示器"}
+                        </span>
+                        <Badge>{Math.round(d.scaleFactor * 100)}%</Badge>
+                      </div>
+                      <p className="tabnum font-mono text-[11px] text-ink-3">
+                        {d.width}×{d.height} · 工作区 {d.workWidth}×{d.workHeight}
+                      </p>
                     </div>
-                    <p className="tabnum font-mono text-[11px] text-ink-3">
-                      {d.width}×{d.height} · 工作区 {d.workWidth}×{d.workHeight}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
         </div>
       </div>
@@ -314,7 +327,14 @@ export function OverviewPage() {
             />
           ) : (
             <div className="grid gap-2.5 sm:grid-cols-2">
-              {(workspaces.data ?? []).slice(0, 6).map((w) => (
+              {(workspaces.data ?? [])
+                .slice()
+                .sort(
+                  (a, b) =>
+                    (b.lastRestoredAt ?? b.updatedAt) - (a.lastRestoredAt ?? a.updatedAt),
+                )
+                .slice(0, 6)
+                .map((w) => (
                 <Card
                   key={w.id}
                   interactive
@@ -329,12 +349,12 @@ export function OverviewPage() {
                           <Star size={12} className="shrink-0 fill-warning text-warning" />
                         ) : null}
                         <span className="truncate">{w.name}</span>
-                        {w.hotkeySlot ? (
+                        {w.hotkeySlot && settings.data?.workspaceHotkeysEnabled !== false ? (
                           <kbd
                             title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
                             className="shrink-0 rounded-[5px] border border-line bg-canvas px-1 py-0.2 font-mono text-[10px] font-medium text-ink-3"
                           >
-                            Alt+{w.hotkeySlot}
+                            Ctrl+Alt+{w.hotkeySlot}
                           </kbd>
                         ) : null}
                       </h3>

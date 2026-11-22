@@ -234,7 +234,12 @@ export function CommandPalette() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return commands.slice(0, 12);
+    if (!q) {
+      // 未输入关键词时：保留前 6 条工作空间命令 + 全部页面/快捷命令，避免空间多时挤掉系统命令
+      const ws = commands.filter((c) => c.category === "工作空间").slice(0, 6);
+      const others = commands.filter((c) => c.category !== "工作空间");
+      return [...ws, ...others];
+    }
     const terms = q.split(/\s+/);
     return commands.filter((cmd) => {
       const hay = `${cmd.label} ${cmd.description} ${cmd.category} ${cmd.keywords}`.toLowerCase();

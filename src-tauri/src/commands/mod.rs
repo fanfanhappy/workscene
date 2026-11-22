@@ -753,6 +753,89 @@ pub async fn storage_cleanup(db: State<'_, Db>) -> AppResult<usize> {
     settings::prune_all(&db).await
 }
 
+/// 手动往已有工作空间添加一个可执行程序（.exe）
+#[tauri::command]
+pub async fn workspace_add_app(
+    db: State<'_, Db>,
+    workspace_id: String,
+    exe_path: String,
+    display_name: Option<String>,
+    launch_args: Option<String>,
+) -> AppResult<workspaces::WorkspaceDetail> {
+    workspaces::add_app(
+        &db,
+        &workspace_id,
+        &exe_path,
+        display_name.as_deref(),
+        launch_args.as_deref(),
+    )
+    .await
+}
+
+/// 将任意历史快照另存为一个新的独立工作空间
+#[tauri::command]
+pub async fn snapshot_save_as_workspace(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    snapshot_id: String,
+    name: String,
+) -> AppResult<workspaces::WorkspaceSummary> {
+    let scene = storage::load_scene(&snapshot_id)?;
+    let ws = workspaces::create_from_scene(&db, &name, &scene).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(ws)
+}
+
+/// 全量备份导出：把所有工作空间打包成单个 JSON 字符串，方便换机迁移
+#[tauri::command]
+pub async fn workspace_export_all(db: State<'_, Db>) -> AppResult<String> {
+    let list = workspaces::list(&db).await?;
+    let mut exports: Vec<serde_json::Value> = Vec::with_capacity(list.len());
+    for ws in &list {
+        if let Ok(json_str) = workspaces::export_json(&db, &ws.id).await {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                exports.push(val);
+            }
+        }
+    }
+    let bundle = serde_json::json!({
+        "schemaVersion": 1,
+        "type": "workscene_full_backup",
+        "exportedAt": crate::core::time::now_ms(),
+        "workspaces": exports,
+    });
+    serde_json::to_string_pretty(&bundle)
+        .map_err(|e| crate::core::AppError::msg(format!("序列化备份失败：{e}")))
+}
+
+/// 全量备份导入：批量导入由 workspace_export_all 生成的备份 JSON
+#[tauri::command]
+pub async fn workspace_import_all(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    json: String,
+) -> AppResult<usize> {
+    let val: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| crate::core::AppError::msg(format!("备份文件不是合法的 JSON：{e}")))?;
+    let arr = val
+        .get("workspaces")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| crate::core::AppError::msg("备份文件缺少 workspaces 数组"))?;
+
+    let mut imported = 0usize;
+    for item in arr {
+        if let Ok(item_json) = serde_json::to_string(item) {
+            if workspaces::import_json(&db, &item_json).await.is_ok() {
+                imported += 1;
+            }
+        }
+    }
+    if imported > 0 {
+        crate::win::tray::refresh_menu(&app).await;
+    }
+    Ok(imported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

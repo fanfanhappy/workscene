@@ -185,10 +185,12 @@ export function SettingsPage() {
   });
 
   const patch = (next: Partial<AppSettings>) => {
-    if (!draft) return;
-    const merged = { ...draft, ...next };
-    setDraft(merged);
-    save.mutate(merged);
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const merged = { ...prev, ...next };
+      save.mutate(merged);
+      return merged;
+    });
   };
 
   const normalizeExe = (raw: string) => {
@@ -351,17 +353,27 @@ export function SettingsPage() {
             </Row>
           </Card>
 
-          <Card className="flex flex-col gap-3">
+          <Card
+            className={`flex flex-col gap-3 transition-opacity ${
+              draft.workspaceHotkeysEnabled ? "" : "opacity-60"
+            }`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="flex items-center gap-1.5 text-body font-semibold text-ink">
                   <Keyboard size={14} className="text-ink-3" /> 工作空间快捷槽绑定
                 </p>
                 <p className="mt-0.5 text-[11px] text-ink-3">
-                  Ctrl+Alt+1..9 直接恢复对应工作空间；绑定跟着工作空间走，删除别的空间不会串号
+                  {draft.workspaceHotkeysEnabled
+                    ? "Ctrl+Alt+1..9 直接恢复对应工作空间；绑定跟着工作空间走，删除别的空间不会串号"
+                    : "上方「工作空间快捷槽」总开关已关闭，开启后以下快捷键即可生效"}
                 </p>
               </div>
-              <Badge tone="accent">{wsList.filter((w) => w.hotkeySlot).length} 个已绑定</Badge>
+              <Badge tone={draft.workspaceHotkeysEnabled ? "accent" : "neutral"}>
+                {draft.workspaceHotkeysEnabled
+                  ? `${wsList.filter((w) => w.hotkeySlot).length} 个已绑定`
+                  : "已关闭"}
+              </Badge>
             </div>
 
             <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
@@ -375,7 +387,7 @@ export function SettingsPage() {
                   </kbd>
                   <select
                     value={wsList.find((w) => w.hotkeySlot === slot)?.id ?? ""}
-                    disabled={setSlot.isPending}
+                    disabled={!draft.workspaceHotkeysEnabled || setSlot.isPending}
                     onChange={(e) => {
                       const nextId = e.target.value;
                       const current = wsList.find((w) => w.hotkeySlot === slot);
@@ -385,7 +397,7 @@ export function SettingsPage() {
                         setSlot.mutate({ id: current.id, slot: null });
                       }
                     }}
-                    className="h-7 min-w-0 flex-1 rounded-[6px] border border-line-strong/70 bg-canvas px-1.5 text-[11px] text-ink-2 outline-none focus:border-accent"
+                    className="h-7 min-w-0 flex-1 rounded-[6px] border border-line-strong/70 bg-canvas px-1.5 text-[11px] text-ink-2 outline-none focus:border-accent disabled:cursor-not-allowed"
                   >
                     <option value="">未绑定</option>
                     {wsList.map((w) => (
@@ -549,6 +561,61 @@ export function SettingsPage() {
               >
                 <Copy size={13} /> 复制
               </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
+            <div>
+              <p className="text-body font-medium text-ink">全量工作空间备份与迁移</p>
+              <p className="text-aux text-ink-3">
+                一键导出全部工作空间为 JSON 文件，换电脑或重装系统后可一键批量恢复
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={async () => {
+                  try {
+                    const json = await api.workspaceExportAll();
+                    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    const date = new Date().toISOString().slice(0, 10);
+                    a.href = url;
+                    a.download = `WorkScene-backup-${date}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    toast.success("全量备份已导出", `已下载 WorkScene-backup-${date}.json`);
+                  } catch (e) {
+                    toast.danger("导出备份失败", String((e as Error).message));
+                  }
+                }}
+              >
+                导出全部备份
+              </Button>
+              <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[8px] border border-line bg-surface px-3 text-aux font-medium text-ink transition-colors hover:bg-raised">
+                导入备份
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!file) return;
+                    try {
+                      const text = await file.text();
+                      const count = await api.workspaceImportAll(text);
+                      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+                      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+                      toast.success(`已批量导入 ${count} 个工作空间`);
+                    } catch (err) {
+                      toast.danger("导入备份失败", String((err as Error).message));
+                    }
+                  }}
+                />
+              </label>
             </div>
           </div>
 

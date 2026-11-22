@@ -54,7 +54,9 @@ export function HistoryPage() {
   const [params, setParams] = useSearchParams();
   const [picked, setPicked] = useState<string[]>([]);
   const [inspectedId, setInspectedId] = useState<string | null>(null);
-  const [filterType, setFilterType] = useState<"all" | "manual" | "auto" | "protection">("all");
+  const [filterType, setFilterType] = useState<
+    "all" | "manual" | "initial" | "auto" | "protection"
+  >("all");
   const [diff, setDiff] = useState<SnapshotDiff | null>(null);
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -167,13 +169,29 @@ export function HistoryPage() {
   });
 
   const restore = useMutation({
-    mutationFn: (id: string) => api.snapshotRestore(id, false),
+    mutationFn: (id: string) => api.snapshotRestore(id, true),
     onSuccess: (r) => {
       refresh();
       setRestoreReport(r);
-      toast.success("快照恢复完成", `成功 ${r.succeeded} · 失败 ${r.failed}`);
+      if (r.failed === 0 && r.skipped === 0) {
+        toast.success("快照恢复完成", `共完成 ${r.succeeded} 项`);
+      } else if (r.succeeded > 0) {
+        toast.warning("快照部分恢复", `成功 ${r.succeeded} · 跳过 ${r.skipped} · 失败 ${r.failed}`);
+      } else {
+        toast.danger("快照恢复未成功", `失败 ${r.failed} · 跳过 ${r.skipped}`);
+      }
     },
     onError: (e) => setError(String((e as Error).message)),
+  });
+
+  const saveAsWorkspace = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      api.snapshotSaveAsWorkspace(id, name),
+    onSuccess: (ws) => {
+      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+      toast.success(`已另存为工作空间「${ws.name}」`);
+    },
+    onError: (e) => toast.danger("另存失败", String((e as Error).message)),
   });
 
   const snapshots = useMemo(() => {
@@ -255,6 +273,7 @@ export function HistoryPage() {
               [
                 { id: "all", label: "全部" },
                 { id: "manual", label: "手动" },
+                { id: "initial", label: "首次" },
                 { id: "auto", label: "自动" },
                 { id: "protection", label: "保护" },
               ] as const
@@ -381,12 +400,26 @@ export function HistoryPage() {
                     </Button>
                     <Button
                       size="xs"
+                      variant="ghost"
+                      disabled={saveAsWorkspace.isPending}
+                      onClick={() =>
+                        saveAsWorkspace.mutate({
+                          id: s.id,
+                          name: `${s.name} (副本)`,
+                        })
+                      }
+                      title="把这条历史快照另存为一个新的独立工作空间"
+                    >
+                      另存空间
+                    </Button>
+                    <Button
+                      size="xs"
                       variant="primary"
                       disabled={restore.isPending}
                       onClick={async () => {
                         const ok = await confirmAction({
                           title: `恢复快照「${s.name}」？`,
-                          description: "恢复前会自动创建保护快照，不关闭已打开应用。",
+                          description: "会自动打开未启动的软件并恢复窗口布局，恢复前自动创建保护快照。",
                           confirmLabel: "开始恢复",
                         });
                         if (ok) restore.mutate(s.id);
@@ -584,7 +617,15 @@ function DiffCard({ diff, onClose }: { diff: SnapshotDiff; onClose: () => void }
                       : "accent"
                 }
               >
-                {w.change}
+                {w.change === "added"
+                  ? "新增"
+                  : w.change === "removed"
+                    ? "移除"
+                    : w.change === "moved"
+                      ? "位置变动"
+                      : w.change === "state_changed"
+                        ? "状态变化"
+                        : w.change}
               </Badge>
               <span className="truncate text-ink">{w.titleB || w.titleA}</span>
               <span className="ml-auto truncate font-mono text-[11px] text-ink-3">

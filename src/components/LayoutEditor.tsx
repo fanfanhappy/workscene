@@ -23,7 +23,8 @@ interface DragState {
   startX: number;
   startY: number;
   origin: WorkspaceWindow;
-  scale: number;
+  scaleX: number;
+  scaleY: number;
   workW: number;
   workH: number;
   snapshotBefore: WorkspaceWindow[];
@@ -176,15 +177,20 @@ export function LayoutEditor({
 
       const patchMap = new Map<string, Partial<WorkspaceWindow>>();
       for (const list of groups.values()) {
+        const total = list.length;
         list.forEach((w, idx) => {
           if (preset === "split2") {
-            const col = idx % 2;
-            const halfW = (1 - gap * 3) / 2;
+            const cols = Math.min(2, total);
+            const rows = Math.max(1, Math.ceil(total / cols));
+            const col = idx % cols;
+            const row = Math.floor(idx / cols);
+            const cellW = (1 - gap * (cols + 1)) / cols;
+            const cellH = (1 - gap * (rows + 1)) / rows;
             patchMap.set(w.id, {
-              xRatio: round4(gap + col * (halfW + gap)),
-              yRatio: gap,
-              widthRatio: round4(halfW),
-              heightRatio: round4(1 - gap * 2),
+              xRatio: round4(gap + col * (cellW + gap)),
+              yRatio: round4(gap + row * (cellH + gap)),
+              widthRatio: round4(cellW),
+              heightRatio: round4(Math.max(0.15, cellH)),
               showState: "normal",
             });
           } else if (preset === "focus65") {
@@ -199,48 +205,53 @@ export function LayoutEditor({
                 showState: "normal",
               });
             } else {
-              const stackCount = Math.max(1, list.length - 1);
+              const stackCount = Math.max(1, total - 1);
               const row = idx - 1;
               const cellH = (1 - gap * (stackCount + 1)) / stackCount;
               patchMap.set(w.id, {
                 xRatio: round4(gap * 2 + leftW),
                 yRatio: round4(gap + row * (cellH + gap)),
                 widthRatio: round4(rightW),
-                heightRatio: round4(Math.max(0.18, cellH)),
+                heightRatio: round4(Math.max(0.15, cellH)),
                 showState: "normal",
               });
             }
           } else if (preset === "cols3") {
-            const cols = Math.min(3, list.length);
+            const cols = Math.min(3, total);
+            const rows = Math.max(1, Math.ceil(total / cols));
             const col = idx % cols;
+            const row = Math.floor(idx / cols);
             const colW = (1 - gap * (cols + 1)) / cols;
+            const cellH = (1 - gap * (rows + 1)) / rows;
             patchMap.set(w.id, {
               xRatio: round4(gap + col * (colW + gap)),
-              yRatio: gap,
+              yRatio: round4(gap + row * (cellH + gap)),
               widthRatio: round4(colW),
-              heightRatio: round4(1 - gap * 2),
+              heightRatio: round4(Math.max(0.15, cellH)),
               showState: "normal",
             });
           } else if (preset === "grid4") {
-            const slot = idx % 4;
-            const col = slot % 2;
-            const row = Math.floor(slot / 2);
-            const cellW = (1 - gap * 3) / 2;
-            const cellH = (1 - gap * 3) / 2;
+            const cols = total <= 1 ? 1 : total <= 4 ? 2 : Math.ceil(Math.sqrt(total));
+            const rows = Math.max(1, Math.ceil(total / cols));
+            const col = idx % cols;
+            const row = Math.floor(idx / cols);
+            const cellW = (1 - gap * (cols + 1)) / cols;
+            const cellH = (1 - gap * (rows + 1)) / rows;
             patchMap.set(w.id, {
               xRatio: round4(gap + col * (cellW + gap)),
               yRatio: round4(gap + row * (cellH + gap)),
               widthRatio: round4(cellW),
-              heightRatio: round4(cellH),
+              heightRatio: round4(Math.max(0.15, cellH)),
               showState: "normal",
             });
           } else {
-            const offset = Math.min(idx, 5) * 0.018;
+            const step = total > 6 ? 0.012 : 0.018;
+            const offset = Math.min(idx, 10) * step;
             patchMap.set(w.id, {
-              xRatio: round4(0.08 + offset),
-              yRatio: round4(0.06 + offset),
-              widthRatio: 0.78,
-              heightRatio: 0.82,
+              xRatio: round4(Math.min(0.24, 0.06 + offset)),
+              yRatio: round4(Math.min(0.2, 0.05 + offset)),
+              widthRatio: 0.74,
+              heightRatio: 0.78,
               showState: "normal",
             });
           }
@@ -359,7 +370,8 @@ export function LayoutEditor({
       startX: e.clientX,
       startY: e.clientY,
       origin: w,
-      scale: bounds.w / rect.width,
+      scaleX: bounds.w / rect.width,
+      scaleY: bounds.h / rect.height,
       workW: m.workWidth,
       workH: m.workHeight,
       snapshotBefore: windows,
@@ -369,8 +381,8 @@ export function LayoutEditor({
   const onMove = (e: React.PointerEvent) => {
     if (!drag) return;
     const minRatio = 0.08;
-    const dxWorld = (e.clientX - drag.startX) * drag.scale;
-    const dyWorld = (e.clientY - drag.startY) * drag.scale;
+    const dxWorld = (e.clientX - drag.startX) * drag.scaleX;
+    const dyWorld = (e.clientY - drag.startY) * drag.scaleY;
     const dxRatio = dxWorld / drag.workW;
     const dyRatio = dyWorld / drag.workH;
 
@@ -381,7 +393,8 @@ export function LayoutEditor({
         let y = clamp(drag.origin.yRatio + dyRatio, 0, 1 - drag.origin.heightRatio);
         x = snapRatio(x, [0, 0.25, 0.5, 1 - drag.origin.widthRatio]);
         y = snapRatio(y, [0, 0.25, 0.5, 1 - drag.origin.heightRatio]);
-        return { ...w, xRatio: round4(x), yRatio: round4(y) };
+        // 手动拖放后自动切为 normal，避免恢复时被原 maximized 状态覆盖回全屏
+        return { ...w, xRatio: round4(x), yRatio: round4(y), showState: "normal" as ShowState };
       }
       let width = clamp(
         drag.origin.widthRatio + dxRatio,
@@ -395,7 +408,12 @@ export function LayoutEditor({
       );
       width = snapRatio(width, [0.3333, 0.5, 0.6667, 1 - drag.origin.xRatio]);
       height = snapRatio(height, [0.5, 1 - drag.origin.yRatio]);
-      return { ...w, widthRatio: round4(width), heightRatio: round4(height) };
+      return {
+        ...w,
+        widthRatio: round4(width),
+        heightRatio: round4(height),
+        showState: "normal" as ShowState,
+      };
     });
     onChange(next);
   };
@@ -427,7 +445,13 @@ export function LayoutEditor({
 
   const applyPreset = (xRatio: number, yRatio: number, widthRatio: number, heightRatio: number) => {
     if (!selectedWindow) return;
-    updateWindow(selectedWindow.id, { xRatio, yRatio, widthRatio, heightRatio });
+    updateWindow(selectedWindow.id, {
+      xRatio,
+      yRatio,
+      widthRatio,
+      heightRatio,
+      showState: "normal",
+    });
   };
 
   return (
@@ -804,27 +828,35 @@ export function LayoutEditor({
                     label="X 左边距"
                     value={selectedWindow.xRatio}
                     max={1 - selectedWindow.widthRatio}
-                    onCommit={(v) => updateWindow(selectedWindow.id, { xRatio: v })}
+                    onCommit={(v) =>
+                      updateWindow(selectedWindow.id, { xRatio: v, showState: "normal" })
+                    }
                   />
                   <PercentField
                     label="Y 顶边距"
                     value={selectedWindow.yRatio}
                     max={1 - selectedWindow.heightRatio}
-                    onCommit={(v) => updateWindow(selectedWindow.id, { yRatio: v })}
+                    onCommit={(v) =>
+                      updateWindow(selectedWindow.id, { yRatio: v, showState: "normal" })
+                    }
                   />
                   <PercentField
                     label="宽度"
                     value={selectedWindow.widthRatio}
                     min={0.08}
                     max={1 - selectedWindow.xRatio}
-                    onCommit={(v) => updateWindow(selectedWindow.id, { widthRatio: v })}
+                    onCommit={(v) =>
+                      updateWindow(selectedWindow.id, { widthRatio: v, showState: "normal" })
+                    }
                   />
                   <PercentField
                     label="高度"
                     value={selectedWindow.heightRatio}
                     min={0.08}
                     max={1 - selectedWindow.yRatio}
-                    onCommit={(v) => updateWindow(selectedWindow.id, { heightRatio: v })}
+                    onCommit={(v) =>
+                      updateWindow(selectedWindow.id, { heightRatio: v, showState: "normal" })
+                    }
                   />
                 </div>
               </div>

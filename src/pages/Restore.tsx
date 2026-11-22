@@ -70,6 +70,8 @@ export function RestorePage() {
   const [showTech, setShowTech] = useState(false);
   const [liveSteps, setLiveSteps] = useState<RestoreStepResult[]>([]);
   const [report, setReport] = useState<RestoreReport | null>(null);
+  const [isUndoReport, setIsUndoReport] = useState(false);
+  const [expectedSteps, setExpectedSteps] = useState(1);
   const [reportFilter, setReportFilter] = useState<"all" | "failed" | "skipped" | "success">("all");
   const [error, setError] = useState<string | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -162,6 +164,8 @@ export function RestorePage() {
     onMutate: () => {
       setLiveSteps([]);
       setReport(null);
+      setIsUndoReport(false);
+      setExpectedSteps(Math.max(1, preview.data?.summary.total ?? 1));
       setReportFilter("all");
       setError(null);
       setElapsedMs(0);
@@ -180,7 +184,10 @@ export function RestorePage() {
   const closeWindows = useMutation({
     mutationFn: () => api.workspaceCloseWindows(active!.id),
     onSuccess: (count) => {
-      qc.invalidateQueries({ queryKey: ["preview", active?.id] });
+      // WM_CLOSE 为异步关闭，延迟 600ms 刷新预览才能反映真实关闭后的桌面状态
+      window.setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["preview", active?.id] });
+      }, 600);
       toast.info(
         count > 0 ? `已向 ${count} 个窗口发送关闭请求` : "当前没有已打开的本空间窗口",
         count > 0 ? "有未保存内容的软件会正常弹出保存确认" : undefined,
@@ -189,12 +196,14 @@ export function RestorePage() {
     onError: (e) => toast.danger("收工失败", String((e as Error).message)),
   });
 
-  // 仅重试未完成/失败项
+  // 仅重试未完成/失败项（支持全量重试或单条重试）
   const retryFailed = useMutation({
     mutationFn: (targets: string[]) =>
       api.workspaceRestoreRetry(active!.id, relaunch, targets),
-    onMutate: () => {
+    onMutate: (targets) => {
       setLiveSteps([]);
+      setIsUndoReport(false);
+      setExpectedSteps(Math.max(1, targets.length));
       setError(null);
       setElapsedMs(0);
       setCancelling(false);
@@ -208,7 +217,8 @@ export function RestorePage() {
     },
   });
 
-  // 智能一键恢复：若带 ?auto=1 且无缺失/无显示器变化/无冲突，直接自动开始；有异常则停在预览页保护用户
+  // 智能一键恢复：只要没有缺失/失效的程序路径（未打开软件属于正常一键补启），直接自动开始恢复；
+  // 仅当存在失效路径时停在预览页让用户核对或修复路径。
   useEffect(() => {
     if (!autoStart || !active?.id || !preview.data || !relaunchSynced) return;
     if (autoTriggeredFor.current === active.id) return;
@@ -217,8 +227,6 @@ export function RestorePage() {
     autoTriggeredFor.current = active.id;
     const isClean =
       preview.data.summary.missing === 0 &&
-      preview.data.summary.warning === 0 &&
-      preview.data.displayNotes.length === 0 &&
       preview.data.summary.total > 0;
 
     // 清除 URL 上的 auto 参数，避免返回预览后反复触发
@@ -228,7 +236,7 @@ export function RestorePage() {
       run.mutate();
     } else {
       setAutoPausedNote(
-        "检测到有未打开的程序、路径失效或显示器变化，已先为你停在确认页，核对无误后再点「开始恢复」。",
+        "检测到有失效的程序或资源路径，已先为你停在确认页，请修复或核对后再点「开始恢复」。",
       );
     }
   }, [
@@ -255,19 +263,20 @@ export function RestorePage() {
   });
 
   const undo = useMutation({
-    mutationFn: (preId: string) => api.snapshotRestore(preId, false),
+    mutationFn: (preId: string) => api.snapshotRestore(preId, true),
     onMutate: () => {
       setLiveSteps([]);
       setError(null);
     },
     onSuccess: (r) => {
+      setIsUndoReport(true);
       setReport(r);
       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
       qc.invalidateQueries({ queryKey: ["runs"] });
       qc.invalidateQueries({ queryKey: ["snapshots"] });
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
       qc.invalidateQueries({ queryKey: ["preview", active?.id] });
-      toast.success("已恢复到执行之前的状态");
+      toast.success("已撤销上次恢复", `已还原 ${r.succeeded} 个窗口`);
     },
     onError: (e) => {
       const msg = String((e as Error).message);
@@ -627,14 +636,16 @@ export function RestorePage() {
                 style={{
                   width: `${Math.min(
                     100,
-                    (liveSteps.length / Math.max(1, preview.data?.summary.total ?? 1)) * 100,
+                    (liveSteps.length / Math.max(1, expectedSteps)) * 100,
                   )}%`,
                 }}
               />
             </div>
             <div className="flex items-center gap-1.5 rounded-[8px] bg-canvas/70 px-3 py-2 text-[11px] text-ink-3">
               <ShieldCheck size={13} className="text-success" />
-              放心，不会关闭你当前开着的任何软件，也不会乱抢窗口焦点。
+              {focusMode
+                ? "放心，不会关闭你当前开着的任何软件；专注模式会将非本空间窗口安静最小化到任务栏。"
+                : "放心，不会关闭你当前开着的任何软件，也不会乱抢窗口焦点。"}
             </div>
             <ul className="divide-y divide-line rounded-[10px] border border-line">
               {liveSteps.map((s, i) => (
@@ -644,20 +655,22 @@ export function RestorePage() {
           </Card>
         ) : null}
 
-        {/* 状态 C：恢复报告（支持「仅重试未完成项」+「撤销」） */}
+        {/* 状态 C：恢复报告（支持「仅重试未完成项」+「单条重试」+「撤销」） */}
         {report && headline ? (
           <>
             <Card className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <headline.icon size={17} className={toneText(headline.tone)} />
-                  <h2 className="text-card font-semibold text-ink">{headline.title}</h2>
+                  <h2 className="text-card font-semibold text-ink">
+                    {isUndoReport ? "已撤销上次恢复" : headline.title}
+                  </h2>
                   <Badge tone={headline.tone}>
                     完成 {report.succeeded}/{report.totalSteps}
                   </Badge>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {report.preRestoreSceneId ? (
+                  {!isUndoReport && report.preRestoreSceneId ? (
                     <Button
                       size="sm"
                       variant="secondary"
@@ -674,7 +687,7 @@ export function RestorePage() {
                       <Undo2 size={13} /> 撤销恢复
                     </Button>
                   ) : null}
-                  {incompleteTargets.length > 0 && active ? (
+                  {!isUndoReport && incompleteTargets.length > 0 && active ? (
                     <Button
                       size="sm"
                       variant="primary"
@@ -684,7 +697,7 @@ export function RestorePage() {
                     </Button>
                   ) : (
                     <Button size="sm" variant="primary" onClick={() => run.mutate()}>
-                      <RefreshCw size={13} /> 再恢复一次
+                      <RefreshCw size={13} /> {isUndoReport ? "重新恢复工作空间" : "再恢复一次"}
                     </Button>
                   )}
                   <Button
@@ -692,6 +705,7 @@ export function RestorePage() {
                     variant="ghost"
                     onClick={() => {
                       setReport(null);
+                      setIsUndoReport(false);
                       preview.refetch();
                     }}
                   >
@@ -744,7 +758,21 @@ export function RestorePage() {
               </div>
               <ul className="divide-y divide-line">
                 {filteredReportSteps.map((s, i) => (
-                  <StepRow key={i} step={s} showTech={showTech} />
+                  <StepRow
+                    key={i}
+                    step={s}
+                    showTech={showTech}
+                    onRetry={
+                      !isUndoReport && active && s.status !== "success" && s.code !== "focus_mode"
+                        ? () => retryFailed.mutate([s.targetName])
+                        : undefined
+                    }
+                    onFixPath={
+                      active && s.status !== "success"
+                        ? () => navigate(`/workspaces?id=${active.id}`)
+                        : undefined
+                    }
+                  />
                 ))}
               </ul>
             </Card>
@@ -755,14 +783,24 @@ export function RestorePage() {
   );
 }
 
-function StepRow({ step, showTech }: { step: RestoreStepResult; showTech: boolean }) {
+function StepRow({
+  step,
+  showTech,
+  onRetry,
+  onFixPath,
+}: {
+  step: RestoreStepResult;
+  showTech: boolean;
+  onRetry?: () => void;
+  onFixPath?: () => void;
+}) {
   const m = statusMeta[step.status];
   const Icon = m.icon;
   return (
     <li className="flex items-start gap-2.5 px-4 py-2.5">
       <Icon size={14} className={`mt-0.5 shrink-0 ${toneText(m.tone)}`} />
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <p className="truncate text-body font-medium text-ink">{step.targetName}</p>
           <Badge tone={m.tone}>{m.report}</Badge>
           {showTech && step.code ? (
@@ -770,11 +808,31 @@ function StepRow({ step, showTech }: { step: RestoreStepResult; showTech: boolea
               {step.code}
             </code>
           ) : null}
-          {showTech ? (
-            <span className="tabnum ml-auto font-mono text-[11px] text-ink-3">
-              {step.durationMs}ms
-            </span>
-          ) : null}
+          <div className="ml-auto flex items-center gap-1.5">
+            {onRetry ? (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="cursor-pointer rounded-[6px] border border-line px-2 py-0.5 text-[11px] text-ink-2 hover:border-accent/40 hover:text-accent"
+              >
+                重试此项
+              </button>
+            ) : null}
+            {onFixPath ? (
+              <button
+                type="button"
+                onClick={onFixPath}
+                className="cursor-pointer rounded-[6px] border border-line px-2 py-0.5 text-[11px] text-ink-3 hover:text-ink"
+              >
+                去修复
+              </button>
+            ) : null}
+            {showTech ? (
+              <span className="tabnum font-mono text-[11px] text-ink-3">
+                {step.durationMs}ms
+              </span>
+            ) : null}
+          </div>
         </div>
         <p className="mt-0.5 text-[11px] text-ink-2">{step.message}</p>
         {showTech && step.deltaX !== null && step.deltaY !== null ? (

@@ -1345,7 +1345,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         .bind(&item.target)
         .bind(&item.target_kind)
         .bind(if item.enabled { 1 } else { 0 })
-        .bind(idx as i64)
+        .bind(item.launch_priority)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -1353,13 +1353,19 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
 
         if item.item_type == "application" {
             app_count += 1;
+            let adapter_json = if item.launch_delay_ms > 0 {
+                Some(serde_json::json!({ "launchDelayMs": item.launch_delay_ms }).to_string())
+            } else {
+                None
+            };
             sqlx::query(
-                "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
-                 VALUES (?, ?, ?, 8000)",
+                "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
+                 VALUES (?, ?, ?, ?, 8000)",
             )
             .bind(&new_item_id)
             .bind(&item.reuse_policy)
             .bind(&item.launch_args)
+            .bind(&adapter_json)
             .execute(&mut *tx)
             .await?;
         } else {
@@ -1440,6 +1446,8 @@ pub struct WorkspaceExport {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     #[serde(default = "default_true")]
     pub auto_snapshot_enabled: bool,
     pub apps: Vec<ExportApp>,
@@ -1462,6 +1470,10 @@ pub struct ExportApp {
     pub reuse_policy: String,
     #[serde(default)]
     pub launch_args: Option<String>,
+    #[serde(default)]
+    pub launch_priority: i64,
+    #[serde(default)]
+    pub launch_delay_ms: i64,
 }
 
 fn default_reuse_policy() -> String {
@@ -1513,6 +1525,8 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
             enabled: a.enabled,
             reuse_policy: a.reuse_policy.clone(),
             launch_args: a.launch_args.clone(),
+            launch_priority: a.launch_priority,
+            launch_delay_ms: a.launch_delay_ms,
         })
         .collect();
 
@@ -1557,6 +1571,7 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
         exported_at: now_ms(),
         name: detail.name,
         description: detail.description,
+        color: detail.color,
         auto_snapshot_enabled: detail.auto_snapshot_enabled,
         apps,
         resources,
@@ -1720,13 +1735,14 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
     };
 
     sqlx::query(
-        "INSERT INTO workspaces (id, name, description, is_favorite, sort_order,
+        "INSERT INTO workspaces (id, name, description, color, is_favorite, sort_order,
             auto_snapshot_enabled, created_at, updated_at)
-         VALUES (?, ?, ?, 0, 0, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)",
     )
     .bind(&ws_id)
     .bind(name)
     .bind(description.as_deref())
+    .bind(parsed.color.as_deref())
     .bind(if parsed.auto_snapshot_enabled { 1 } else { 0 })
     .bind(now)
     .bind(now)
@@ -1784,18 +1800,24 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         } else {
             0
         })
-        .bind(app_count)
+        .bind(app.launch_priority)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await?;
 
+        let adapter_json = if app.launch_delay_ms > 0 {
+            Some(serde_json::json!({ "launchDelayMs": app.launch_delay_ms }).to_string())
+        } else {
+            None
+        };
         sqlx::query(
-            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
-             VALUES (?, ?, NULL, 8000)",
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
+             VALUES (?, ?, NULL, ?, 8000)",
         )
         .bind(&item_id)
         .bind(policy)
+        .bind(&adapter_json)
         .execute(&mut *tx)
         .await?;
 
@@ -1946,14 +1968,22 @@ pub async fn recapture(
 
     let prev = get(db, workspace_id).await?;
 
-    // 保留已有应用的复用策略与启动参数（按 identity_key 匹配）
-    let mut prev_configs: std::collections::HashMap<String, (String, Option<String>, bool)> =
-        std::collections::HashMap::new();
+    // 保留已有应用的复用策略、启动参数、启用状态、启动优先级与延迟（按 identity_key 匹配）
+    let mut prev_configs: std::collections::HashMap<
+        String,
+        (String, Option<String>, bool, i64, i64),
+    > = std::collections::HashMap::new();
     for it in prev.items.iter().filter(|i| i.item_type == "application") {
         let key = identity_of(&it.target, &it.display_name);
         prev_configs.insert(
             key,
-            (it.reuse_policy.clone(), it.launch_args.clone(), it.enabled),
+            (
+                it.reuse_policy.clone(),
+                it.launch_args.clone(),
+                it.enabled,
+                it.launch_priority,
+                it.launch_delay_ms,
+            ),
         );
     }
 
@@ -2010,10 +2040,10 @@ pub async fn recapture(
         } else {
             w.process_name.clone()
         };
-        let (policy, args, enabled) = prev_configs
+        let (policy, args, enabled, priority, delay_ms) = prev_configs
             .get(&identity)
             .cloned()
-            .unwrap_or_else(|| ("reuse_or_launch".to_string(), None, true));
+            .unwrap_or_else(|| ("reuse_or_launch".to_string(), None, true, item_ids.len() as i64, 0));
 
         sqlx::query(
             "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
@@ -2026,19 +2056,25 @@ pub async fn recapture(
         .bind(&identity)
         .bind(&w.process_path)
         .bind(if enabled { 1 } else { 0 })
-        .bind(item_ids.len() as i64)
+        .bind(priority)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await?;
 
+        let adapter_json = if delay_ms > 0 {
+            Some(serde_json::json!({ "launchDelayMs": delay_ms }).to_string())
+        } else {
+            None
+        };
         sqlx::query(
-            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
-             VALUES (?, ?, ?, 8000)",
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
+             VALUES (?, ?, ?, ?, 8000)",
         )
         .bind(&item_id)
         .bind(&policy)
         .bind(&args)
+        .bind(&adapter_json)
         .execute(&mut *tx)
         .await?;
 
@@ -2128,6 +2164,307 @@ pub async fn recapture(
     .await;
 
     get(db, workspace_id).await
+}
+
+/// 手动往已有工作空间添加一个可执行软件（.exe），同时创建一个默认居中窗口布局，
+/// 让用户可以自由补充当前未打开的软件，不必重捕整套桌面。
+pub async fn add_app(
+    db: &Db,
+    workspace_id: &str,
+    exe_path: &str,
+    display_name: Option<&str>,
+    launch_args: Option<&str>,
+) -> AppResult<WorkspaceDetail> {
+    let trimmed = exe_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::msg("请选择有效的程序路径（.exe）"));
+    }
+    let path_obj = std::path::Path::new(trimmed);
+    if !path_obj.is_file() {
+        return Err(AppError::msg(format!("找不到程序文件：{trimmed}")));
+    }
+    let fallback_name = path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("应用")
+        .to_string();
+    let name = display_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or(fallback_name);
+
+    let now = now_ms();
+    let detail = get(db, workspace_id).await?;
+    let identity = identity_of(&Some(trimmed.to_string()), &name);
+
+    let mut tx = db.pool.begin().await?;
+
+    // 如果同一程序已在应用列表里，直接复用 item_id 并新增一条窗口布局
+    let item_id = if let Some(existing) = detail
+        .items
+        .iter()
+        .find(|i| i.item_type == "application" && identity_of(&i.target, &i.display_name) == identity)
+    {
+        existing.id.clone()
+    } else {
+        let new_id = format!(
+            "it-{:x}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let sort_order = detail
+            .items
+            .iter()
+            .filter(|i| i.item_type == "application")
+            .count() as i64;
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', 1, ?, ?, ?)",
+        )
+        .bind(&new_id)
+        .bind(workspace_id)
+        .bind(&name)
+        .bind(&identity)
+        .bind(trimmed)
+        .bind(sort_order)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let clean_args = launch_args
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        sqlx::query(
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+             VALUES (?, 'reuse_or_launch', ?, 8000)",
+        )
+        .bind(&new_id)
+        .bind(&clean_args)
+        .execute(&mut *tx)
+        .await?;
+        new_id
+    };
+
+    let monitor_key = detail
+        .windows
+        .first()
+        .map(|w| w.monitor_key.clone())
+        .unwrap_or_else(|| {
+            crate::win::display::enumerate()
+                .into_iter()
+                .find(|m| m.is_primary)
+                .map(|m| m.key)
+                .unwrap_or_else(|| "primary".to_string())
+        });
+
+    let win_id = format!(
+        "wl-{:x}-{}",
+        now,
+        WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let z_order = detail.windows.len() as i64;
+    sqlx::query(
+        "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
+            x_ratio, y_ratio, width_ratio, height_ratio, source_dpi,
+            show_state, z_order, title, class_name, captured_at)
+         VALUES (?, ?, ?, ?, 0.12, 0.10, 0.76, 0.80, 96, 'normal', ?, ?, '', ?)",
+    )
+    .bind(&win_id)
+    .bind(workspace_id)
+    .bind(&item_id)
+    .bind(&monitor_key)
+    .bind(z_order)
+    .bind(&name)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    get(db, workspace_id).await
+}
+
+/// 将任意历史快照（SceneFile）另存为一个新的独立工作空间
+pub async fn create_from_scene(
+    db: &Db,
+    name: &str,
+    scene: &SceneFile,
+) -> AppResult<WorkspaceSummary> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::msg("工作空间名称不能为空"));
+    }
+    let now = now_ms();
+    let ws_id = next_ws_id(now);
+    let mut tx = db.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO workspaces (id, name, description, is_favorite, sort_order,
+            auto_snapshot_enabled, created_at, updated_at)
+         VALUES (?, ?, ?, 0, 0, 1, ?, ?)",
+    )
+    .bind(&ws_id)
+    .bind(trimmed)
+    .bind(format!("从快照「{}」另存", scene.name))
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut item_ids: Vec<(String, String)> = Vec::new();
+    let mut app_count = 0i64;
+    for w in &scene.windows {
+        let identity = identity_of(&w.process_path, &w.process_name);
+        if item_ids.iter().any(|(k, _)| *k == identity) {
+            continue;
+        }
+        let item_id = format!(
+            "it-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            item_ids.len()
+        );
+        let display = if w.process_name.is_empty() {
+            w.title.clone()
+        } else {
+            w.process_name.clone()
+        };
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', 1, ?, ?, ?)",
+        )
+        .bind(&item_id)
+        .bind(&ws_id)
+        .bind(&display)
+        .bind(&identity)
+        .bind(&w.process_path)
+        .bind(w.launch_priority)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let adapter_json = if w.launch_delay_ms > 0 {
+            Some(serde_json::json!({ "launchDelayMs": w.launch_delay_ms }).to_string())
+        } else {
+            None
+        };
+        sqlx::query(
+            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
+             VALUES (?, ?, ?, ?, 8000)",
+        )
+        .bind(&item_id)
+        .bind(&w.reuse_policy)
+        .bind(&w.launch_args)
+        .bind(&adapter_json)
+        .execute(&mut *tx)
+        .await?;
+
+        item_ids.push((identity, item_id));
+        app_count += 1;
+    }
+
+    let mut res_count = 0i64;
+    for (idx, r) in scene.resources.iter().enumerate() {
+        let item_id = format!(
+            "it-{:x}-{}-r{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        sqlx::query(
+            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        )
+        .bind(&item_id)
+        .bind(&ws_id)
+        .bind(&r.item_type)
+        .bind(&r.display_name)
+        .bind(r.target.to_lowercase())
+        .bind(&r.target)
+        .bind(&r.item_type)
+        .bind(app_count + res_count)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        res_count += 1;
+    }
+
+    for (idx, w) in scene.windows.iter().enumerate() {
+        let identity = identity_of(&w.process_path, &w.process_name);
+        let Some((_, item_id)) = item_ids.iter().find(|(k, _)| *k == identity) else {
+            continue;
+        };
+        let win_id = format!(
+            "wl-{:x}-{}-{}",
+            now,
+            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            idx
+        );
+        sqlx::query(
+            "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
+                x_ratio, y_ratio, width_ratio, height_ratio,
+                original_x, original_y, original_width, original_height, source_dpi,
+                show_state, z_order, title, class_name, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&win_id)
+        .bind(&ws_id)
+        .bind(item_id)
+        .bind(&w.monitor_key)
+        .bind(w.x_ratio)
+        .bind(w.y_ratio)
+        .bind(w.width_ratio)
+        .bind(w.height_ratio)
+        .bind(w.original_x as i64)
+        .bind(w.original_y as i64)
+        .bind(w.original_width as i64)
+        .bind(w.original_height as i64)
+        .bind(w.source_dpi as i64)
+        .bind(state_to_str(w.show_state))
+        .bind(w.z_order as i64)
+        .bind(&w.title)
+        .bind(&w.class_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    let app_paths: Vec<String> = scene
+        .windows
+        .iter()
+        .filter_map(|w| w.process_path.clone())
+        .take(6)
+        .collect();
+    Ok(WorkspaceSummary {
+        id: ws_id,
+        name: trimmed.to_string(),
+        description: Some(format!("从快照「{}」另存", scene.name)),
+        color: None,
+        is_favorite: false,
+        item_count: app_count,
+        resource_count: res_count,
+        window_count: scene.windows.len() as i64,
+        created_at: now,
+        updated_at: now,
+        last_restored_at: None,
+        app_paths,
+        hotkey_slot: None,
+    })
 }
 
 pub async fn mark_restored(db: &Db, id: &str) -> AppResult<()> {

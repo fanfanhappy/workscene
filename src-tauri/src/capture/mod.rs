@@ -103,8 +103,11 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
             continue;
         }
 
-        // 最小化窗口的 GetWindowRect 不可用，必须用 rcNormalPosition（评审 R2-4）
-        let effective = if raw.show_state == ShowState::Minimized {
+        // 最小化窗口的 GetWindowRect 不可用；最大化窗口的 GetWindowRect 是含隐形边的整屏矩形，
+        // 两者都优先用 rcNormalPosition 作为还原矩形，避免取消最大化后窗口卡在整屏尺寸
+        let restored_valid = raw.restored_rect.right > raw.restored_rect.left
+            && raw.restored_rect.bottom > raw.restored_rect.top;
+        let effective = if raw.show_state != ShowState::Normal && restored_valid {
             raw.restored_rect
         } else {
             raw.rect
@@ -159,7 +162,7 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
     }
     if protected_processes > 0 {
         diagnostics.push(format!(
-            "{protected_processes} 个窗口的进程路径不可读（受保护进程），已改用进程名识别"
+            "{protected_processes} 个窗口以管理员/受保护权限运行，无法读取可执行路径（恢复时将跳过自动启动）"
         ));
     }
 

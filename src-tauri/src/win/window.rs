@@ -1,11 +1,45 @@
 use super::strings::from_wide;
 use crate::core::models::ShowState;
+use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, GWL_EXSTYLE,
-    GW_OWNER, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, ShowWindow,
+    GWL_EXSTYLE, GW_OWNER, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
+    WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
 };
+
+type DwmGetWindowAttributeFn =
+    unsafe extern "system" fn(HWND, u32, *mut core::ffi::c_void, u32) -> i32;
+
+/// 动态加载 dwmapi!DwmGetWindowAttribute，检测跨虚拟桌面或挂起 UWP 的 Cloaked 幽灵窗口
+fn is_cloaked(hwnd: HWND) -> bool {
+    const DWMWA_CLOAKED: u32 = 14;
+    static FN: OnceLock<Option<DwmGetWindowAttributeFn>> = OnceLock::new();
+    let f = *FN.get_or_init(|| unsafe {
+        let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
+        let module = LoadLibraryW(dll.as_ptr());
+        if module.is_null() {
+            return None;
+        }
+        let proc = GetProcAddress(module, b"DwmGetWindowAttribute\0".as_ptr());
+        proc.map(|p| std::mem::transmute::<_, DwmGetWindowAttributeFn>(p))
+    });
+    let Some(dwm_get) = f else {
+        return false;
+    };
+    let mut cloaked: u32 = 0;
+    let hr = unsafe {
+        dwm_get(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    hr == 0 && cloaked != 0
+}
 
 /// 原始窗口信息：只含系统直接给出的字段，不做任何业务判断。
 /// 过滤与识别在 filter / matcher 中单独进行，便于单元测试。
@@ -60,6 +94,12 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
 
     // 1. 绝大多数顶层窗口是不可见的系统/后台消息窗口，第一时间跳过
     if IsWindowVisible(hwnd) == 0 {
+        ctx.skipped += 1;
+        return TRUE;
+    }
+
+    // 1.5 过滤 DWM Cloaked 窗口（其他虚拟桌面的窗口、挂起 UWP/系统隐藏界面）
+    if is_cloaked(hwnd) {
         ctx.skipped += 1;
         return TRUE;
     }
@@ -130,7 +170,6 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
 pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_NOZORDER: u32 = 0x0004;
-    const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
     unsafe {
         super::dpi::with_pmv2_context(|| {
             windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPos(
@@ -140,13 +179,13 @@ pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) -> bool {
                 y,
                 w,
                 h,
-                SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS,
+                SWP_NOACTIVATE | SWP_NOZORDER,
             ) != 0
         })
     }
 }
 
-/// 恢复显示状态（最大化）与还原矩形。
+/// 恢复显示状态（最大化 / 最小化 / 普通）与还原矩形。
 ///
 /// 关键顺序：先读当前 WINDOWPLACEMENT 以保留系统维护的字段，**再**覆盖
 /// showCmd 与 rcNormalPosition，最后写回。反过来的话 GetWindowPlacement
@@ -161,7 +200,8 @@ pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowSt
 
     wp.showCmd = match state {
         ShowState::Maximized => SW_SHOWMAXIMIZED as u32,
-        ShowState::Minimized | ShowState::Normal => SW_SHOWNORMAL as u32,
+        ShowState::Minimized => SW_SHOWMINNOACTIVE as u32,
+        ShowState::Normal => SW_SHOWNORMAL as u32,
     };
     wp.rcNormalPosition = RECT {
         left: x,
@@ -175,6 +215,11 @@ pub fn apply_placement(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, state: ShowSt
             windows_sys::Win32::UI::WindowsAndMessaging::SetWindowPlacement(hwnd, &wp) != 0
         })
     }
+}
+
+/// 最大化兜底：部分窗口（Chromium / Electron）不认 SetWindowPlacement 的 showCmd，直接调用 ShowWindow
+pub fn show_maximized(hwnd: HWND) -> bool {
+    unsafe { ShowWindow(hwnd, SW_SHOWMAXIMIZED) != 0 }
 }
 
 pub fn is_zoomed(hwnd: HWND) -> bool {

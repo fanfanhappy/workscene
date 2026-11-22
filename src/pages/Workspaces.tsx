@@ -357,6 +357,17 @@ export function WorkspacesPage() {
     onError: (e) => toast.danger("重新捕获失败", String((e as Error).message)),
   });
 
+  const addManualApp = useMutation({
+    mutationFn: (exePath: string) => api.workspaceAddApp(detail.data!.id, exePath),
+    onSuccess: (updated) => {
+      qc.setQueryData(["workspace", activeId], updated);
+      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+      qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+      toast.success("已添加软件", "已同时在布局画布中生成默认窗口位置，可随时拖拽调整");
+    },
+    onError: (e) => toast.danger("添加软件失败", String((e as Error).message)),
+  });
+
   const remove = useMutation({
     mutationFn: (id: string) => api.workspaceDelete(id),
     onSuccess: (_, deletedId) => {
@@ -715,7 +726,7 @@ export function WorkspacesPage() {
                           title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
                           className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
                         >
-                          Alt+{w.hotkeySlot}
+                          Ctrl+Alt+{w.hotkeySlot}
                         </kbd>
                       ) : null}
                     </h3>
@@ -962,7 +973,9 @@ export function WorkspacesPage() {
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => navigate(`/history?workspace=${detail.data!.id}`)}
+              onClick={() =>
+                guardNavigate(() => navigate(`/history?workspace=${detail.data!.id}`))
+              }
             >
               <History size={13} /> 历史版本
             </Button>
@@ -1103,12 +1116,34 @@ export function WorkspacesPage() {
 
           {tab === "apps" ? (
             <Card padded={false} className="overflow-hidden">
-              <div className="flex items-center justify-between border-b border-line px-4 py-2.5 text-aux">
-                <span className="font-medium text-ink">包含的软件</span>
-                <span className="text-[11px] text-ink-3">
-                  开关决定恢复时是否处理该软件；换了安装目录可点「更换程序」
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5 text-aux">
+                <div>
+                  <span className="font-medium text-ink">包含的软件</span>
+                  <span className="ml-2 text-[11px] text-ink-3">
+                    开关决定恢复时是否处理；换了安装目录可点「更换程序」
+                  </span>
+                </div>
+                <Button
+                  size="xs"
+                  variant="tinted"
+                  disabled={addManualApp.isPending}
+                  onClick={async () => {
+                    try {
+                      const picked = await api.dialogPickFile(true);
+                      if (picked) addManualApp.mutate(picked);
+                    } catch (e) {
+                      toast.danger("打开文件选择框失败", String((e as Error).message));
+                    }
+                  }}
+                >
+                  <Plus size={12} /> 添加软件 (.exe)
+                </Button>
               </div>
+              {appItems.length === 0 ? (
+                <div className="px-4 py-8 text-center text-aux text-ink-3">
+                  当前没有配置软件，点击右上角「添加软件 (.exe)」或「用当前桌面更新」添加。
+                </div>
+              ) : null}
               <ul className="divide-y divide-line">
                 {appItems.map((it) => {
                   const exeLower = (it.target?.split(/[\\/]/).pop() ?? it.displayName).toLowerCase();
@@ -1589,22 +1624,26 @@ function ResourcesCard({
 
   const submitBatchPaste = () => {
     const lines = batchText
-      .split(/[\r\n,]+/)
+      .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
     const valid: { url: string }[] = [];
+    let skipped = 0;
     for (const line of lines) {
       const u = /^https?:\/\//i.test(line) ? line : `https://${line}`;
       try {
         new URL(u);
         valid.push({ url: u });
       } catch {
-        // ignore invalid lines
+        skipped += 1;
       }
     }
     if (valid.length === 0) {
       toast.warning("没有识别到有效网址", "请每行输入一个网址，例如 github.com");
       return;
+    }
+    if (skipped > 0) {
+      toast.info(`已跳过 ${skipped} 行无效网址`, `正在导入其余 ${valid.length} 条`);
     }
     addBatch.mutate(valid);
   };

@@ -84,6 +84,8 @@ export const api = {
   workspaceDuplicate: (id: string, newName: string) =>
     call<WorkspaceSummary>("workspace_duplicate", { id, newName }),
   workspaceExport: (id: string) => call<string>("workspace_export", { id }),
+  workspaceExportAll: () => call<string>("workspace_export_all"),
+  workspaceImportAll: (json: string) => call<number>("workspace_import_all", { json }),
   workspaceImportPreview: (json: string) =>
     call<ImportPreview>("workspace_import_preview", { rawJson: json }),
   workspaceImport: (json: string) => call<WorkspaceSummary>("workspace_import", { json }),
@@ -146,12 +148,26 @@ export const api = {
       target,
       displayName,
     }),
+  workspaceAddApp: (
+    workspaceId: string,
+    exePath: string,
+    displayName: string | null = null,
+    launchArgs: string | null = null,
+  ) =>
+    call<WorkspaceDetail>("workspace_add_app", {
+      workspaceId,
+      exePath,
+      displayName,
+      launchArgs,
+    }),
 
   snapshotList: (workspaceId: string, limit = 50) =>
     call<SnapshotSummary[]>("snapshot_list", { workspaceId, limit }),
   snapshotGet: (id: string) => call<SceneFile>("snapshot_get", { id }),
   snapshotCreate: (workspaceId: string, name: string) =>
     call<SnapshotSummary>("snapshot_create", { workspaceId, name }),
+  snapshotSaveAsWorkspace: (snapshotId: string, name: string) =>
+    call<WorkspaceSummary>("snapshot_save_as_workspace", { snapshotId, name }),
   snapshotDelete: (id: string) => call<void>("snapshot_delete", { id }),
   snapshotDiff: (idA: string, idB: string) =>
     call<SnapshotDiff>("snapshot_diff", { idA, idB }),

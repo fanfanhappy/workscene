@@ -105,17 +105,46 @@ pub fn score_window(
     score.min(1.0)
 }
 
+/// 计算两个矩形中心点的曼哈顿距离，用于在同应用多窗口评分相近时做稳定就近配对
+fn center_distance(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> i64 {
+    let ax = a.0 as i64 + (a.2 as i64) / 2;
+    let ay = a.1 as i64 + (a.3 as i64) / 2;
+    let bx = b.0 as i64 + (b.2 as i64) / 2;
+    let by = b.1 as i64 + (b.3 as i64) / 2;
+    (ax - bx).abs() + (ay - by).abs()
+}
+
+/// 检查两个候选窗口是否属于同一个可执行文件与窗口类（同应用多实例）
+fn is_same_app_identity(a: &Candidate, b: &Candidate) -> bool {
+    let same_path = match (norm_path(&a.process_path), norm_path(&b.process_path)) {
+        (Some(pa), Some(pb)) => pa == pb,
+        _ => false,
+    };
+    same_path && !a.class_name.is_empty() && a.class_name == b.class_name
+}
+
 pub fn match_window(
     target: &SceneWindow,
     candidates: &[Candidate],
     target_rect: (i32, i32, i32, i32),
 ) -> MatchOutcome {
-    let mut scored: Vec<(usize, f64)> = candidates
+    let mut scored: Vec<(usize, f64, i64)> = candidates
         .iter()
         .enumerate()
-        .map(|(i, c)| (i, score_window(target, c, target_rect)))
+        .map(|(i, c)| {
+            (
+                i,
+                score_window(target, c, target_rect),
+                center_distance(target_rect, c.rect),
+            )
+        })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
     let best = scored.first().copied();
     let second = scored.get(1).copied();
@@ -126,7 +155,7 @@ pub fn match_window(
             note: "当前桌面没有同类窗口".into(),
             ambiguous: false,
         },
-        Some((idx, score)) => {
+        Some((idx, score, _)) => {
             if score < ACCEPT {
                 return MatchOutcome {
                     picked: None,
@@ -135,21 +164,33 @@ pub fn match_window(
                 };
             }
 
+            // 同应用多实例（路径 + 类名完全一致，例如多个 Chrome / VS Code / 终端）：
+            // 允许按评分 + 就近距离 1 对 1 稳定分配，避免多窗口全部触发歧义死锁。
+            // 仅当两个高分候选属于不同应用或弱识别（无路径退化）且分差极小时才判歧义。
             let ambiguous = second
-                .map(|(_, s2)| s2 >= ACCEPT && (score - s2) < AMBIGUITY_MARGIN)
+                .map(|(idx2, s2, _)| {
+                    s2 >= ACCEPT
+                        && (score - s2) < AMBIGUITY_MARGIN
+                        && !is_same_app_identity(&candidates[idx], &candidates[idx2])
+                })
+                .unwrap_or(false);
+
+            let multi_same_app = second
+                .map(|(idx2, s2, _)| {
+                    s2 >= ACCEPT && is_same_app_identity(&candidates[idx], &candidates[idx2])
+                })
                 .unwrap_or(false);
 
             let note = if ambiguous {
-                let count = scored.iter().filter(|(_, s)| *s >= ACCEPT).count();
+                let count = scored.iter().filter(|(_, s, _)| *s >= ACCEPT).count();
                 format!("{count} 个候选窗口评分接近（{score:.2}），已跳过")
+            } else if multi_same_app {
+                format!("多实例按标题与就近位置分配（{score:.2}）")
             } else {
+                let t_hit = title_score(&target.title, &candidates[idx].title) > 0.0;
                 format!(
                     "按进程路径 + 窗口类名匹配（{score:.2}）{}",
-                    if target.title.is_empty() {
-                        String::new()
-                    } else {
-                        "，标题一致".to_string()
-                    }
+                    if t_hit { "，标题匹配" } else { "" }
                 )
             };
 
@@ -159,6 +200,41 @@ pub fn match_window(
                 ambiguous,
             }
         }
+    }
+}
+
+/// 用于「收工」关闭窗口的严格匹配：除了路径+类名命中外，若目标有标题，
+/// 必须满足标题相似或位置高度重合，避免误关同软件下不相关的窗口。
+pub fn match_window_for_close(
+    target: &SceneWindow,
+    candidates: &[Candidate],
+    target_rect: (i32, i32, i32, i32),
+) -> Option<usize> {
+    let mut scored: Vec<(usize, f64, f64, i64)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let s = score_window(target, c, target_rect);
+            let ts = title_score(&target.title, &c.title);
+            let rs = rect_score(target_rect, c.rect);
+            (i, s, ts + rs, center_distance(target_rect, c.rect))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.3.cmp(&b.3))
+    });
+
+    let (idx, score, extra, _) = scored.first().copied()?;
+    if score < ACCEPT {
+        return None;
+    }
+    // 要求标题相似（>=0.07）或位置明显重合（>=0.02），防止仅凭 exe 路径误关无关窗口
+    if extra >= 0.02 || target.title.trim().is_empty() {
+        Some(idx)
+    } else {
+        None
     }
 }
 
@@ -219,28 +295,40 @@ mod tests {
     }
 
     #[test]
-    fn two_identical_notepads_are_ambiguous_and_skipped() {
+    fn two_identical_notepads_pick_nearest_instead_of_deadlocking() {
         let t = target("未命名 - 记事本", "Notepad", r"C:\Windows\notepad.exe");
         let c = vec![
             cand(
                 "未命名 - 记事本",
                 "Notepad",
                 r"C:\Windows\notepad.exe",
-                (0, 0, 800, 600),
+                (900, 0, 800, 600),
             ),
             cand(
                 "未命名 - 记事本",
                 "Notepad",
                 r"C:\Windows\notepad.exe",
-                (0, 0, 800, 600),
+                (10, 10, 800, 600),
             ),
         ];
         let out = match_window(&t, &c, (0, 0, 800, 600));
+        assert_eq!(out.picked, Some(1), "同应用多实例应优先选位置最近的窗口，不再歧义死锁");
+        assert!(!out.ambiguous);
+    }
+
+    #[test]
+    fn close_matcher_rejects_unrelated_window_by_title_and_position() {
+        let t = target("项目 A - Chrome", "Chrome_WidgetWin_1", r"C:\Chrome\chrome.exe");
+        let c = vec![cand(
+            "哔哩哔哩 - Chrome",
+            "Chrome_WidgetWin_1",
+            r"C:\Chrome\chrome.exe",
+            (1000, 500, 800, 600),
+        )];
         assert!(
-            out.picked.is_none(),
-            "两个完全相同的窗口必须跳过而不是随便选一个"
+            match_window_for_close(&t, &c, (0, 0, 800, 600)).is_none(),
+            "收工不应误关标题和位置都无关的同软件窗口"
         );
-        assert!(out.ambiguous);
     }
 
     #[test]

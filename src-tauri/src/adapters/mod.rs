@@ -70,6 +70,7 @@ pub fn classify(exe_name: &str) -> AdapterKind {
 }
 
 /// 是否属于可直接打开项目目录的 IDE（供恢复文件夹资源时自动选择 IDE）
+#[allow(dead_code)]
 pub fn is_ide(exe_name: &str) -> bool {
     matches!(classify(exe_name), AdapterKind::VsCode | AdapterKind::JetBrains)
 }

@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { api } from "@/services/api";
 import type { CaptureResult, WindowInfo, WorkspaceSummary } from "@/types/contract";
-import { toast } from "@/stores/ui.store";
+import { confirmAction, toast } from "@/stores/ui.store";
 import {
   Badge,
   Button,
@@ -67,14 +67,31 @@ export function CapturePage() {
     },
     onSuccess: (data) => {
       qc.setQueryData(["capture"], data);
-      setResult(data);
-      setSelected(new Set(data.windows.map((w) => w.hwnd)));
-      const d = new Date();
-      setName(
-        `工作现场 ${String(d.getHours()).padStart(2, "0")}:${String(
+      setResult((prevResult) => {
+        if (!prevResult) {
+          setSelected(new Set(data.windows.map((w) => w.hwnd)));
+        } else {
+          // 重新扫描时保留用户已取消勾选的窗口，只把新出现的窗口自动勾选
+          const prevKnown = new Set(prevResult.windows.map((w) => w.hwnd));
+          setSelected((prevSel) => {
+            const next = new Set<number>();
+            for (const w of data.windows) {
+              if (!prevKnown.has(w.hwnd) || prevSel.has(w.hwnd)) {
+                next.add(w.hwnd);
+              }
+            }
+            return next;
+          });
+        }
+        return data;
+      });
+      setName((prevName) => {
+        if (prevName.trim()) return prevName;
+        const d = new Date();
+        return `工作现场 ${String(d.getHours()).padStart(2, "0")}:${String(
           d.getMinutes(),
-        ).padStart(2, "0")}`,
-      );
+        ).padStart(2, "0")}`;
+      });
     },
     onError: (e) => {
       const msg = String((e as Error).message);
@@ -101,6 +118,14 @@ export function CapturePage() {
 
       if (saveMode === "update") {
         if (!targetWsId) throw new Error("请选择要更新的工作空间");
+        const targetName =
+          (workspaces.data ?? []).find((w) => w.id === targetWsId)?.name ?? "所选工作空间";
+        const ok = await confirmAction({
+          title: `覆盖更新「${targetName}」？`,
+          description: `将用当前勾选的 ${subset.windows.length} 个窗口替换原有布局（已有的网页/文件夹资源与启动参数会保留，并自动创建覆盖前保护快照）。`,
+          confirmLabel: "确认覆盖更新",
+        });
+        if (!ok) return null;
         const updated = await api.workspaceUpdateFromCapture(targetWsId, subset);
         return {
           id: updated.id,
@@ -123,6 +148,7 @@ export function CapturePage() {
       };
     },
     onSuccess: (res) => {
+      if (!res) return;
       if (res.createdSummary) {
         const created = res.createdSummary;
         qc.setQueryData<WorkspaceSummary[]>(["workspaces"], (prev) =>
@@ -237,12 +263,34 @@ export function CapturePage() {
               <Button
                 size="xs"
                 variant="ghost"
-                onClick={() => setSelected(new Set(result.windows.map((w) => w.hwnd)))}
+                onClick={() => {
+                  const visible = groups.flatMap(([, ws]) => ws.map((w) => w.hwnd));
+                  setSelected((prev) => {
+                    const next = new Set(prev);
+                    visible.forEach((h) => next.add(h));
+                    return next;
+                  });
+                }}
               >
-                全选
+                {search.trim() ? "全选当前" : "全选"}
               </Button>
-              <Button size="xs" variant="ghost" onClick={() => setSelected(new Set())}>
-                清空
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => {
+                  if (!search.trim()) {
+                    setSelected(new Set());
+                    return;
+                  }
+                  const visible = new Set(groups.flatMap(([, ws]) => ws.map((w) => w.hwnd)));
+                  setSelected((prev) => {
+                    const next = new Set(prev);
+                    visible.forEach((h) => next.delete(h));
+                    return next;
+                  });
+                }}
+              >
+                {search.trim() ? "取消当前" : "清空"}
               </Button>
               <Button
                 size="xs"
@@ -256,6 +304,11 @@ export function CapturePage() {
             </div>
 
             <div className="max-h-[430px] flex-1 overflow-y-auto">
+              {groups.length === 0 ? (
+                <div className="px-4 py-10 text-center text-aux text-ink-3">
+                  没有匹配「{search}」的窗口
+                </div>
+              ) : null}
               {groups.map(([app, wins]) => {
                 const checked = wins.filter((w) => selected.has(w.hwnd)).length;
                 const all = checked === wins.length;
@@ -458,7 +511,9 @@ export function CapturePage() {
 
               <div className="flex items-start gap-2 rounded-[9px] bg-canvas/70 px-3 py-2 text-[11px] text-ink-3">
                 <ShieldCheck size={13} className="mt-0.5 shrink-0 text-success" />
-                <span>数据全部保存在你自己的电脑里，不截屏、不读密码、不上传。</span>
+                <span>
+                  捕获会记住软件与窗口位置；网页链接、常用文件夹可在保存后的详情页补充。所有数据仅保存在本机。
+                </span>
               </div>
 
               <Button

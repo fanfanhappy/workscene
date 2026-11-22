@@ -4,7 +4,7 @@
 //! 所以改快捷键必须由持有消息循环的那个线程去 Unregister/Register，
 //! 设置页只能通过通道把"换成哪个组合"发过去。
 
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
 use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY};
@@ -65,11 +65,16 @@ pub fn normalize_preset(text: &str) -> String {
     }
 }
 
-static SENDER: OnceLock<Mutex<Sender<HotkeyConfig>>> = OnceLock::new();
+struct HotkeyRequest {
+    config: HotkeyConfig,
+    reply: SyncSender<bool>,
+}
 
-/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~5 空间切屏键）并进入消息循环
+static SENDER: OnceLock<Mutex<Sender<HotkeyRequest>>> = OnceLock::new();
+
+/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入消息循环
 pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: bool) {
-    let (tx, rx) = channel::<HotkeyConfig>();
+    let (tx, rx) = channel::<HotkeyRequest>();
     let _ = SENDER.set(Mutex::new(tx));
 
     std::thread::spawn(move || unsafe {
@@ -81,20 +86,32 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
         };
 
         loop {
-            while let Ok(next) = rx.try_recv() {
+            while let Ok(req) = rx.try_recv() {
+                let next = req.config;
                 if current_main {
                     unregister();
+                    current_main = false;
                 }
-                current_main = register(next.main_combo);
+                let main_ok = match next.main_combo {
+                    Some(c) => {
+                        current_main = register(Some(c));
+                        current_main
+                    }
+                    None => true,
+                };
 
+                let mut slots_ok = true;
                 if current_slots != next.workspace_slots {
                     if current_slots {
                         unregister_ws_slots();
                         current_slots = false;
                     } else {
                         current_slots = register_ws_slots();
+                        slots_ok = current_slots;
                     }
                 }
+
+                let _ = req.reply.send(main_ok && slots_ok);
             }
 
             // 用 PeekMessage 而不是阻塞的 GetMessage，才能定期检查通道
@@ -116,26 +133,36 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
                 }
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            std::thread::sleep(std::time::Duration::from_millis(60));
         }
     });
 }
 
-/// 运行中切换快捷键配置（设置页调用）
+/// 运行中切换快捷键配置（设置页调用）：同步等待热键线程返回真实 RegisterHotKey 结果
 pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
-    match SENDER.get() {
-        Some(tx) => tx
-            .lock()
-            .map(|s| {
-                s.send(HotkeyConfig {
+    let Some(tx) = SENDER.get() else {
+        return false;
+    };
+    let (reply_tx, reply_rx) = sync_channel(1);
+    let sent = tx
+        .lock()
+        .map(|s| {
+            s.send(HotkeyRequest {
+                config: HotkeyConfig {
                     main_combo: combo,
                     workspace_slots,
-                })
-                .is_ok()
+                },
+                reply: reply_tx,
             })
-            .unwrap_or(false),
-        None => false,
+            .is_ok()
+        })
+        .unwrap_or(false);
+    if !sent {
+        return false;
     }
+    reply_rx
+        .recv_timeout(std::time::Duration::from_millis(800))
+        .unwrap_or(false)
 }
 
 unsafe fn register(combo: Option<Combo>) -> bool {

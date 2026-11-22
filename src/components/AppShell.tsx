@@ -156,7 +156,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         >
           <button
             type="button"
-            onClick={() => navigate("/")}
+            onClick={() => guardedNavigate("/")}
             title="WorkScene"
             className="flex cursor-pointer items-center gap-2 overflow-hidden text-left"
           >

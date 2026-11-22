@@ -9,12 +9,31 @@ use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
 use crate::win::{display, filter, process, window};
 use layout::{clamp, clamp_visible, from_ratios, round, Area};
-use matcher::{match_window, Candidate};
-use std::collections::HashSet;
+use matcher::{match_window, match_window_for_close, Candidate};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use windows_sys::Win32::Foundation::HWND;
+
+/// 记录每个工作空间最近一次恢复时命中/归属的窗口句柄，供「一键收工」优先精准关闭
+static RESTORED_HWNDS: OnceLock<Mutex<HashMap<String, Vec<usize>>>> = OnceLock::new();
+
+fn remember_workspace_hwnds(workspace_id: &str, hwnds: Vec<usize>) {
+    let map = RESTORED_HWNDS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(workspace_id.to_string(), hwnds);
+    }
+}
+
+fn take_workspace_hwnds(workspace_id: &str) -> Vec<usize> {
+    let map = RESTORED_HWNDS.get_or_init(|| Mutex::new(HashMap::new()));
+    map.lock()
+        .ok()
+        .and_then(|mut g| g.remove(workspace_id))
+        .unwrap_or_default()
+}
 
 /// 同 DPI 下的位置/尺寸容差；跨 DPI 时按 max(8, 2×scale) 放大（评审 R2-3）
 const BASE_DELTA_PX: i32 = 8;
@@ -284,10 +303,7 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
             target_name: r.display_name.clone(),
             detail: match r.item_type.as_str() {
                 "url" => format!("将用默认浏览器打开 {}", r.target),
-                "folder" => match choose_opener(scene, r) {
-                    ResourceOpener::Ide(exe) => format!("将用 {} 打开 {}", exe, r.target),
-                    ResourceOpener::Default => format!("将用资源管理器打开 {}", r.target),
-                },
+                "folder" => format!("将用资源管理器打开 {}", r.target),
                 _ => format!("将用默认程序打开 {}", r.target),
             },
             status: if exists {
@@ -393,27 +409,29 @@ pub fn apply_with_options(
     let mut used: HashSet<usize> = HashSet::new();
     let mut current = current_candidates(self_pid);
 
-    // 先按复用策略补齐实例：快照里有 3 个 Chrome 窗口、当前只开 1 个时，
-    // 只有 reuse_or_launch 才会补 2 个；reuse_if_matched 不启动，
-    // always_launch 则每个窗口各启一个（评审 R1-4 的三值语义）
+    // 先按复用策略补齐实例：保留每个窗口独立的 launch_args / priority / delay_ms，
+    // 且记录启动前已有句柄，避免在软件已打开旧实例时瞬间误判为新窗口就绪
     if relaunch_missing {
         let mut launched_total: usize = 0;
-        'launch: for plan in plan_launches(scene, &current) {
+        let mut launched_per_exe: HashMap<String, usize> = HashMap::new();
+        for plan in plan_launches(scene, &current) {
             if is_cancelled() || launched_total >= MAX_LAUNCH_TOTAL {
                 break;
             }
             if !std::path::Path::new(&plan.exe).is_file() {
                 continue;
             }
-            for _ in 0..plan.count.min(MAX_RELAUNCH_PER_EXE) {
-                if is_cancelled() {
-                    break 'launch;
-                }
-                launch_app(&plan.exe, &plan.args);
-                launched_total += 1;
-                if wait_for_process_window(&plan.exe) {
-                    current = current_candidates(self_pid);
-                }
+            let exe_key = plan.exe.to_lowercase();
+            let exe_count = launched_per_exe.entry(exe_key).or_insert(0);
+            if *exe_count >= MAX_RELAUNCH_PER_EXE {
+                continue;
+            }
+            let known_hwnds: HashSet<usize> = current.iter().map(|c| c.hwnd).collect();
+            launch_app(&plan.exe, &plan.args);
+            *exe_count += 1;
+            launched_total += 1;
+            if wait_for_process_window(&plan.exe, &known_hwnds, self_pid) {
+                current = current_candidates(self_pid);
             }
             if plan.delay_ms > 0 && !is_cancelled() {
                 let mut left = plan.delay_ms.min(15_000);
@@ -484,7 +502,7 @@ pub fn apply_with_options(
             used.insert(target.hwnd);
             let hwnd = target.hwnd as HWND;
 
-            let state_restored = place_window(hwnd, rect, win.show_state);
+            let mut state_restored = place_window(hwnd, rect, win.show_state);
             let elapsed = || t0.elapsed().as_millis() as i64;
 
             {
@@ -496,9 +514,9 @@ pub fn apply_with_options(
                     threshold,
                     Duration::from_millis(250),
                 );
-                if delta.0 > threshold {
+                if delta.0 > threshold || (win.show_state == ShowState::Maximized && !state_restored) {
                     // 二次校正 + 更长的稳定窗口（慢应用 / 自己会挪窗口的应用）
-                    place_window(hwnd, rect, win.show_state);
+                    state_restored = place_window(hwnd, rect, win.show_state);
                     delta = wait_for_settle(
                         hwnd,
                         &target_info,
@@ -508,7 +526,7 @@ pub fn apply_with_options(
                     );
                 }
 
-                let position_ok = delta.0 <= threshold;
+                let position_ok = win.show_state == ShowState::Minimized || delta.0 <= threshold;
                 let maximized_failed =
                     win.show_state == ShowState::Maximized && !state_restored;
 
@@ -526,7 +544,7 @@ pub fn apply_with_options(
                 } else if maximized_failed {
                     "位置已恢复，但窗口未能保持最大化".into()
                 } else if win.show_state == ShowState::Minimized {
-                    "已恢复到目标位置；原快照中该窗口为最小化，为避免误解已还原为普通窗口".into()
+                    "已保持最小化并恢复还原位置".into()
                 } else if win.show_state == ShowState::Maximized {
                     "已最大化到目标显示器".into()
                 } else {
@@ -536,8 +554,6 @@ pub fn apply_with_options(
                 let code = if !position_ok {
                     Some("layout_drift".to_string())
                 } else if maximized_failed {
-                    Some("state_not_restored".to_string())
-                } else if win.show_state == ShowState::Minimized {
                     Some("state_not_restored".to_string())
                 } else {
                     None
@@ -592,6 +608,44 @@ pub fn apply_with_options(
     }
 
     // 资源恢复：窗口摆好之后再打开文件/文件夹/网址，避免被窗口抢走焦点
+    // 记住本次恢复归属于该工作空间的窗口句柄，供「一键收工」精准关闭
+    if !used.is_empty() && only_targets.is_none() {
+        remember_workspace_hwnds(&scene.id, used.iter().copied().collect());
+    }
+
+    // 专注模式：在打开本空间资源（网页/文件/文件夹）**之前**安静最小化无关窗口，
+    // 防止刚打开的资源窗口反被误最小化
+    if focus_mode && !is_cancelled() && only_targets.is_none() {
+        let mut minimized = 0usize;
+        for c in current_candidates(self_pid) {
+            if c.pid == self_pid || used.contains(&c.hwnd) {
+                continue;
+            }
+            let hwnd = c.hwnd as HWND;
+            if !window::is_iconic(hwnd) && window::minimize_window(hwnd) {
+                minimized += 1;
+            }
+        }
+        if minimized > 0 {
+            let step = RestoreStepResult {
+                step_type: "focus".into(),
+                target_name: "专注模式清理".into(),
+                status: StepStatus::Success,
+                message: format!("已自动最小化 {minimized} 个非本空间窗口（未关闭任何软件）"),
+                match_note: "focus_mode".into(),
+                duration_ms: 0,
+                delta_x: None,
+                delta_y: None,
+                state_restored: true,
+                code: None,
+            };
+            if let Some(app) = app {
+                let _ = app.emit("restore:step", &step);
+            }
+            steps.push(step);
+        }
+    }
+
     for r in &scene.resources {
         if is_cancelled() {
             let step = RestoreStepResult {
@@ -649,45 +703,12 @@ pub fn apply_with_options(
         steps.push(step);
     }
 
-    let mut succeeded = steps.iter().filter(|s| s.status == StepStatus::Success).count();
+    let succeeded = steps.iter().filter(|s| s.status == StepStatus::Success).count();
     let failed = steps.iter().filter(|s| s.status == StepStatus::Failed).count();
     let skipped = steps
         .iter()
         .filter(|s| matches!(s.status, StepStatus::Skipped | StepStatus::NeedsReview))
         .count();
-
-    // 专注模式：把不属于本空间的其他可见窗口安静最小化到任务栏（绝不关闭，跳过 WorkScene 自身）
-    if focus_mode && !is_cancelled() && only_targets.is_none() {
-        let mut minimized = 0usize;
-        for c in current_candidates(self_pid) {
-            if c.pid == self_pid || used.contains(&c.hwnd) {
-                continue;
-            }
-            let hwnd = c.hwnd as HWND;
-            if !window::is_iconic(hwnd) && window::minimize_window(hwnd) {
-                minimized += 1;
-            }
-        }
-        if minimized > 0 {
-            let step = RestoreStepResult {
-                step_type: "focus".into(),
-                target_name: "专注模式清理".into(),
-                status: StepStatus::Success,
-                message: format!("已自动最小化 {minimized} 个非本空间窗口（未关闭任何软件）"),
-                match_note: "focus_mode".into(),
-                duration_ms: 0,
-                delta_x: None,
-                delta_y: None,
-                state_restored: true,
-                code: None,
-            };
-            if let Some(app) = app {
-                let _ = app.emit("restore:step", &step);
-            }
-            succeeded += 1;
-            steps.push(step);
-        }
-    }
 
     let report = RestoreReport {
         run_id: format!("run-{:x}", started_at),
@@ -764,7 +785,8 @@ pub fn split_args(input: &str) -> Vec<String> {
     out
 }
 
-/// 一键收工：向当前已打开且匹配本空间的窗口发送标准 WM_CLOSE（绝不强杀进程，也不碰 WorkScene 自身）
+/// 一键收工：优先关闭本次恢复记录的本空间窗口句柄，再对剩余窗口做严格标题/位置匹配后发送 WM_CLOSE
+/// （绝不强杀进程，也不误关标题和位置都无关的其他软件窗口）
 pub fn close_workspace_windows(scene: &SceneFile) -> AppResult<usize> {
     let monitors = display::enumerate();
     if monitors.is_empty() {
@@ -775,19 +797,31 @@ pub fn close_workspace_windows(scene: &SceneFile) -> AppResult<usize> {
     let mut used: HashSet<usize> = HashSet::new();
     let mut closed = 0usize;
 
-    for win in &scene.windows {
-        let target = resolve_target(win, &monitors);
-        let pool: Vec<Candidate> = current
-            .iter()
-            .filter(|c| c.pid != self_pid && !used.contains(&c.hwnd))
-            .cloned()
-            .collect();
-        let outcome = match_window(win, &pool, target.rect);
-        if let Some(idx) = outcome.picked {
-            let hwnd = pool[idx].hwnd;
-            used.insert(hwnd);
+    // 1. 优先关闭本会话恢复时精确记录的窗口句柄
+    let tracked = take_workspace_hwnds(&scene.id);
+    for hwnd in tracked {
+        if current.iter().any(|c| c.hwnd == hwnd && c.pid != self_pid) && used.insert(hwnd) {
             if window::close_window_gracefully(hwnd as HWND) {
                 closed += 1;
+            }
+        }
+    }
+
+    // 2. 若未通过本会话恢复（或仍有未关闭项），按严格匹配（需标题相似或位置重合）补充关闭
+    if closed < scene.windows.len() {
+        for win in &scene.windows {
+            let target = resolve_target(win, &monitors);
+            let pool: Vec<Candidate> = current
+                .iter()
+                .filter(|c| c.pid != self_pid && !used.contains(&c.hwnd))
+                .cloned()
+                .collect();
+            if let Some(idx) = match_window_for_close(win, &pool, target.rect) {
+                let hwnd = pool[idx].hwnd;
+                used.insert(hwnd);
+                if window::close_window_gracefully(hwnd as HWND) {
+                    closed += 1;
+                }
             }
         }
     }
@@ -797,78 +831,93 @@ pub fn close_workspace_windows(scene: &SceneFile) -> AppResult<usize> {
 struct LaunchPlan {
     exe: String,
     args: Vec<String>,
-    count: usize,
     priority: i64,
     delay_ms: u64,
 }
 
-/// 每个可执行文件要补几个实例，取决于它自己的复用策略与当前已开窗口数；按 launch_priority 升序启动
+/// 当桌面已有同进程实例时，为常见单实例转发型应用注入「新开窗口」参数，避免新启动只切焦点不开窗
+fn inject_new_window_flag(exe: &str, args: &mut Vec<String>) {
+    let name = exe
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    let has_flag = |f: &str| args.iter().any(|a| a.eq_ignore_ascii_case(f));
+    match name.as_str() {
+        "chrome.exe" | "msedge.exe" | "brave.exe" | "vivaldi.exe" | "arc.exe" | "firefox.exe" => {
+            if !has_flag("--new-window") && !has_flag("-new-window") {
+                args.insert(0, "--new-window".into());
+            }
+        }
+        "code.exe" | "code - insiders.exe" | "cursor.exe" | "windsurf.exe" | "trae.exe"
+        | "antigravity.exe" => {
+            if !has_flag("-n") && !has_flag("--new-window") {
+                args.insert(0, "-n".into());
+            }
+        }
+        "wt.exe" => {
+            if !has_flag("-w") && !has_flag("--window") {
+                args.insert(0, "new".into());
+                args.insert(0, "-w".into());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 按窗口分别规划补启任务：保留每个窗口独立的 launch_args / priority / delay_ms，
+/// 并根据当前已有实例数决定需要补启几个（ReuseOrLaunch / AlwaysLaunch / ReuseIfMatched）
 fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
-    struct Group {
-        key: String,
-        exe: String,
-        policy: String,
-        args: Option<String>,
-        need: usize,
-        priority: i64,
-        delay_ms: u64,
+    let mut available_by_exe: HashMap<String, usize> = HashMap::new();
+    for c in current {
+        if let Some(p) = &c.process_path {
+            *available_by_exe.entry(p.to_lowercase()).or_insert(0) += 1;
+        }
     }
 
-    let mut groups: Vec<Group> = Vec::new();
-    for w in &scene.windows {
+    let mut windows_ordered: Vec<&SceneWindow> = scene.windows.iter().collect();
+    windows_ordered.sort_by_key(|w| w.launch_priority);
+
+    let mut plans: Vec<LaunchPlan> = Vec::new();
+    let mut running_count: HashMap<String, usize> = available_by_exe.clone();
+
+    for w in windows_ordered {
         let Some(path) = w.process_path.as_ref() else {
             continue;
         };
         let key = path.to_lowercase();
-        match groups.iter_mut().find(|g| g.key == key) {
-            Some(g) => {
-                g.need += 1;
-                g.priority = g.priority.min(w.launch_priority);
-                g.delay_ms = g.delay_ms.max(w.launch_delay_ms);
+        let should_launch = match parse_policy(&w.reuse_policy) {
+            ReusePolicy::AlwaysLaunch => true,
+            ReusePolicy::ReuseIfMatched => false,
+            ReusePolicy::ReuseOrLaunch => {
+                let avail = available_by_exe.entry(key.clone()).or_insert(0);
+                if *avail > 0 {
+                    *avail -= 1;
+                    false
+                } else {
+                    true
+                }
             }
-            None => groups.push(Group {
-                key,
-                exe: path.clone(),
-                policy: w.reuse_policy.clone(),
-                args: w.launch_args.clone(),
-                need: 1,
-                priority: w.launch_priority,
-                delay_ms: w.launch_delay_ms,
-            }),
+        };
+
+        if !should_launch {
+            continue;
         }
+
+        let mut args = split_args(w.launch_args.as_deref().unwrap_or(""));
+        let existing = running_count.entry(key).or_insert(0);
+        if *existing > 0 {
+            inject_new_window_flag(path, &mut args);
+        }
+        *existing += 1;
+
+        plans.push(LaunchPlan {
+            exe: path.clone(),
+            args,
+            priority: w.launch_priority,
+            delay_ms: w.launch_delay_ms,
+        });
     }
-
-    let mut plans: Vec<LaunchPlan> = groups
-        .into_iter()
-        .filter_map(|g| {
-            let available = current
-                .iter()
-                .filter(|c| {
-                    c.process_path
-                        .as_ref()
-                        .map(|p| p.to_lowercase() == g.key)
-                        .unwrap_or(false)
-                })
-                .count();
-
-            let count = match parse_policy(&g.policy) {
-                ReusePolicy::AlwaysLaunch => g.need,
-                ReusePolicy::ReuseIfMatched => 0,
-                ReusePolicy::ReuseOrLaunch => g.need.saturating_sub(available),
-            };
-
-            if count == 0 {
-                return None;
-            }
-            Some(LaunchPlan {
-                exe: g.exe,
-                args: split_args(g.args.as_deref().unwrap_or("")),
-                count,
-                priority: g.priority,
-                delay_ms: g.delay_ms,
-            })
-        })
-        .collect();
 
     plans.sort_by_key(|p| p.priority);
     plans
@@ -891,16 +940,21 @@ fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState)
 
     match target_state {
         ShowState::Maximized => {
-            // 先给还原矩形，再最大化；SetWindowPlacement 失败时至少位置是对的
+            // 先给还原矩形，再最大化；SetWindowPlacement 失败时用 ShowWindow(SW_SHOWMAXIMIZED) 兜底
             window::set_window_rect(hwnd, rect.0, rect.1, rect.2, rect.3);
             let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
-            // 有些窗口不认 SetWindowPlacement，用 ShowWindow 兜底
             if !window::is_zoomed(hwnd) {
-                let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+                let _ = window::show_maximized(hwnd);
             }
         }
-        // 最小化不强行还原为最小化：用户看不到窗口会以为失败（但报告会说明）
-        ShowState::Minimized | ShowState::Normal => {
+        ShowState::Minimized => {
+            // 保持后台最小化，同时写好还原矩形，不强行弹满屏幕
+            let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Minimized);
+            if !window::is_iconic(hwnd) {
+                let _ = window::minimize_window(hwnd);
+            }
+        }
+        ShowState::Normal => {
             let placed = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Normal);
             if !placed {
                 // 退一步：只改位置，至少布局对得上
@@ -912,7 +966,7 @@ fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState)
     match target_state {
         ShowState::Maximized => window::is_zoomed(hwnd),
         ShowState::Normal => !window::is_zoomed(hwnd) && !window::is_iconic(hwnd),
-        ShowState::Minimized => false,
+        ShowState::Minimized => window::is_iconic(hwnd),
     }
 }
 
@@ -971,29 +1025,16 @@ fn verify(hwnd: HWND, target: &Target, state: ShowState) -> (i32, i32, i32) {
     (dx.max(dy).max(dw).max(dh), dx, dy)
 }
 
-/// 资源用谁打开：工作空间里带了 IDE 时，文件夹优先交给 IDE（L2/L3 的边界能力）
+/// 资源统一由系统默认程序打开（文件夹走 Windows 资源管理器，网址走默认浏览器，文件走默认关联程序），
+/// 避免把普通文档/素材文件夹强行塞给 IDE 打开。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceOpener {
     Default,
-    Ide(String),
 }
 
-pub fn choose_opener(scene: &SceneFile, r: &SceneResource) -> ResourceOpener {
-    if r.item_type != "folder" {
-        return ResourceOpener::Default;
-    }
-    for w in &scene.windows {
-        let Some(path) = w.process_path.as_ref() else {
-            continue;
-        };
-        let name = path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or_default();
-        if crate::adapters::is_ide(name) {
-            return ResourceOpener::Ide(path.clone());
-        }
-    }
+#[allow(dead_code)]
+pub fn choose_opener(_scene: &SceneFile, _r: &SceneResource) -> ResourceOpener {
     ResourceOpener::Default
 }
 
@@ -1006,20 +1047,13 @@ fn resource_exists(r: &SceneResource) -> bool {
 }
 
 /// 用系统默认关联打开资源（ShellExecuteW，"open" 动词）。
-/// 文件夹若同工作空间里带 IDE，则交给 IDE 打开（等价于 `code <dir>`）。
 /// 不走 cmd.exe，也不拼接命令行字符串。
-fn open_resource(scene: &SceneFile, r: &SceneResource) -> bool {
+fn open_resource(_scene: &SceneFile, r: &SceneResource) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     const SW_SHOWNORMAL: i32 = 1;
 
     if !resource_exists(r) {
         return false;
-    }
-
-    if let ResourceOpener::Ide(exe) = choose_opener(scene, r) {
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg(&r.target);
-        return cmd.spawn().is_ok();
     }
 
     let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
@@ -1038,7 +1072,8 @@ fn open_resource(scene: &SceneFile, r: &SceneResource) -> bool {
     }
 }
 
-fn launch_app(exe: &str, args: &[String]) {    let mut cmd = std::process::Command::new(exe);
+fn launch_app(exe: &str, args: &[String]) {
+    let mut cmd = std::process::Command::new(exe);
     if !args.is_empty() {
         cmd.args(args);
     }
@@ -1049,17 +1084,25 @@ fn launch_app(exe: &str, args: &[String]) {    let mut cmd = std::process::Comma
     let _ = cmd.spawn();
 }
 
-fn wait_for_process_window(exe: &str) -> bool {
+/// 等待目标 exe 真正创建出**新的**有效可见窗口（排除启动前已存在的 known_hwnds 及系统/闪屏噪声窗）
+fn wait_for_process_window(exe: &str, known_hwnds: &HashSet<usize>, self_pid: u32) -> bool {
     let deadline = Instant::now() + Duration::from_millis(LAUNCH_WAIT_MS);
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !is_cancelled() {
         std::thread::sleep(Duration::from_millis(120));
-        let mut seen_pids = std::collections::HashSet::with_capacity(32);
-        for raw in window::enumerate_raw() {
-            if !raw.is_visible || !seen_pids.insert(raw.pid) {
+        let mut pid_cache: HashMap<u32, Option<String>> = HashMap::with_capacity(16);
+        let (raws, _) = window::enumerate_visible(Some(self_pid));
+        for raw in raws {
+            let hwnd = raw.hwnd as usize;
+            if known_hwnds.contains(&hwnd) {
                 continue;
             }
-            let pinfo = process::info(raw.pid);
-            if let Some(p) = pinfo.path {
+            if filter::exclude_reason(&raw, self_pid, false).is_some() {
+                continue;
+            }
+            let path = pid_cache
+                .entry(raw.pid)
+                .or_insert_with(|| process::info(raw.pid).path);
+            if let Some(p) = path {
                 if p.eq_ignore_ascii_case(exe) {
                     return true;
                 }
@@ -1074,19 +1117,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opener_prefers_ide_for_folders_only() {
+    fn opener_always_uses_default_system_association() {
         let scene = scene_with("reuse_or_launch", r"C:\Program Files\Microsoft VS Code\Code.exe", 1);
         let folder = SceneResource {
             item_type: "folder".into(),
             target: r"D:\work\app".into(),
             display_name: "app".into(),
         };
-        match choose_opener(&scene, &folder) {
-            ResourceOpener::Ide(exe) => assert!(exe.ends_with("Code.exe")),
-            ResourceOpener::Default => panic!("带 IDE 时文件夹应交给 IDE"),
-        }
+        assert_eq!(choose_opener(&scene, &folder), ResourceOpener::Default);
 
-        // 文件/网址仍走默认关联
         let file = SceneResource {
             item_type: "file".into(),
             target: r"D:\work\app\README.md".into(),
@@ -1225,8 +1264,7 @@ mod tests {
     fn reuse_or_launch_only_fills_the_gap() {
         let scene = scene_with("reuse_or_launch", r"C:\app\a.exe", 3);
         let plans = plan_launches(&scene, &candidate(r"C:\app\a.exe", 1));
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].count, 2, "3 个窗口、已开 1 个 -> 补 2 个");
+        assert_eq!(plans.len(), 2, "3 个窗口、已开 1 个 -> 补 2 个独立启动计划");
     }
 
     #[test]
@@ -1240,7 +1278,15 @@ mod tests {
     fn always_launch_ignores_existing_windows() {
         let scene = scene_with("always_launch", r"C:\app\a.exe", 2);
         let plans = plan_launches(&scene, &candidate(r"C:\app\a.exe", 5));
-        assert_eq!(plans[0].count, 2, "always_launch 不管已开多少都新启");
+        assert_eq!(plans.len(), 2, "always_launch 不管已开多少都新启");
+    }
+
+    #[test]
+    fn multi_window_chrome_injects_new_window_flag() {
+        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Google\Chrome\chrome.exe", 2);
+        let plans = plan_launches(&scene, &candidate(r"C:\Program Files\Google\Chrome\chrome.exe", 1));
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].args.iter().any(|a| a == "--new-window"));
     }
 }
 
