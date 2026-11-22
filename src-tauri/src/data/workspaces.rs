@@ -336,6 +336,57 @@ pub async fn create_from_capture(
     })
 }
 
+/// 保存捕获快照并继承工作空间当前已启用的资源与启动配置（参数/优先级/延迟），
+/// 确保从历史快照恢复或「另存为工作空间」时不会丢失任何配置。
+pub async fn save_enriched_snapshot(
+    db: &Db,
+    workspace_id: &str,
+    name: &str,
+    capture: &CaptureResult,
+) -> AppResult<crate::core::models::SceneSummary> {
+    let saved = storage::save_scene(name, capture)?;
+    let Ok(detail) = get(db, workspace_id).await else {
+        return Ok(saved);
+    };
+    let Ok(mut scene) = storage::load_scene(&saved.id) else {
+        return Ok(saved);
+    };
+
+    let mut cfg_map: std::collections::HashMap<String, &WorkspaceItem> =
+        std::collections::HashMap::new();
+    for it in detail.items.iter().filter(|i| i.item_type == "application") {
+        cfg_map.insert(identity_of(&it.target, &it.display_name), it);
+    }
+    for w in &mut scene.windows {
+        let key = identity_of(&w.process_path, &w.process_name);
+        if let Some(it) = cfg_map.get(&key) {
+            w.reuse_policy = it.reuse_policy.clone();
+            w.launch_args = it.launch_args.clone();
+            w.launch_priority = it.launch_priority;
+            w.launch_delay_ms = it.launch_delay_ms.max(0) as u64;
+        }
+    }
+
+    scene.resources = detail
+        .items
+        .iter()
+        .filter(|i| i.enabled && matches!(i.item_type.as_str(), "file" | "folder" | "url"))
+        .filter_map(|i| {
+            let target = i.target.clone()?;
+            Some(SceneResource {
+                item_type: i.item_type.clone(),
+                target,
+                display_name: i.display_name.clone(),
+            })
+        })
+        .collect();
+
+    if let Ok(json) = serde_json::to_string_pretty(&scene) {
+        let _ = std::fs::write(&saved.path, json);
+    }
+    Ok(saved)
+}
+
 /// 挂一份快照到工作空间：payload 落 JSON，DB 只存索引与指纹。
 /// `snapshot_type` 取值：initial / manual / protection / auto
 pub async fn add_snapshot(
@@ -347,7 +398,7 @@ pub async fn add_snapshot(
     capture: &CaptureResult,
     protected: bool,
 ) -> AppResult<String> {
-    let scene = storage::save_scene(name, capture)?;
+    let scene = save_enriched_snapshot(db, workspace_id, name, capture).await?;
     sqlx::query(
         "INSERT INTO snapshots (id, workspace_id, name, snapshot_type, trigger_type,
             captured_at, window_count, display_count, payload_path, content_fingerprint,
@@ -1409,6 +1460,29 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         .await?;
     }
 
+    // 同步克隆多屏幕拓扑布局方案与生命周期钩子
+    sqlx::query(
+        "INSERT INTO workspace_profiles (workspace_id, display_signature, label, layouts_json, updated_at)
+         SELECT ?, display_signature, label, layouts_json, ?
+         FROM workspace_profiles WHERE workspace_id = ?",
+    )
+    .bind(&new_ws_id)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO workspace_hooks (workspace_id, pre_restore_cmd, post_close_cmd, enabled, updated_at)
+         SELECT ?, pre_restore_cmd, post_close_cmd, enabled, ?
+         FROM workspace_hooks WHERE workspace_id = ?",
+    )
+    .bind(&new_ws_id)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     let app_paths: Vec<String> = src
@@ -1440,6 +1514,23 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
 /// 可移植的工作空间导出格式（PRD §19 导入导出）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExportProfile {
+    pub display_signature: String,
+    pub label: String,
+    pub layouts_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportHooks {
+    pub pre_restore_cmd: String,
+    pub post_close_cmd: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceExport {
     pub schema_version: u32,
     pub exported_at: i64,
@@ -1453,6 +1544,10 @@ pub struct WorkspaceExport {
     pub apps: Vec<ExportApp>,
     pub resources: Vec<ExportResource>,
     pub windows: Vec<ExportWindow>,
+    #[serde(default)]
+    pub profiles: Vec<ExportProfile>,
+    #[serde(default)]
+    pub hooks: Option<ExportHooks>,
 }
 
 fn default_true() -> bool {
@@ -1566,6 +1661,34 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
         })
         .collect();
 
+    let profile_rows = sqlx::query(
+        "SELECT display_signature, label, layouts_json FROM workspace_profiles WHERE workspace_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap_or_default();
+    let profiles: Vec<ExportProfile> = profile_rows
+        .into_iter()
+        .map(|r| ExportProfile {
+            display_signature: r.get("display_signature"),
+            label: r.get("label"),
+            layouts_json: r.get("layouts_json"),
+        })
+        .collect();
+
+    let hooks = crate::data::extras::get_hooks(db, id).await.ok().and_then(|h| {
+        if h.pre_restore_cmd.is_empty() && h.post_close_cmd.is_empty() && !h.enabled {
+            None
+        } else {
+            Some(ExportHooks {
+                pre_restore_cmd: h.pre_restore_cmd,
+                post_close_cmd: h.post_close_cmd,
+                enabled: h.enabled,
+            })
+        }
+    });
+
     let payload = WorkspaceExport {
         schema_version: 1,
         exported_at: now_ms(),
@@ -1576,6 +1699,8 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
         apps,
         resources,
         windows,
+        profiles,
+        hooks,
     };
 
     Ok(serde_json::to_string_pretty(&payload)?)
@@ -1933,6 +2058,40 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         win_count += 1;
     }
 
+    // 导入多屏幕拓扑布局方案
+    for p in &parsed.profiles {
+        if p.display_signature.trim().is_empty() || p.layouts_json.trim().is_empty() {
+            continue;
+        }
+        sqlx::query(
+            "INSERT OR REPLACE INTO workspace_profiles (workspace_id, display_signature, label, layouts_json, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&ws_id)
+        .bind(p.display_signature.trim())
+        .bind(p.label.trim())
+        .bind(&p.layouts_json)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // 导入生命周期钩子：出于安全默认停用（enabled = 0），需用户核对命令后手动开启
+    if let Some(h) = &parsed.hooks {
+        if !h.pre_restore_cmd.trim().is_empty() || !h.post_close_cmd.trim().is_empty() {
+            sqlx::query(
+                "INSERT OR REPLACE INTO workspace_hooks (workspace_id, pre_restore_cmd, post_close_cmd, enabled, updated_at)
+                 VALUES (?, ?, ?, 0, ?)",
+            )
+            .bind(&ws_id)
+            .bind(h.pre_restore_cmd.trim())
+            .bind(h.post_close_cmd.trim())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     tx.commit().await?;
 
     let app_paths: Vec<String> = parsed
@@ -1947,8 +2106,8 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
     Ok(WorkspaceSummary {
         id: ws_id,
         name: name.to_string(),
-        description: parsed.description,
-        color: None,
+        description,
+        color: parsed.color,
         is_favorite: false,
         item_count: app_count,
         resource_count: res_count,

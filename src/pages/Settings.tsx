@@ -610,6 +610,13 @@ export function SettingsPage() {
                     if (!file) return;
                     try {
                       const text = await file.text();
+                      const ok = await confirmAction({
+                        title: `导入全量备份「${file.name}」？`,
+                        description:
+                          "将批量新增备份中的工作空间（不会覆盖或删除你现有的空间）。外部导入的生命周期钩子与启动参数会出于安全默认停用/剥离。",
+                        confirmLabel: "确认导入",
+                      });
+                      if (!ok) return;
                       const count = await api.workspaceImportAll(text);
                       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
                       qc.invalidateQueries({ queryKey: ["storage-stats"] });
@@ -805,7 +812,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "1.1.1"}
+              WorkScene v{info.data?.version ?? "1.1.2"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>

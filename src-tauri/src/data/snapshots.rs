@@ -91,7 +91,7 @@ pub async fn create(
     capture: &CaptureResult,
     protected: bool,
 ) -> AppResult<SnapshotSummary> {
-    let scene = storage::save_scene(name, capture)?;
+    let scene = workspaces::save_enriched_snapshot(db, workspace_id, name, capture).await?;
     let fp = workspaces::fingerprint(capture);
 
     sqlx::query(

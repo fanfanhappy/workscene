@@ -842,6 +842,14 @@ export function WorkspacesPage() {
                     <p className="flex items-center gap-1.5 truncate text-body font-semibold text-ink">
                       <WorkspaceColorDot color={w.color} />
                       <span className="truncate">{w.name}</span>
+                      {w.hotkeySlot ? (
+                        <kbd
+                          title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
+                          className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
+                        >
+                          Ctrl+Alt+{w.hotkeySlot}
+                        </kbd>
+                      ) : null}
                     </p>
                     <p className="text-[11px] text-ink-3">
                       {w.itemCount} 软件 · {w.resourceCount} 文件/网址 · {w.windowCount} 窗口
@@ -887,8 +895,16 @@ export function WorkspacesPage() {
                   {w.isFavorite ? (
                     <Star size={12} className="shrink-0 fill-warning text-warning" />
                   ) : null}
-                  <span className="min-w-0 flex-1 truncate text-body font-medium text-ink">
-                    {w.name}
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-body font-medium text-ink">
+                    <span className="truncate">{w.name}</span>
+                    {w.hotkeySlot ? (
+                      <kbd
+                        title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
+                        className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
+                      >
+                        Ctrl+Alt+{w.hotkeySlot}
+                      </kbd>
+                    ) : null}
                   </span>
                   <span className="tabnum shrink-0 font-mono text-[11px] text-ink-3">
                     {w.itemCount} 软件 · {w.windowCount} 窗口

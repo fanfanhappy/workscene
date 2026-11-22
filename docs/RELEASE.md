@@ -1,8 +1,14 @@
-# WorkScene v1.1.1 正式版发布说明
+# WorkScene v1.1.2 正式版发布说明
 
 - 日期：2026-11-22
-- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.1.1_x64-setup.exe` 与免安装便携版 `WorkScene-1.1.1-portable.zip`）
-- 数据：100% 本地离线（`%LOCALAPPDATA%\WorkScene` 或便携目录 `data\`），无遥测、无云同步、不截屏、不读取浏览器密码/Cookie
+- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.1.2_x64-setup.exe` 与免安装便携版 `WorkScene-1.1.2-portable.zip`）
+- 数据：100% 本地离线（安装版默认 `%LOCALAPPDATA%\WorkScene`，便携版双击 `start.cmd` 自动存入同目录 `data\`），无遥测、无云同步、不截屏、不读取浏览器密码/Cookie
+
+## v1.1.2 完整性补强
+
+- **便携版真正绿色存储**：`start.cmd` 自动设置 `WORKSCENE_DATA_DIR=%~dp0data`，随文件夹拷贝迁移。
+- **全生命周期配置 100% 保留**：复制、导出、全量备份与历史快照完整保留工作空间的资源列表、启动参数/优先级/延迟、色标、多屏幕拓扑布局方案与生命周期钩子（外部导入钩子默认停用，安全可控）。
+- **视图与安全细节**：工作空间列表与紧凑视图同步显示 `Ctrl+Alt+N` 快捷槽徽章；全量备份导入增加二次确认弹窗；外部导入立即弹出风险提醒。
 
 ## v1.1.0 重磅升级
 
