@@ -34,7 +34,11 @@ fn build_menu_with_list(
         builder = builder.separator();
         for ws in list.iter().take(6) {
             let prefix = if ws.is_favorite { "★ " } else { "" };
-            let label = format!("恢复：{prefix}{}", ws.name);
+            let slot_hint = ws
+                .hotkey_slot
+                .map(|s| format!("  [Ctrl+Alt+{s}]"))
+                .unwrap_or_default();
+            let label = format!("恢复：{prefix}{}{slot_hint}", ws.name);
             let id = format!("{RESTORE_PREFIX}{}", ws.id);
             let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
             builder = builder.item(&item);
@@ -42,8 +46,21 @@ fn build_menu_with_list(
     }
 
     let snap = MenuItem::with_id(app, "snapshot", "立即备份当前桌面", true, None::<&str>)?;
+    let close_active = MenuItem::with_id(
+        app,
+        "close_active",
+        "收工（关闭当前工作空间窗口）",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "退出 WorkScene", true, None::<&str>)?;
-    builder.separator().item(&snap).separator().item(&quit).build()
+    builder
+        .separator()
+        .item(&snap)
+        .item(&close_active)
+        .separator()
+        .item(&quit)
+        .build()
 }
 
 /// 异步刷新托盘菜单：绝不在 Tokio 异步线程内调用 `block_on`，
@@ -82,6 +99,11 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 let handle = app.clone();
                 std::thread::spawn(move || {
                     take_snapshot_now(&handle);
+                });
+            } else if id == "close_active" {
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    close_active_from_tray(&handle);
                 });
             } else if id == "quit" {
                 app.exit(0);
@@ -140,11 +162,15 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
     let res = tauri::async_runtime::block_on(async {
         let mut scene = data::workspaces::to_scene(&db, workspace_id).await?;
         let _ = data::extras::apply_matching_profile(&db, workspace_id, &mut scene).await;
-        if let Ok(hooks) = data::extras::get_hooks(&db, workspace_id).await {
+        let hook_step = if let Ok(hooks) = data::extras::get_hooks(&db, workspace_id).await {
             if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
-                data::extras::run_hook_command(&hooks.pre_restore_cmd);
+                Some(crate::commands::run_pre_restore_hook_step(&hooks.pre_restore_cmd))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         let snapshot_id = data::workspaces::latest_snapshot(&db, workspace_id).await?;
         let settings = data::settings::get(&db).await.unwrap_or_default();
         let relaunch = settings.restore_relaunch_default;
@@ -165,7 +191,7 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
             Err(_) => None,
         };
 
-        let report = crate::restore::apply_with_options(
+        let mut report = crate::restore::apply_with_options(
             Some(app),
             &scene,
             relaunch,
@@ -173,6 +199,9 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
             pre_restore,
             None,
         )?;
+        if let Some(step) = hook_step {
+            crate::commands::prepend_hook_step(&mut report, step);
+        }
         let _ = data::runs::save(
             &db,
             &report,
@@ -209,7 +238,7 @@ fn take_snapshot_now(app: &AppHandle) {
     let capture = match crate::capture::scan() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("托盘快照失败：{e}");
+            let _ = app.emit("tray:notice", format!("托盘快照失败：{e}"));
             return;
         }
     };
@@ -231,8 +260,60 @@ fn take_snapshot_now(app: &AppHandle) {
         Ok(Some(snap))
     });
 
-    if let Ok(Some(snap)) = created {
-        let _ = app.emit("tray:snapshot_done", &snap);
+    match created {
+        Ok(Some(snap)) => {
+            let _ = app.emit("tray:snapshot_done", &snap);
+        }
+        Ok(None) => {
+            show_main(app);
+            let _ = app.emit("tray:notice", "还没有可备份的工作空间，请先捕获并保存一个工作空间");
+        }
+        Err(e) => {
+            let _ = app.emit("tray:notice", format!("托盘快照保存失败：{e}"));
+        }
+    }
+}
+
+/// 托盘菜单「收工」：优雅关闭当前激活工作空间（若无则首个工作空间）的窗口
+fn close_active_from_tray(app: &AppHandle) {
+    let db = app.state::<data::Db>().inner().clone();
+    let res = tauri::async_runtime::block_on(async {
+        let ws_id = match data::snapshots::active_workspace(&db).await? {
+            Some(id) => id,
+            None => {
+                let list = data::workspaces::list(&db).await?;
+                let Some(first) = list.first() else {
+                    return Ok::<Option<(String, usize)>, crate::core::AppError>(None);
+                };
+                first.id.clone()
+            }
+        };
+        let mut scene = data::workspaces::to_scene(&db, &ws_id).await?;
+        let _ = data::extras::apply_matching_profile(&db, &ws_id, &mut scene).await;
+        let name = scene.name.clone();
+        let hooks = data::extras::get_hooks(&db, &ws_id).await.unwrap_or_default();
+        let closed = crate::restore::close_workspace_windows(&scene)?;
+        if hooks.enabled && !hooks.post_close_cmd.trim().is_empty() {
+            let _ = data::extras::run_hook_command(&hooks.post_close_cmd);
+        }
+        Ok(Some((name, closed)))
+    });
+
+    match res {
+        Ok(Some((name, closed))) => {
+            let msg = if closed > 0 {
+                format!("已向「{name}」的 {closed} 个窗口发送关闭请求")
+            } else {
+                format!("「{name}」当前没有已打开的窗口")
+            };
+            let _ = app.emit("tray:notice", msg);
+        }
+        Ok(None) => {
+            let _ = app.emit("tray:notice", "暂无工作空间可执行收工");
+        }
+        Err(e) => {
+            let _ = app.emit("tray:notice", format!("收工失败：{e}"));
+        }
     }
 }
 

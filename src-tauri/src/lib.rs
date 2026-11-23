@@ -141,10 +141,12 @@ pub fn run() {
             commands::workspace_add_app,
             commands::workspace_resource_update,
             commands::workspace_profile_list,
+            commands::workspace_profile_get,
             commands::workspace_profile_save,
             commands::workspace_profile_delete,
             commands::workspace_hooks_get,
             commands::workspace_hooks_set,
+            commands::workspace_hook_test,
             commands::workspace_items_add_batch,
             commands::workspace_export_all,
             commands::workspace_import_all,
@@ -158,6 +160,7 @@ pub fn run() {
             commands::run_list,
             commands::run_steps,
             commands::run_error_stats,
+            commands::run_clear,
             commands::restore_is_busy,
             commands::restore_cancel,
             commands::snapshot_list,
@@ -179,6 +182,7 @@ pub fn run() {
             commands::system_open_startup_dir,
             commands::dialog_pick_file,
             commands::dialog_pick_folder,
+            commands::dialog_save_json,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {

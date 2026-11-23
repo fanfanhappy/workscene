@@ -62,6 +62,7 @@ struct BrowseInfoW {
 #[link(name = "comdlg32")]
 extern "system" {
     fn GetOpenFileNameW(lpofn: *mut OpenFileNameW) -> i32;
+    fn GetSaveFileNameW(lpofn: *mut OpenFileNameW) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -77,6 +78,7 @@ extern "system" {
     fn CoTaskMemFree(pv: *mut c_void);
 }
 
+const OFN_OVERWRITEPROMPT: u32 = 0x0000_0002;
 const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
 const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
 const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
@@ -125,6 +127,57 @@ pub fn pick_file(title: &str, exe_only: bool) -> Option<String> {
     };
 
     let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+    if ok == 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let path = String::from_utf16_lossy(&buf[..len]);
+    if path.trim().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// 弹出 Windows 原生「另存为 JSON」对话框
+pub fn save_json_file(title: &str, default_name: &str) -> Option<String> {
+    let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let filter_w: Vec<u16> = "JSON 备份文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let def_ext_w: Vec<u16> = "json\0".encode_utf16().collect();
+    let mut buf: Vec<u16> = vec![0u16; 4096];
+    let default_w: Vec<u16> = default_name.encode_utf16().collect();
+    let copy_len = default_w.len().min(buf.len().saturating_sub(1));
+    buf[..copy_len].copy_from_slice(&default_w[..copy_len]);
+
+    let mut ofn = OpenFileNameW {
+        l_struct_size: std::mem::size_of::<OpenFileNameW>() as u32,
+        hwnd_owner: std::ptr::null_mut(),
+        h_instance: std::ptr::null_mut(),
+        lpstr_filter: filter_w.as_ptr(),
+        lpstr_custom_filter: std::ptr::null_mut(),
+        n_max_cust_filter: 0,
+        n_filter_index: 1,
+        lpstr_file: buf.as_mut_ptr(),
+        n_max_file: buf.len() as u32,
+        lpstr_file_title: std::ptr::null_mut(),
+        n_max_file_title: 0,
+        lpstr_initial_dir: std::ptr::null(),
+        lpstr_title: title_w.as_ptr(),
+        flags: OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        n_file_offset: 0,
+        n_file_extension: 0,
+        lpstr_def_ext: def_ext_w.as_ptr(),
+        l_cust_data: 0,
+        lpfn_hook: std::ptr::null(),
+        lp_template_name: std::ptr::null(),
+        pv_reserved: std::ptr::null_mut(),
+        dw_reserved: 0,
+        flags_ex: 0,
+    };
+
+    let ok = unsafe { GetSaveFileNameW(&mut ofn) };
     if ok == 0 {
         return None;
     }

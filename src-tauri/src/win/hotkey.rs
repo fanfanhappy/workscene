@@ -71,9 +71,16 @@ pub fn normalize_preset(text: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct HotkeyUpdateResult {
+    pub main_ok: bool,
+    /// 未能成功注册的快捷槽编号（1..=9），空表示全部成功或已关闭
+    pub failed_slots: Vec<usize>,
+}
+
 struct HotkeyRequest {
     config: HotkeyConfig,
-    reply: SyncSender<bool>,
+    reply: SyncSender<HotkeyUpdateResult>,
 }
 
 static SENDER: OnceLock<Mutex<Sender<HotkeyRequest>>> = OnceLock::new();
@@ -94,7 +101,7 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
 
         let mut current_main = register(initial);
         let mut current_slots = if workspace_slots {
-            register_ws_slots()
+            register_ws_slots().0
         } else {
             false
         };
@@ -116,18 +123,22 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
                         None => true,
                     };
 
-                    let mut slots_ok = true;
+                    let mut failed_slots = Vec::new();
                     if current_slots != next.workspace_slots {
                         if current_slots {
                             unregister_ws_slots();
                             current_slots = false;
                         } else {
-                            current_slots = register_ws_slots();
-                            slots_ok = current_slots;
+                            let (any_ok, failed) = register_ws_slots();
+                            current_slots = any_ok;
+                            failed_slots = failed;
                         }
                     }
 
-                    let _ = req.reply.send(main_ok && slots_ok);
+                    let _ = req.reply.send(HotkeyUpdateResult {
+                        main_ok,
+                        failed_slots,
+                    });
                 }
             } else if msg.message == WM_HOTKEY {
                 let id = msg.wParam as i32;
@@ -148,9 +159,13 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
 }
 
 /// 运行中切换快捷键配置（设置页调用）：通过 PostThreadMessageW 立即唤醒阻塞线程并返回真实 RegisterHotKey 结果
-pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
+pub fn update(combo: Option<Combo>, workspace_slots: bool) -> HotkeyUpdateResult {
+    let fallback = HotkeyUpdateResult {
+        main_ok: combo.is_none(),
+        failed_slots: Vec::new(),
+    };
     let Some(tx) = SENDER.get() else {
-        return false;
+        return fallback;
     };
     let (reply_tx, reply_rx) = sync_channel(1);
     let sent = tx
@@ -167,7 +182,7 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
         })
         .unwrap_or(false);
     if !sent {
-        return false;
+        return fallback;
     }
     let tid = THREAD_ID.load(Ordering::Acquire);
     if tid != 0 {
@@ -177,7 +192,7 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> bool {
     }
     reply_rx
         .recv_timeout(std::time::Duration::from_millis(800))
-        .unwrap_or(false)
+        .unwrap_or(fallback)
 }
 
 unsafe fn register(combo: Option<Combo>) -> bool {
@@ -191,8 +206,9 @@ unsafe fn unregister() {
     UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
 }
 
-unsafe fn register_ws_slots() -> bool {
+unsafe fn register_ws_slots() -> (bool, Vec<usize>) {
     let mut any = false;
+    let mut failed = Vec::new();
     for i in 0..WS_HOTKEY_COUNT {
         let ok = RegisterHotKey(
             std::ptr::null_mut(),
@@ -202,9 +218,11 @@ unsafe fn register_ws_slots() -> bool {
         ) != 0;
         if ok {
             any = true;
+        } else {
+            failed.push(i + 1);
         }
     }
-    any
+    (any, failed)
 }
 
 unsafe fn unregister_ws_slots() {

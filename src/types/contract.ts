@@ -379,6 +379,27 @@ export interface ImportPreview {
   disabledApps: string[];
   /** 文件里带了启动参数，导入时会被剥离 */
   appsWithArgs: string[];
+  /** 是否包含生命周期钩子命令（导入时默认停用） */
+  hasHooks: boolean;
+}
+
+/** 全量备份导入结果（含成功数与失败明细） */
+export interface ImportAllResult {
+  imported: number;
+  failed: string[];
+}
+
+/** 多显示器拓扑方案内的单窗口布局 */
+export interface SavedProfileLayout {
+  processName: string;
+  className: string;
+  title: string;
+  monitorKey: string;
+  xRatio: number;
+  yRatio: number;
+  widthRatio: number;
+  heightRatio: number;
+  showState: ShowState;
 }
 
 /** L2 上下文自动捕获条目（IDE 项目目录 / 资源管理器打开的文件夹） */

@@ -43,7 +43,7 @@ const BUILTIN_ADAPTERS = [
     id: "ide",
     name: "主流 IDE / 代码编辑器",
     exes: "Code.exe · Cursor.exe · Antigravity.exe · Windsurf.exe · Trae.exe · JetBrains (IDEA / PyCharm / WebStorm 等)",
-    supported: ["进程启动", "窗口定位", "自动用 IDE 打开文件夹资源"],
+    supported: ["进程启动", "窗口定位", "L2 项目目录上下文自动识别"],
     limit: "不恢复未保存的编辑缓冲区。",
     icon: Cpu,
   },
@@ -595,17 +595,14 @@ export function SettingsPage() {
                 onClick={async () => {
                   try {
                     const json = await api.workspaceExportAll();
-                    const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
                     const date = new Date().toISOString().slice(0, 10);
-                    a.href = url;
-                    a.download = `WorkScene-backup-${date}.json`;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-                    toast.success("全量备份已导出", `已下载 WorkScene-backup-${date}.json`);
+                    const savedPath = await api.dialogSaveJson(
+                      `WorkScene-backup-${date}.json`,
+                      json,
+                    );
+                    if (savedPath) {
+                      toast.success("全量备份已导出", savedPath);
+                    }
                   } catch (e) {
                     toast.danger("导出备份失败", String((e as Error).message));
                   }
@@ -632,10 +629,19 @@ export function SettingsPage() {
                         confirmLabel: "确认导入",
                       });
                       if (!ok) return;
-                      const count = await api.workspaceImportAll(text);
+                      const res = await api.workspaceImportAll(text);
                       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
                       qc.invalidateQueries({ queryKey: ["storage-stats"] });
-                      toast.success(`已批量导入 ${count} 个工作空间`);
+                      if (res.failed.length === 0) {
+                        toast.success(`已批量导入 ${res.imported} 个工作空间`);
+                      } else if (res.imported > 0) {
+                        toast.warning(
+                          `已导入 ${res.imported} 个，跳过 ${res.failed.length} 个`,
+                          res.failed.slice(0, 2).join("；"),
+                        );
+                      } else {
+                        toast.danger("未导入任何工作空间", res.failed.slice(0, 2).join("；"));
+                      }
                     } catch (err) {
                       toast.danger("导入备份失败", String((err as Error).message));
                     }

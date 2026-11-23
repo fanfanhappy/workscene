@@ -132,7 +132,14 @@ export function CapturePage() {
       };
       if (subset.windows.length === 0) throw new Error("请至少勾选一个窗口");
 
-      const pickedCtx = detectedCtx.filter((c) => selectedCtx.has(c.target));
+      const selectedApps = new Set(
+        subset.windows.map((w) => w.processName.toLowerCase()),
+      );
+      const pickedCtx = detectedCtx.filter(
+        (c) =>
+          selectedCtx.has(c.target) &&
+          selectedApps.has(c.sourceApp.toLowerCase()),
+      );
       const applyDetectedContext = async (wsId: string) => {
         if (pickedCtx.length === 0) return;
         const folders = pickedCtx.filter((c) => c.kind !== "ide_project");
@@ -166,6 +173,11 @@ export function CapturePage() {
                     appItem.launchPriority,
                     appItem.launchDelayMs,
                   )
+                  .catch(() => undefined);
+              } else {
+                // 同款 IDE 打开了多个项目目录（或已有自定义启动参数）时，将额外项目目录加入资源列表，避免丢失
+                await api
+                  .workspaceItemAdd(wsId, "folder", proj.target, proj.displayName)
                   .catch(() => undefined);
               }
             }
@@ -260,6 +272,13 @@ export function CapturePage() {
     () => (result?.windows ?? []).filter((w) => selected.has(w.hwnd)),
     [result, selected],
   );
+
+  const visibleDetectedCtx = useMemo(() => {
+    const activeApps = new Set(
+      selectedWindows.map((w) => w.processName.toLowerCase()),
+    );
+    return detectedCtx.filter((c) => activeApps.has(c.sourceApp.toLowerCase()));
+  }, [detectedCtx, selectedWindows]);
 
   const uncertainCount = useMemo(
     () => selectedWindows.filter((w) => !w.processPath).length,
@@ -561,16 +580,16 @@ export function CapturePage() {
                 />
               </div>
 
-              {detectedCtx.length > 0 ? (
+              {visibleDetectedCtx.length > 0 ? (
                 <div className="flex flex-col gap-1.5 rounded-[10px] border border-accent/25 bg-accent/5 p-2.5">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-medium text-ink">
-                      自动识别到 {detectedCtx.length} 个项目/文件夹上下文
+                      自动识别到 {visibleDetectedCtx.length} 个项目/文件夹上下文
                     </span>
-                    <span className="text-ink-3">保存时将一并加入资源列表</span>
+                    <span className="text-ink-3">IDE 项目将写入启动参数，文件夹加入资源</span>
                   </div>
                   <div className="flex max-h-28 flex-col gap-1 overflow-y-auto">
-                    {detectedCtx.map((ctx) => {
+                    {visibleDetectedCtx.map((ctx) => {
                       const on = selectedCtx.has(ctx.target);
                       return (
                         <label

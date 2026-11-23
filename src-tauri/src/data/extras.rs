@@ -53,16 +53,16 @@ pub struct DisplayProfileSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SavedProfileLayout {
-    process_name: String,
-    class_name: String,
-    title: String,
-    monitor_key: String,
-    x_ratio: f64,
-    y_ratio: f64,
-    width_ratio: f64,
-    height_ratio: f64,
-    show_state: ShowState,
+pub struct SavedProfileLayout {
+    pub process_name: String,
+    pub class_name: String,
+    pub title: String,
+    pub monitor_key: String,
+    pub x_ratio: f64,
+    pub y_ratio: f64,
+    pub width_ratio: f64,
+    pub height_ratio: f64,
+    pub show_state: ShowState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -172,6 +172,26 @@ pub async fn list_display_profiles(
         .collect())
 }
 
+pub async fn get_display_profile(
+    db: &Db,
+    workspace_id: &str,
+    display_signature: &str,
+) -> AppResult<Vec<SavedProfileLayout>> {
+    let row = sqlx::query(
+        "SELECT layouts_json FROM workspace_profiles WHERE workspace_id = ? AND display_signature = ?",
+    )
+    .bind(workspace_id)
+    .bind(display_signature)
+    .fetch_optional(&db.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("未找到指定的屏幕布局方案"))?;
+
+    let json: String = row.get("layouts_json");
+    let saved: Vec<SavedProfileLayout> = serde_json::from_str(&json)
+        .map_err(|e| AppError::msg(format!("屏幕布局方案数据损坏：{e}")))?;
+    Ok(saved)
+}
+
 pub async fn delete_display_profile(
     db: &Db,
     workspace_id: &str,
@@ -273,18 +293,63 @@ pub async fn set_hooks(db: &Db, workspace_id: &str, hooks: &WorkspaceHooks) -> A
     Ok(())
 }
 
-/// 静默执行用户显式开启并配置的本地钩子命令（不阻塞主流程）
-pub fn run_hook_command(cmd: &str) {
+/// 执行用户显式开启并配置的本地钩子命令：
+/// 等待命令完成（带超时上限，避免挂起恢复流程），返回人类可读的结果或错误说明。
+pub fn run_hook_command(cmd: &str) -> Result<String, String> {
+    run_hook_command_with_timeout(cmd, std::time::Duration::from_secs(8))
+}
+
+pub fn run_hook_command_with_timeout(
+    cmd: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::Instant;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
-        return;
+        return Ok("空命令已跳过".into());
     }
-    let _ = std::process::Command::new("cmd")
+    let mut child = std::process::Command::new("cmd")
         .args(["/C", trimmed])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+        .spawn()
+        .map_err(|e| format!("无法启动命令：{e}"))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(format!("命令执行完成：{trimmed}"));
+                }
+                let mut err_text = String::new();
+                if let Some(mut se) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = se.read_to_string(&mut err_text);
+                }
+                let detail = err_text.trim();
+                let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "未知".into());
+                return Err(if detail.is_empty() {
+                    format!("命令退出码 {code}")
+                } else {
+                    format!("命令退出码 {code}：{}", detail.chars().take(160).collect::<String>())
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // 超时不强杀子进程（例如后台常驻服务启动命令），放行后续恢复并明确提示
+                    return Ok(format!("命令已后台启动（超过 {}s 仍在运行，已继续后续步骤）", timeout.as_secs()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            Err(e) => return Err(format!("等待命令结果失败：{e}")),
+        }
+    }
 }
 
 /// 内联编辑已有资源项（文件 / 文件夹 / 网址）的名称或目标地址（含 URL 协议校验与重复检测）

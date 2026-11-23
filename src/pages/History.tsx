@@ -61,6 +61,7 @@ export function HistoryPage() {
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [snapName, setSnapName] = useState("");
+  const [saveAsTarget, setSaveAsTarget] = useState<{ id: string; name: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const workspaces = useQuery({
@@ -192,11 +193,15 @@ export function HistoryPage() {
   });
 
   const saveAsWorkspace = useMutation({
-    mutationFn: ({ id, name }: { id: string; name: string }) =>
-      api.snapshotSaveAsWorkspace(id, name),
-    onSuccess: (ws) => {
+    mutationFn: ({ id, name, openAfter }: { id: string; name: string; openAfter?: boolean }) =>
+      api.snapshotSaveAsWorkspace(id, name).then((ws) => ({ ws, openAfter })),
+    onSuccess: ({ ws, openAfter }) => {
+      setSaveAsTarget(null);
       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
       toast.success(`已另存为工作空间「${ws.name}」`);
+      if (openAfter) {
+        navigate(`/workspaces?id=${ws.id}`);
+      }
     },
     onError: (e) => toast.danger("另存失败", String((e as Error).message)),
   });
@@ -410,7 +415,7 @@ export function HistoryPage() {
                       variant="ghost"
                       disabled={saveAsWorkspace.isPending}
                       onClick={() =>
-                        saveAsWorkspace.mutate({
+                        setSaveAsTarget({
                           id: s.id,
                           name: `${s.name} (副本)`,
                         })
@@ -491,6 +496,67 @@ export function HistoryPage() {
           }}
           className="h-9 w-full rounded-[8px] border border-line-strong bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
           placeholder="输入快照名称"
+        />
+      </Dialog>
+
+      <Dialog
+        open={Boolean(saveAsTarget)}
+        onClose={() => setSaveAsTarget(null)}
+        title="将快照另存为工作空间"
+        maxWidth="max-w-sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setSaveAsTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={saveAsWorkspace.isPending || !saveAsTarget?.name.trim()}
+              onClick={() =>
+                saveAsTarget &&
+                saveAsWorkspace.mutate({
+                  id: saveAsTarget.id,
+                  name: saveAsTarget.name.trim(),
+                  openAfter: false,
+                })
+              }
+            >
+              仅保存
+            </Button>
+            <Button
+              variant="primary"
+              disabled={saveAsWorkspace.isPending || !saveAsTarget?.name.trim()}
+              onClick={() =>
+                saveAsTarget &&
+                saveAsWorkspace.mutate({
+                  id: saveAsTarget.id,
+                  name: saveAsTarget.name.trim(),
+                  openAfter: true,
+                })
+              }
+            >
+              保存并查看
+            </Button>
+          </>
+        }
+      >
+        <input
+          autoFocus
+          value={saveAsTarget?.name ?? ""}
+          onChange={(e) =>
+            setSaveAsTarget((prev) => (prev ? { ...prev, name: e.target.value } : prev))
+          }
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && saveAsTarget?.name.trim() && !saveAsWorkspace.isPending) {
+              saveAsWorkspace.mutate({
+                id: saveAsTarget.id,
+                name: saveAsTarget.name.trim(),
+                openAfter: true,
+              });
+            }
+          }}
+          className="h-9 w-full rounded-[8px] border border-line-strong bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
+          placeholder="输入新工作空间名称"
         />
       </Dialog>
 
@@ -655,13 +721,34 @@ function RunHistorySection({
   activeWorkspaceId: string | null;
   wsMap: Map<string, string>;
 }) {
+  const qc = useQueryClient();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [scope, setScope] = useState<"all" | "current">("all");
+  const [limit, setLimit] = useState(15);
 
   const runs = useQuery({
-    queryKey: ["runs"],
-    queryFn: () => api.runList(15),
+    queryKey: ["runs", limit],
+    queryFn: () => api.runList(limit),
     staleTime: 0,
+  });
+
+  const errorStats = useQuery({
+    queryKey: ["run-error-stats"],
+    queryFn: api.runErrorStats,
+    staleTime: 10_000,
+    retry: 0,
+  });
+
+  const clearRuns = useMutation({
+    mutationFn: api.runClear,
+    onSuccess: (count) => {
+      setExpanded(null);
+      qc.invalidateQueries({ queryKey: ["runs"] });
+      qc.invalidateQueries({ queryKey: ["run-error-stats"] });
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      toast.info(count > 0 ? `已清空 ${count} 条恢复记录` : "暂无恢复记录");
+    },
+    onError: (e) => toast.danger("清空记录失败", String((e as Error).message)),
   });
 
   const steps = useQuery({
@@ -679,6 +766,11 @@ function RunHistorySection({
     return all;
   }, [runs.data, scope, activeWorkspaceId]);
 
+  const nonOkStats = useMemo(
+    () => (errorStats.data ?? []).filter(([code, n]) => code !== "ok" && n > 0),
+    [errorStats.data],
+  );
+
   const tone = (status: string) =>
     status === "completed"
       ? "success"
@@ -688,27 +780,61 @@ function RunHistorySection({
 
   return (
     <Card padded={false} className="overflow-hidden">
-      <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
-        <span className="text-aux font-medium text-ink">恢复执行记录</span>
-        <div className="inline-flex rounded-[7px] bg-raised/70 p-0.5 text-[11px]">
-          <button
-            type="button"
-            onClick={() => setScope("all")}
-            className={`cursor-pointer rounded-[5px] px-2 py-0.5 ${
-              scope === "all" ? "apple-segment-active font-medium" : "text-ink-3"
-            }`}
-          >
-            全部
-          </button>
-          <button
-            type="button"
-            onClick={() => setScope("current")}
-            className={`cursor-pointer rounded-[5px] px-2 py-0.5 ${
-              scope === "current" ? "apple-segment-active font-medium" : "text-ink-3"
-            }`}
-          >
-            当前空间
-          </button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <span className="text-aux font-medium text-ink">恢复执行记录</span>
+          {nonOkStats.length > 0 ? (
+            <span
+              className="text-[11px] text-ink-3"
+              title="历史步骤异常码分布"
+            >
+              常见未完成原因：
+              {nonOkStats
+                .slice(0, 2)
+                .map(([c, n]) => `${c}(${n})`)
+                .join(" · ")}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-[7px] bg-raised/70 p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setScope("all")}
+              className={`cursor-pointer rounded-[5px] px-2 py-0.5 ${
+                scope === "all" ? "apple-segment-active font-medium" : "text-ink-3"
+              }`}
+            >
+              全部
+            </button>
+            <button
+              type="button"
+              onClick={() => setScope("current")}
+              className={`cursor-pointer rounded-[5px] px-2 py-0.5 ${
+                scope === "current" ? "apple-segment-active font-medium" : "text-ink-3"
+              }`}
+            >
+              当前空间
+            </button>
+          </div>
+          {(runs.data ?? []).length > 0 ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={clearRuns.isPending}
+              onClick={async () => {
+                const ok = await confirmAction({
+                  title: "清空全部恢复执行记录？",
+                  description: "仅清理历史执行日志，不影响任何工作空间或快照备份。",
+                  confirmLabel: "清空记录",
+                  variant: "danger",
+                });
+                if (ok) clearRuns.mutate();
+              }}
+            >
+              <Trash2 size={11} /> 清空
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -783,6 +909,18 @@ function RunHistorySection({
           })}
         </ul>
       )}
+      {(runs.data ?? []).length >= limit ? (
+        <div className="border-t border-line px-4 py-2 text-center">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={runs.isFetching}
+            onClick={() => setLimit((n) => n + 20)}
+          >
+            加载更多记录
+          </Button>
+        </div>
+      ) : null}
     </Card>
   );
 }

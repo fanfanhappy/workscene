@@ -614,8 +614,18 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
     }
 
     for p in payloads {
-        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{p}.bak"));
     }
+
+    // 若被删空间是"启动自动恢复目标"或"当前激活空间"，同步清空引用避免下次启动报错
+    let _ = sqlx::query(
+        "UPDATE app_settings SET value_json = '' WHERE key IN ('startup_workspace_id', 'active_workspace_id') AND value_json = ?",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await;
+
     Ok(())
 }
 
@@ -1468,7 +1478,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
     )
     .bind(&new_ws_id)
     .bind(now)
-    .bind(id)
+    .bind(source_id)
     .execute(&mut *tx)
     .await?;
 
@@ -1479,7 +1489,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
     )
     .bind(&new_ws_id)
     .bind(now)
-    .bind(id)
+    .bind(source_id)
     .execute(&mut *tx)
     .await?;
 
@@ -1737,7 +1747,7 @@ pub fn classify_target(target: &str) -> TargetRisk {
     TargetRisk::Ok
 }
 
-/// 导入预览（供 UI 展示"这份文件会启动什么"，目前仅后端可用）
+/// 导入预览（供 UI 展示"这份文件会启动什么"）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
@@ -1748,6 +1758,8 @@ pub struct ImportPreview {
     pub disabled_apps: Vec<String>,
     /// 原始文件里带启动参数的应用名（导入时会被剥离）
     pub apps_with_args: Vec<String>,
+    /// 原始文件是否包含生命周期钩子命令（导入时默认停用）
+    pub has_hooks: bool,
 }
 
 pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
@@ -1771,12 +1783,17 @@ pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
         .map(|a| a.display_name.clone())
         .collect();
 
+    let has_hooks = parsed.hooks.as_ref().is_some_and(|h| {
+        !h.pre_restore_cmd.trim().is_empty() || !h.post_close_cmd.trim().is_empty()
+    });
+
     Ok(ImportPreview {
         name: parsed.name.clone(),
         app_count: parsed.apps.len(),
         resource_count: parsed.resources.len(),
         disabled_apps,
         apps_with_args,
+        has_hooks,
     })
 }
 

@@ -168,6 +168,14 @@ pub async fn steps(db: &Db, run_id: &str) -> AppResult<Vec<RunStepRow>> {
         .collect())
 }
 
+/// 清空全部恢复执行记录（外键 ON DELETE CASCADE 自动清理 restore_steps）
+pub async fn clear_all(db: &Db) -> AppResult<u64> {
+    let res = sqlx::query("DELETE FROM restore_runs")
+        .execute(&db.pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 /// 成功率基线用：按错误码聚合（docs/RESTORE_CONTRACT.md §3）
 pub async fn error_code_stats(db: &Db) -> AppResult<Vec<(String, i64)>> {
     let rows = sqlx::query(

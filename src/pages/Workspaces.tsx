@@ -151,6 +151,14 @@ export function WorkspacesPage() {
     retry: 0,
   });
 
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: api.settingsGet,
+    staleTime: 15_000,
+    retry: 0,
+  });
+  const hotkeysEnabled = settings.data?.workspaceHotkeysEnabled !== false;
+
   const allIconPaths = useMemo(() => {
     const out: (string | null | undefined)[] = [];
     for (const w of list.data ?? []) {
@@ -515,22 +523,16 @@ export function WorkspacesPage() {
       title: `导出「${detail.data.name}」？`,
       description: "导出为 JSON 文件，可备份或分享给其他电脑导入。",
       detail: "提示：导出文件包含本机软件路径、窗口标题和文件路径，分享前请确认不含隐私内容。",
-      confirmLabel: "确认并导出",
+      confirmLabel: "选择保存位置",
     });
     if (!ok) return;
     try {
       const json = await api.workspaceExport(detail.data.id);
-      const blob = new Blob([json], { type: "application/json;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
       const safe = detail.data.name.replace(/[\\/:*?"<>|]/g, "_");
-      a.href = url;
-      a.download = `${safe}.workscene.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast.success("已导出配置文件", `${safe}.workscene.json`);
+      const savedPath = await api.dialogSaveJson(`${safe}.workscene.json`, json);
+      if (savedPath) {
+        toast.success("已导出配置文件", savedPath);
+      }
     } catch (e) {
       toast.danger("导出失败", String((e as Error).message));
     }
@@ -566,6 +568,9 @@ export function WorkspacesPage() {
         risky.push(
           `${preview.appsWithArgs.length} 个应用的启动参数会被剥离：${preview.appsWithArgs.join("、")}`,
         );
+      }
+      if (preview.hasHooks) {
+        risky.push("包含生命周期钩子命令，导入后将默认处于关闭状态（可核对命令后手动开启）");
       }
       const ok = await confirmAction({
         title: `导入「${preview.name}」？`,
@@ -736,7 +741,7 @@ export function WorkspacesPage() {
                     <h3 className="flex min-w-0 items-center gap-1.5 text-[14px] font-semibold text-ink">
                       <WorkspaceColorDot color={w.color} />
                       <span className="truncate">{w.name}</span>
-                      {w.hotkeySlot ? (
+                      {w.hotkeySlot && hotkeysEnabled ? (
                         <kbd
                           title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
                           className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
@@ -843,7 +848,7 @@ export function WorkspacesPage() {
                     <p className="flex items-center gap-1.5 truncate text-body font-semibold text-ink">
                       <WorkspaceColorDot color={w.color} />
                       <span className="truncate">{w.name}</span>
-                      {w.hotkeySlot ? (
+                      {w.hotkeySlot && hotkeysEnabled ? (
                         <kbd
                           title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
                           className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
@@ -898,7 +903,7 @@ export function WorkspacesPage() {
                   ) : null}
                   <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-body font-medium text-ink">
                     <span className="truncate">{w.name}</span>
-                    {w.hotkeySlot ? (
+                    {w.hotkeySlot && hotkeysEnabled ? (
                       <kbd
                         title={`全局快捷键 Ctrl+Alt+${w.hotkeySlot}`}
                         className="shrink-0 rounded-[5px] border border-line bg-canvas px-1.5 py-0.2 font-mono text-[10px] font-medium text-ink-3"
@@ -1142,6 +1147,31 @@ export function WorkspacesPage() {
                 <DisplayProfilesBar
                   workspaceId={detail.data.id}
                   onBeforeSave={layoutDirty ? () => saveLayout.mutateAsync() : undefined}
+                  onLoadLayouts={(layouts) => {
+                    setDraft((prev) => {
+                      const used = new Set<number>();
+                      return prev.map((w) => {
+                        const hitIdx = layouts.findIndex(
+                          (s, idx) =>
+                            !used.has(idx) &&
+                            s.processName.toLowerCase() === w.processName.toLowerCase() &&
+                            (!s.className || s.className === w.className),
+                        );
+                        if (hitIdx === -1) return w;
+                        used.add(hitIdx);
+                        const s = layouts[hitIdx]!;
+                        return {
+                          ...w,
+                          monitorKey: s.monitorKey,
+                          xRatio: s.xRatio,
+                          yRatio: s.yRatio,
+                          widthRatio: s.widthRatio,
+                          heightRatio: s.heightRatio,
+                          showState: s.showState,
+                        };
+                      });
+                    });
+                  }}
                 />
               </div>
             ) : (
@@ -2030,9 +2060,11 @@ function ResourcesCard({
 function DisplayProfilesBar({
   workspaceId,
   onBeforeSave,
+  onLoadLayouts,
 }: {
   workspaceId: string;
   onBeforeSave?: () => Promise<unknown>;
+  onLoadLayouts?: (layouts: import("@/types/contract").SavedProfileLayout[]) => void;
 }) {
   const qc = useQueryClient();
   const profiles = useQuery({
@@ -2052,6 +2084,15 @@ function DisplayProfilesBar({
       toast.success("已保存当前屏幕组合布局", `${p.label}（${p.windowCount} 窗口）`);
     },
     onError: (e) => toast.danger("保存屏幕方案失败", String((e as Error).message)),
+  });
+
+  const loadProfile = useMutation({
+    mutationFn: (sig: string) => api.workspaceProfileGet(workspaceId, sig),
+    onSuccess: (layouts) => {
+      onLoadLayouts?.(layouts);
+      toast.info("已载入该屏幕方案到画布", "可拖拽微调并点击「保存布局」更新");
+    },
+    onError: (e) => toast.danger("载入屏幕方案失败", String((e as Error).message)),
   });
 
   const deleteProfile = useMutation({
@@ -2095,6 +2136,17 @@ function DisplayProfilesBar({
               <span className="font-medium">{p.label}</span>
               <span className="text-ink-3">({p.windowCount}窗)</span>
               {p.isCurrent ? <Badge tone="accent">当前匹配</Badge> : null}
+              {onLoadLayouts ? (
+                <button
+                  type="button"
+                  disabled={loadProfile.isPending}
+                  onClick={() => loadProfile.mutate(p.displaySignature)}
+                  className="ml-0.5 cursor-pointer rounded px-1 text-[10px] font-medium text-accent hover:bg-accent/15 disabled:opacity-40"
+                  title="载入此方案到上方画布查看或微调"
+                >
+                  载入画布
+                </button>
+              ) : null}
               <button
                 type="button"
                 disabled={deleteProfile.isPending}
@@ -2140,6 +2192,13 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
     }
   }, [hooksQuery.data]);
 
+  const dirty = Boolean(
+    hooksQuery.data &&
+      (enabled !== hooksQuery.data.enabled ||
+        preCmd.trim() !== hooksQuery.data.preRestoreCmd.trim() ||
+        postCmd.trim() !== hooksQuery.data.postCloseCmd.trim()),
+  );
+
   const saveHooks = useMutation({
     mutationFn: (override?: { enabled: boolean; preRestoreCmd: string; postCloseCmd: string }) =>
       api.workspaceHooksSet(
@@ -2157,13 +2216,22 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
     onError: (e) => toast.danger("保存失败", String((e as Error).message)),
   });
 
+  const testHook = useMutation({
+    mutationFn: (cmd: string) => api.workspaceHookTest(cmd),
+    onSuccess: (msg) => toast.success("钩子命令测试通过", msg),
+    onError: (e) => toast.danger("钩子命令测试失败", String((e as Error).message)),
+  });
+
   return (
     <Card className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <div>
-          <p className="text-body font-semibold text-ink">生命周期钩子（进阶自动化）</p>
+          <div className="flex items-center gap-2">
+            <p className="text-body font-semibold text-ink">生命周期钩子（进阶自动化）</p>
+            {dirty ? <Badge tone="warning">未保存</Badge> : null}
+          </div>
           <p className="text-[11px] text-ink-3">
-            可选在「一键恢复前」或「一键收工后」静默运行本机命令（如启动本地服务、切换环境），默认关闭
+            可选在「一键恢复前」或「一键收工后」运行本机命令（如启动本地服务、切换环境），恢复前命令会等待完成后再拉起软件
           </p>
         </div>
         <Switch
@@ -2171,38 +2239,56 @@ function WorkspaceHooksCard({ workspaceId }: { workspaceId: string }) {
           disabled={saveHooks.isPending}
           onChange={(next) => {
             setEnabled(next);
-            if (!next && hooksQuery.data?.enabled) {
-              saveHooks.mutate({ enabled: false, preRestoreCmd: preCmd, postCloseCmd: postCmd });
-            }
+            saveHooks.mutate({ enabled: next, preRestoreCmd: preCmd, postCloseCmd: postCmd });
           }}
           ariaLabel="启用生命周期钩子"
         />
       </div>
       {enabled ? (
         <div className="flex flex-col gap-2.5 border-t border-line pt-2.5">
-          <label className="flex flex-col gap-1">
+          <div className="flex flex-col gap-1">
             <span className="text-[11px] font-medium text-ink-2">恢复前执行命令（可选）</span>
-            <input
-              value={preCmd}
-              onChange={(e) => setPreCmd(e.target.value)}
-              placeholder="例如：docker start dev-db"
-              className="h-8 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <input
+                value={preCmd}
+                onChange={(e) => setPreCmd(e.target.value)}
+                placeholder="例如：docker start dev-db"
+                className="h-8 flex-1 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+              />
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={testHook.isPending || !preCmd.trim()}
+                onClick={() => testHook.mutate(preCmd)}
+              >
+                测试运行
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
             <span className="text-[11px] font-medium text-ink-2">收工后执行命令（可选）</span>
-            <input
-              value={postCmd}
-              onChange={(e) => setPostCmd(e.target.value)}
-              placeholder="例如：docker stop dev-db"
-              className="h-8 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
-            />
-          </label>
+            <div className="flex items-center gap-2">
+              <input
+                value={postCmd}
+                onChange={(e) => setPostCmd(e.target.value)}
+                placeholder="例如：docker stop dev-db"
+                className="h-8 flex-1 rounded-[8px] border border-line bg-canvas px-2.5 font-mono text-[11px] text-ink outline-none focus:border-accent"
+              />
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={testHook.isPending || !postCmd.trim()}
+                onClick={() => testHook.mutate(postCmd)}
+              >
+                测试运行
+              </Button>
+            </div>
+          </div>
           <div className="flex justify-end">
             <Button
               size="xs"
               variant="primary"
-              disabled={saveHooks.isPending}
+              disabled={saveHooks.isPending || !dirty}
               onClick={() => saveHooks.mutate(undefined)}
             >
               保存钩子配置

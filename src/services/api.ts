@@ -6,6 +6,7 @@ import type {
   BookmarkFolder,
   CaptureResult,
   DisplayInfo,
+  ImportAllResult,
   ImportPreview,
   LayoutUpdate,
   RecoveryHint,
@@ -13,6 +14,7 @@ import type {
   RestoreReport,
   RunStepRow,
   RunSummary,
+  SavedProfileLayout,
   SceneFile,
   SceneHealth,
   SnapshotDiff,
@@ -61,8 +63,6 @@ export const api = {
   workspaceGet: (id: string) => call<WorkspaceDetail>("workspace_get", { id }),
   workspaceCreate: (name: string, capture: CaptureResult) =>
     call<WorkspaceSummary>("workspace_create", { name, capture }),
-  workspaceRename: (id: string, name: string) =>
-    call<void>("workspace_rename", { id, name }),
   workspaceSetHotkeySlot: (id: string, slot: number | null) =>
     call<void>("workspace_set_hotkey_slot", { id, slot }),
   workspaceSetFavorite: (id: string, isFavorite: boolean) =>
@@ -85,7 +85,8 @@ export const api = {
     call<WorkspaceSummary>("workspace_duplicate", { id, newName }),
   workspaceExport: (id: string) => call<string>("workspace_export", { id }),
   workspaceExportAll: () => call<string>("workspace_export_all"),
-  workspaceImportAll: (json: string) => call<number>("workspace_import_all", { json }),
+  workspaceImportAll: (json: string) =>
+    call<ImportAllResult>("workspace_import_all", { json }),
   workspaceImportPreview: (json: string) =>
     call<ImportPreview>("workspace_import_preview", { rawJson: json }),
   workspaceImport: (json: string) => call<WorkspaceSummary>("workspace_import", { json }),
@@ -129,6 +130,8 @@ export const api = {
   dialogPickFile: (exeOnly = false) =>
     call<string | null>("dialog_pick_file", { exeOnly }),
   dialogPickFolder: () => call<string | null>("dialog_pick_folder"),
+  dialogSaveJson: (defaultName: string, content: string) =>
+    call<string | null>("dialog_save_json", { defaultName, content }),
 
   workspaceLayoutUpdate: (workspaceId: string, updates: LayoutUpdate[]) =>
     call<void>("workspace_layout_update", { workspaceId, updates }),
@@ -205,12 +208,19 @@ export const api = {
 
   runList: (limit = 20) => call<RunSummary[]>("run_list", { limit }),
   runSteps: (runId: string) => call<RunStepRow[]>("run_steps", { runId }),
+  runErrorStats: () => call<[string, number][]>("run_error_stats"),
+  runClear: () => call<number>("run_clear"),
 
   captureDetectContext: (windows: import("@/types/contract").WindowInfo[]) =>
     call<import("@/types/contract").DetectedContext[]>("capture_detect_context", { windows }),
   workspaceProfileList: (workspaceId: string) =>
     call<import("@/types/contract").DisplayProfileSummary[]>("workspace_profile_list", {
       workspaceId,
+    }),
+  workspaceProfileGet: (workspaceId: string, displaySignature: string) =>
+    call<SavedProfileLayout[]>("workspace_profile_get", {
+      workspaceId,
+      displaySignature,
     }),
   workspaceProfileSave: (workspaceId: string) =>
     call<import("@/types/contract").DisplayProfileSummary>("workspace_profile_save", {
@@ -224,6 +234,7 @@ export const api = {
     workspaceId: string,
     hooks: import("@/types/contract").WorkspaceHooks,
   ) => call<void>("workspace_hooks_set", { workspaceId, hooks }),
+  workspaceHookTest: (cmd: string) => call<string>("workspace_hook_test", { cmd }),
   workspaceResourceUpdate: (
     workspaceId: string,
     itemId: string,

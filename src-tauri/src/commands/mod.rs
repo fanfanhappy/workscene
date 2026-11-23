@@ -1,6 +1,7 @@
 use crate::capture;
 use crate::core::models::{
-    AppInfo, CaptureResult, DisplayInfo, RestorePreview, RestoreReport, SceneFile,
+    AppInfo, CaptureResult, DisplayInfo, RestorePreview, RestoreReport, RestoreStepResult,
+    SceneFile, StepStatus,
 };
 use crate::core::{AppError, AppResult};
 use crate::data::runs::{self, RunSummary};
@@ -132,11 +133,14 @@ pub async fn workspace_update_meta(
 
 #[tauri::command]
 pub async fn workspace_set_hotkey_slot(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     id: String,
     slot: Option<i64>,
 ) -> AppResult<()> {
-    workspaces::set_hotkey_slot(&db, &id, slot).await
+    workspaces::set_hotkey_slot(&db, &id, slot).await?;
+    crate::win::tray::refresh_menu(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -316,22 +320,65 @@ pub async fn bookmarks_list_folders() -> AppResult<Vec<crate::win::bookmarks::Bo
         .map_err(|e| AppError::msg(format!("读取书签目录异常：{e}")))
 }
 
+/// 执行恢复前钩子命令并封装为标准步骤，便于写入恢复报告与历史记录
+pub fn run_pre_restore_hook_step(cmd: &str) -> RestoreStepResult {
+    let t0 = std::time::Instant::now();
+    match crate::data::extras::run_hook_command(cmd) {
+        Ok(msg) => RestoreStepResult {
+            step_type: "hook".into(),
+            target_name: "恢复前钩子命令".into(),
+            status: StepStatus::Success,
+            message: msg,
+            match_note: cmd.trim().to_string(),
+            duration_ms: t0.elapsed().as_millis() as i64,
+            delta_x: None,
+            delta_y: None,
+            state_restored: true,
+            code: None,
+        },
+        Err(err) => RestoreStepResult {
+            step_type: "hook".into(),
+            target_name: "恢复前钩子命令".into(),
+            status: StepStatus::Failed,
+            message: err,
+            match_note: cmd.trim().to_string(),
+            duration_ms: t0.elapsed().as_millis() as i64,
+            delta_x: None,
+            delta_y: None,
+            state_restored: false,
+            code: Some("hook_failed".into()),
+        },
+    }
+}
+
+pub fn prepend_hook_step(report: &mut RestoreReport, step: RestoreStepResult) {
+    match step.status {
+        StepStatus::Success => report.succeeded += 1,
+        StepStatus::Failed | StepStatus::Timeout => report.failed += 1,
+        StepStatus::Skipped | StepStatus::NeedsReview => report.skipped += 1,
+    }
+    report.total_steps += 1;
+    report.steps.insert(0, step);
+}
+
 /// 一键收工：向当前打开且属于该工作空间的窗口发送标准 WM_CLOSE（绝不强杀进程）；
-/// 若该工作空间启用了收工后钩子命令，则在发送关闭请求后静默执行。
+/// 若该工作空间启用了收工后钩子命令，则在发送关闭请求后执行。
 #[tauri::command]
 pub async fn workspace_close_windows(db: State<'_, Db>, id: String) -> AppResult<usize> {
-    let scene = workspaces::to_scene(&db, &id).await?;
+    let mut scene = workspaces::to_scene(&db, &id).await?;
+    let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
     let hooks = crate::data::extras::get_hooks(&db, &id)
         .await
         .unwrap_or_default();
     let closed = tauri::async_runtime::spawn_blocking(move || {
-        crate::restore::close_workspace_windows(&scene)
+        let count = crate::restore::close_workspace_windows(&scene)?;
+        if hooks.enabled && !hooks.post_close_cmd.trim().is_empty() {
+            let _ = crate::data::extras::run_hook_command(&hooks.post_close_cmd);
+        }
+        Ok::<usize, AppError>(count)
     })
     .await
     .map_err(|e| AppError::msg(format!("关闭窗口异常：{e}")))??;
-    if hooks.enabled && !hooks.post_close_cmd.trim().is_empty() {
-        crate::data::extras::run_hook_command(&hooks.post_close_cmd);
-    }
     Ok(closed)
 }
 
@@ -345,7 +392,8 @@ pub fn workspace_import_preview(
 
 #[tauri::command]
 pub async fn workspace_preview(db: State<'_, Db>, id: String) -> AppResult<RestorePreview> {
-    let scene = workspaces::to_scene(&db, &id).await?;
+    let mut scene = workspaces::to_scene(&db, &id).await?;
+    let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
     tauri::async_runtime::spawn_blocking(move || crate::restore::preview(&scene))
         .await
         .map_err(|e| AppError::msg(format!("生成恢复预览异常：{e}")))?
@@ -368,12 +416,12 @@ pub async fn workspace_restore(
     let mut scene = workspaces::to_scene(&db, &id).await?;
     // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标
     let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
-    // 若该工作空间启用了恢复前钩子命令，先静默触发
-    if let Ok(hooks) = crate::data::extras::get_hooks(&db, &id).await {
-        if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
-            crate::data::extras::run_hook_command(&hooks.pre_restore_cmd);
-        }
-    }
+    // 若该工作空间启用了恢复前钩子命令，等待执行完成并把结果写入恢复报告
+    let hook_cmd = crate::data::extras::get_hooks(&db, &id)
+        .await
+        .ok()
+        .filter(|h| h.enabled && !h.pre_restore_cmd.trim().is_empty())
+        .map(|h| h.pre_restore_cmd);
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
     let focus = focus_mode.unwrap_or(false);
 
@@ -395,14 +443,24 @@ pub async fn workspace_restore(
     let scene_for_task = scene.clone();
     let pre_for_task = pre_restore.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        crate::restore::apply_with_options(
+        use tauri::Emitter;
+        let hook_step = hook_cmd.map(|cmd| {
+            let step = run_pre_restore_hook_step(&cmd);
+            let _ = app.emit("restore:step", &step);
+            step
+        });
+        let mut report = crate::restore::apply_with_options(
             Some(&app),
             &scene_for_task,
             relaunch_missing,
             focus,
             pre_for_task,
             None,
-        )
+        )?;
+        if let Some(step) = hook_step {
+            prepend_hook_step(&mut report, step);
+        }
+        Ok::<RestoreReport, AppError>(report)
     })
     .await;
 
@@ -492,6 +550,12 @@ pub async fn run_error_stats(db: State<'_, Db>) -> AppResult<Vec<(String, i64)>>
     runs::error_code_stats(&db).await
 }
 
+/// 清空全部恢复执行记录
+#[tauri::command]
+pub async fn run_clear(db: State<'_, Db>) -> AppResult<u64> {
+    runs::clear_all(&db).await
+}
+
 /// 是否已有恢复任务在执行（UI 据此禁用"开始恢复"并显示原因）
 #[tauri::command]
 pub fn restore_is_busy() -> bool {
@@ -532,12 +596,6 @@ pub async fn workspace_restore_retry(
     let mut scene = workspaces::to_scene(&db, &id).await?;
     // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标
     let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
-    // 若该工作空间启用了恢复前钩子命令，先静默触发
-    if let Ok(hooks) = crate::data::extras::get_hooks(&db, &id).await {
-        if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
-            crate::data::extras::run_hook_command(&hooks.pre_restore_cmd);
-        }
-    }
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
 
     let scene_for_task = scene.clone();
@@ -582,6 +640,29 @@ pub async fn dialog_pick_folder() -> AppResult<Option<String>> {
     .await
     .map_err(|e| AppError::msg(format!("文件夹选择框异常：{e}")))?;
     Ok(path)
+}
+
+/// 弹出 Windows 原生「另存为 JSON」对话框并直接写入文件，返回保存后的完整路径（取消返回 None）
+#[tauri::command]
+pub async fn dialog_save_json(
+    default_name: String,
+    content: String,
+) -> AppResult<Option<String>> {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        crate::win::dialog::save_json_file("导出 WorkScene 配置文件", &default_name)
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("保存文件对话框异常：{e}")))?;
+
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let path_for_write = path.clone();
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path_for_write, content.as_bytes()))
+        .await
+        .map_err(|e| AppError::msg(format!("写入导出文件异常：{e}")))?
+        .map_err(|e| AppError::msg(format!("无法写入文件：{e}")))?;
+    Ok(Some(path))
 }
 
 /// 在资源管理器中打开本机数据目录（仅固定打开自身数据目录，不接受外部路径参数）
@@ -755,15 +836,28 @@ pub async fn apply_settings(
 
     // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程
     let combo = crate::win::hotkey::parse_preset(&saved.hotkey);
-    let hotkey_ok = crate::win::hotkey::update(combo, saved.workspace_hotkeys_enabled);
+    let hotkey_res = crate::win::hotkey::update(combo, saved.workspace_hotkeys_enabled);
 
     if let Some(msg) = autostart_err {
         return Err(AppError::msg(format!("开机启动设置失败：{msg}")));
     }
-    if !hotkey_ok && crate::win::hotkey::parse_preset(&saved.hotkey).is_some() {
-        return Err(AppError::msg(
-            "快捷键注册失败（可能被其它程序占用），已保存设置但本次未生效",
-        ));
+    let mut hk_errors: Vec<String> = Vec::new();
+    if !hotkey_res.main_ok && combo.is_some() {
+        hk_errors.push(format!("主唤起热键 {} 被其他程序占用", saved.hotkey));
+    }
+    if saved.workspace_hotkeys_enabled && !hotkey_res.failed_slots.is_empty() {
+        let slots: Vec<String> = hotkey_res
+            .failed_slots
+            .iter()
+            .map(|n| format!("Ctrl+Alt+{n}"))
+            .collect();
+        hk_errors.push(format!("以下快捷槽被其他程序占用：{}", slots.join("、")));
+    }
+    if !hk_errors.is_empty() {
+        return Err(AppError::msg(format!(
+            "{}（已保存设置，冲突项本次未生效）",
+            hk_errors.join("；")
+        )));
     }
     Ok(saved)
 }
@@ -834,13 +928,20 @@ pub async fn workspace_export_all(db: State<'_, Db>) -> AppResult<String> {
         .map_err(|e| crate::core::AppError::msg(format!("序列化备份失败：{e}")))
 }
 
-/// 全量备份导入：批量导入由 workspace_export_all 生成的备份 JSON
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAllResult {
+    pub imported: usize,
+    pub failed: Vec<String>,
+}
+
+/// 全量备份导入：批量导入由 workspace_export_all 生成的备份 JSON，并返回成功与失败明细
 #[tauri::command]
 pub async fn workspace_import_all(
     app: tauri::AppHandle,
     db: State<'_, Db>,
     json: String,
-) -> AppResult<usize> {
+) -> AppResult<ImportAllResult> {
     let val: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| crate::core::AppError::msg(format!("备份文件不是合法的 JSON：{e}")))?;
     let arr = val
@@ -849,17 +950,26 @@ pub async fn workspace_import_all(
         .ok_or_else(|| crate::core::AppError::msg("备份文件缺少 workspaces 数组"))?;
 
     let mut imported = 0usize;
-    for item in arr {
-        if let Ok(item_json) = serde_json::to_string(item) {
-            if workspaces::import_json(&db, &item_json).await.is_ok() {
-                imported += 1;
-            }
+    let mut failed: Vec<String> = Vec::new();
+    for (idx, item) in arr.iter().enumerate() {
+        let label = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("第 {} 项", idx + 1));
+        match serde_json::to_string(item) {
+            Ok(item_json) => match workspaces::import_json(&db, &item_json).await {
+                Ok(_) => imported += 1,
+                Err(e) => failed.push(format!("{label}：{e}")),
+            },
+            Err(e) => failed.push(format!("{label}：序列化失败（{e}）")),
         }
     }
     if imported > 0 {
         crate::win::tray::refresh_menu(&app).await;
     }
-    Ok(imported)
+    Ok(ImportAllResult { imported, failed })
 }
 
 /// L2 上下文自动捕获：识别当前桌面打开的 IDE 项目目录与资源管理器文件夹路径
@@ -892,6 +1002,16 @@ pub async fn workspace_profile_save(
     crate::data::extras::save_display_profile(&db, &workspace_id).await
 }
 
+/// 多显示器拓扑布局：读取指定屏幕方案的窗口布局，供画布载入查看/微调
+#[tauri::command]
+pub async fn workspace_profile_get(
+    db: State<'_, Db>,
+    workspace_id: String,
+    display_signature: String,
+) -> AppResult<Vec<crate::data::extras::SavedProfileLayout>> {
+    crate::data::extras::get_display_profile(&db, &workspace_id, &display_signature).await
+}
+
 /// 多显示器拓扑布局：删除指定屏幕拓扑方案
 #[tauri::command]
 pub async fn workspace_profile_delete(
@@ -900,6 +1020,19 @@ pub async fn workspace_profile_delete(
     display_signature: String,
 ) -> AppResult<()> {
     crate::data::extras::delete_display_profile(&db, &workspace_id, &display_signature).await
+}
+
+/// 测试运行单条生命周期钩子命令（用于用户验证命令是否正确）
+#[tauri::command]
+pub async fn workspace_hook_test(cmd: String) -> AppResult<String> {
+    if cmd.trim().is_empty() {
+        return Err(AppError::msg("请先填写要测试的命令"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::data::extras::run_hook_command(&cmd).map_err(AppError::msg)
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("测试运行异常：{e}")))?
 }
 
 /// 读取工作空间生命周期钩子配置

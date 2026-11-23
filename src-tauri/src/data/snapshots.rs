@@ -4,7 +4,6 @@ use crate::core::{AppError, AppResult};
 use crate::data::workspaces;
 use crate::data::Db;
 use crate::restore::matcher::normalize_title;
-use crate::storage;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
@@ -166,7 +165,8 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
         .bind(id)
         .execute(&db.pool)
         .await?;
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}.bak"));
     Ok(())
 }
 
@@ -193,7 +193,8 @@ pub async fn prune(db: &Db, workspace_id: &str, keep: usize) -> AppResult<usize>
             .bind(&id)
             .execute(&db.pool)
             .await?;
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.bak"));
         removed += 1;
     }
     Ok(removed)
