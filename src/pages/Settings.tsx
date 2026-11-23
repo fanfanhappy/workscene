@@ -936,7 +936,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "2.0.2"}
+              WorkScene v{info.data?.version ?? "2.0.3"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -1011,7 +1011,7 @@ export function SettingsPage() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const data = (await res.json()) as { tag_name?: string; html_url?: string };
                   const latest = (data.tag_name ?? "").replace(/^v/i, "");
-                  const current = (info.data?.version ?? "2.0.2").replace(/^v/i, "");
+                  const current = (info.data?.version ?? "2.0.3").replace(/^v/i, "");
                   const toParts = (v: string) =>
                     v.split(".").map((n) => Number.parseInt(n, 10) || 0);
                   const a = toParts(latest);

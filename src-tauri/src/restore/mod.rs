@@ -42,8 +42,10 @@ const LAUNCH_WAIT_MS: u64 = 8000;
 /// 单次恢复最多为同一个可执行文件补启的实例数，避免失控
 const MAX_RELAUNCH_PER_EXE: usize = 3;
 /// 单次恢复总启动上限
-/// 单次恢复总启动上限
-const MAX_LAUNCH_TOTAL: usize = 8;
+/// 单次恢复总启动上限。8 对于真实的多应用工作空间太低：
+/// 诊断日志里 11 个应用只启动了 8 个，后面的 PowerPoint 直接被当成“未找到”。
+/// 20 足够覆盖常见工作空间，同时仍能在异常场景兜底。
+const MAX_LAUNCH_TOTAL: usize = 20;
 
 /// 全局恢复互斥：两个恢复任务同时跑会互相搬窗口，报告也会互相污染
 static RESTORE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -91,8 +93,11 @@ fn current_candidates(self_pid: u32) -> Vec<Candidate> {
     let mut pid_cache: std::collections::HashMap<u32, process::ProcessInfo> =
         std::collections::HashMap::with_capacity(32);
     for raw in window::enumerate_raw() {
-        // 允许同进程窗口进入候选：匹配仍要求「可执行路径 + 窗口类名」一致，
-        // 因此不会误判到 WorkScene 自己的界面；模拟窗口（win::mock）也才可被恢复测试。
+        // WorkScene 自己的主窗口不参与候选（没有工作空间会保存它）；
+        // 同进程的模拟窗口仍允许，否则 M1 自检无法恢复 mock 窗口。
+        if raw.pid == self_pid && raw.class_name != "WorkSceneMockWindow" {
+            continue;
+        }
         if filter::exclude_reason(&raw, self_pid, true).is_some() {
             continue;
         }
@@ -494,6 +499,17 @@ pub fn apply_with_options(
                 current = current_candidates(self_pid);
             }
         }
+        if launched_total > 0 && !is_cancelled() {
+            // 冷启动的 Office / Electron 可能在 8s 等待之后才真正建窗；
+            // 最后再刷新一次候选池，避免已启动的窗口仍被当作“未找到”。
+            std::thread::sleep(Duration::from_millis(300));
+            current = current_candidates(self_pid);
+            tracing::info!(
+                launched = launched_total,
+                candidates = current.len(),
+                "launch phase finished; candidates refreshed"
+            );
+        }
     }
 
     // 自底向上恢复，避免上层窗口在移动过程中反复遮挡
@@ -616,16 +632,19 @@ pub fn apply_with_options(
                     );
                 }
 
+                let vanished = delta.0 == i32::MAX;
                 let position_ok = win.show_state == ShowState::Minimized || delta.0 <= threshold;
                 let maximized_failed = win.show_state == ShowState::Maximized && !state_restored;
 
-                let status = if position_ok && !maximized_failed {
+                let status = if position_ok && !maximized_failed && !vanished {
                     StepStatus::Success
                 } else {
                     StepStatus::Failed
                 };
 
-                let message = if !position_ok {
+                let message = if vanished {
+                    "窗口已关闭或无法读取位置，未能恢复".into()
+                } else if !position_ok {
                     format!(
                         "窗口被应用自身改回原位置（偏差 {}px，阈值 {threshold}px），已尝试二次校正",
                         delta.0
@@ -640,7 +659,9 @@ pub fn apply_with_options(
                     format!("已恢复，位置/尺寸偏差 {}px", delta.0)
                 };
 
-                let code = if !position_ok {
+                let code = if vanished {
+                    Some("window_control_denied".to_string())
+                } else if !position_ok {
                     Some("layout_drift".to_string())
                 } else if maximized_failed {
                     Some("state_not_restored".to_string())

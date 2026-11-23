@@ -190,6 +190,36 @@ pub fn match_window(
         },
         Some((idx, score, _)) => {
             if score < ACCEPT {
+                // 应用升级/主题切换后窗口类名、标题会变，但 exe 路径不变。
+                // 如果该 exe 在当前桌面只有一个窗口，按路径唯一匹配仍比直接跳过可靠；
+                // 多个同 exe 窗口时仍交给上面的评分/歧义逻辑，绝不乱挑。
+                if let Some(target_path) = norm_path(&target.process_path) {
+                    let same_path: Vec<usize> = candidates
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| {
+                            norm_path(&c.process_path).as_deref() == Some(target_path.as_str())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    if let [only] = same_path.as_slice() {
+                        let path_score = score_window(target, &candidates[*only], target_rect);
+                        tracing::info!(
+                            target = %target.title,
+                            process = %target.process_name,
+                            path = %target_path,
+                            score = path_score,
+                            "window class/title changed; using unique executable-path match"
+                        );
+                        return MatchOutcome {
+                            picked: Some(*only),
+                            note: format!(
+                                "按进程路径唯一匹配（{path_score:.2}，窗口类或标题已变化）"
+                            ),
+                            ambiguous: false,
+                        };
+                    }
+                }
                 return MatchOutcome {
                     picked: None,
                     note: format!("匹配度不足（{score:.2}），不移动窗口"),
@@ -325,6 +355,20 @@ mod tests {
         let out = match_window(&t, &c, (0, 0, 800, 600));
         assert!(out.picked.is_some());
         assert!(!out.ambiguous);
+    }
+
+    #[test]
+    fn unique_executable_path_matches_when_class_and_title_changed() {
+        let t = target("宿舍主机", "FlutterMultiWindow", r"D:\AweSun\flutter\AweSun.exe");
+        let c = cand(
+            "向日葵远程控制",
+            "FLUTTER_RUNNER_WIN32_WINDOW",
+            r"D:\AweSun\flutter\AweSun.exe",
+            (0, 0, 1000, 640),
+        );
+        let out = match_window(&t, &[c], (0, 0, 1000, 640));
+        assert!(out.picked.is_some(), "唯一 exe 应能兜底匹配：{}", out.note);
+        assert!(out.note.contains("路径唯一"));
     }
 
     #[test]
