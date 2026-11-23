@@ -1,31 +1,36 @@
-name: Release WorkScene
+name: Release
 
+# 发布由 tag 驱动：推送 v1.2.3 这样的 tag 即构建并发布。
+# 也可以在 Actions 页面手动 Run workflow，填入一个已存在的 tag。
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.1.3)'
+        description: '要发布的 tag（例如 v1.1.3，必须已存在）'
         required: true
-        default: 'v1.1.3'
-
-concurrency:
-  group: release-workscene
-  cancel-in-progress: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: windows-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -46,8 +51,44 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      - name: Resolve and verify release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = $env:TAG.Trim()
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "非法 tag：'$tag'（期望形如 v1.1.3）"
+          }
+          $ver = $tag.Substring(1)
+
+          $pkgVer = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $confVer = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVer = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+
+          foreach ($pair in @(@{ Name = 'package.json'; Value = $pkgVer },
+                              @{ Name = 'src-tauri/Cargo.toml'; Value = $cargoVer },
+                              @{ Name = 'src-tauri/tauri.conf.json'; Value = $confVer })) {
+            if ($pair.Value -ne $ver) {
+              throw "版本不一致：$($pair.Name) 是 $($pair.Value)，tag 是 $tag。请先同步版本号再发布。"
+            }
+          }
+
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path $notes)) {
+            throw "缺少发布说明 $notes；Release 正文必须来自该文件。"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "发布 $tag（版本 $ver），说明文件：$notes"
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
 
       - name: Run Rust unit tests
         working-directory: src-tauri
@@ -56,20 +97,13 @@ jobs:
       - name: Build Tauri application and NSIS installer
         run: pnpm tauri build
 
-      - name: Package portable ZIP
+      - name: Package portable ZIP and checksums
+        id: package
         shell: pwsh
+        env:
+          VER: ${{ steps.meta.outputs.version }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ inputs.tag }}"
-            $ver = $tag.TrimStart('v')
-          } elseif ("${{ github.ref_type }}" -eq "tag") {
-            $tag = "${{ github.ref_name }}"
-            $ver = $tag.TrimStart('v')
-          } else {
-            $ver = (Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
-            $tag = "v$ver"
-          }
-          $stage = "dist-portable/WorkScene-$ver-portable"
+          $stage = "dist-portable/WorkScene-$env:VER-portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "src-tauri/target/release/workscene.exe" "$stage/WorkScene.exe"
 
@@ -81,50 +115,72 @@ jobs:
           ) | Set-Content -Path "$stage/start.cmd" -Encoding ASCII
 
           @(
-            "WorkScene $tag 绿色便携版",
+            "WorkScene v$env:VER 绿色便携版",
             "",
             "使用方式：",
             "1. 推荐双击 start.cmd 启动：所有工作空间与快照数据将保存在本目录 data\ 下，拷贝文件夹即可随身带走。",
-            "2. 如直接双击 WorkScene.exe 启动，数据默认保存在当前用户目录（%LOCALAPPDATA%\WorkScene）。",
+            "2. 如直接双击 WorkScene.exe 启动，数据默认保存在 %LOCALAPPDATA%\WorkScene。",
             "3. 本软件 100% 本地离线，无遥测、不上传数据；如 Windows SmartScreen 提示未知发布者，点击「更多信息」->「仍要运行」即可。"
           ) | Set-Content -Path "$stage/启动说明.txt" -Encoding UTF8
 
-          $zipPath = "dist-portable/WorkScene-$ver-portable.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          $zipPath = "dist-portable/WorkScene-$env:VER-portable.zip"
+          Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -CompressionLevel Optimal
 
-          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
-          echo "RELEASE_VER=$ver" >> $env:GITHUB_ENV
-          echo "PORTABLE_ZIP=$zipPath" >> $env:GITHUB_ENV
+          $nsis = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $nsis) { throw "没找到 NSIS 安装包（src-tauri/target/release/bundle/nsis/）" }
+
+          $sums = @(
+            "$((Get-FileHash $nsis.FullName -Algorithm SHA256).Hash.ToLower())  $($nsis.Name)",
+            "$((Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower())  $(Split-Path $zipPath -Leaf)"
+          )
+          $sums | Set-Content -Path "dist-portable/SHA256SUMS.txt" -Encoding ASCII
+
+          "nsis=$($nsis.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sums=dist-portable/SHA256SUMS.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkScene-${{ steps.meta.outputs.version }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            dist-portable/*.zip
+            dist-portable/SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Create or update GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ steps.meta.outputs.notes }}
+          NSIS: ${{ steps.package.outputs.nsis }}
+          ZIP: ${{ steps.package.outputs.zip }}
+          SUMS: ${{ steps.package.outputs.sums }}
         run: |
-          $tag = $env:RELEASE_TAG
-          $ver = $env:RELEASE_VER
-          $nsis = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
-          $zip = (Resolve-Path $env:PORTABLE_ZIP).Path
+          $tag = $env:TAG
+          $assets = @($env:NSIS, $env:ZIP, $env:SUMS)
 
-          if (-not $nsis) {
-            throw "NSIS installer not found under src-tauri/target/release/bundle/nsis/"
-          }
-
-          $prevEap = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
+          $PSNativeCommandUseErrorActionPreference = $false
           gh release view $tag *> $null
           $exists = ($LASTEXITCODE -eq 0)
-          $ErrorActionPreference = $prevEap
 
           if ($exists) {
-            gh release upload $tag $nsis $zip --clobber
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "上传发布资产失败：$tag" }
+            gh release edit $tag --title "WorkScene $tag" --notes-file $env:NOTES --latest
+            if ($LASTEXITCODE -ne 0) { throw "更新 Release 说明失败：$tag" }
+            Write-Host "已更新 Release $tag"
           } else {
-            gh release create $tag $nsis $zip `
-              --target "${{ github.sha }}" `
+            gh release create $tag @assets `
+              --verify-tag `
               --title "WorkScene $tag" `
-              --notes-file "docs/RELEASE.md"
+              --notes-file $env:NOTES `
+              --latest
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败：$tag" }
+            Write-Host "已创建 Release $tag"
           }
