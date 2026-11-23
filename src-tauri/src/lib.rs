@@ -1,9 +1,11 @@
 mod adapters;
+pub mod browser_bridge;
 mod capture;
 mod commands;
 mod core;
 mod data;
 pub mod logging;
+pub mod native_host;
 mod restore;
 mod storage;
 mod win;
@@ -125,6 +127,9 @@ pub fn run() {
             commands::system_hotkey_status,
             commands::system_open_log_dir,
             commands::system_export_diagnostics,
+            commands::browser_bridge_status,
+            commands::browser_bridge_install,
+            commands::browser_bridge_open_extension_dir,
             commands::system_get_displays,
             commands::capture_start,
             commands::capture_detect_context,

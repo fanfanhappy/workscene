@@ -14,6 +14,15 @@ impl Default for ShowState {
     }
 }
 
+/// 浏览器标签页（来自可选的浏览器扩展桥；只保存 URL/标题，不保存页面内容）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTab {
+    pub title: String,
+    pub url: String,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowInfo {
@@ -35,6 +44,9 @@ pub struct WindowInfo {
     pub is_minimized: bool,
     pub is_maximized: bool,
     pub show_state: ShowState,
+    /// 仅当浏览器扩展桥已安装并同步时才有值
+    #[serde(default)]
+    pub browser_tabs: Vec<BrowserTab>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +107,9 @@ pub struct SceneWindow {
     pub source_dpi: u32,
     pub show_state: ShowState,
     pub z_order: i32,
+    /// 浏览器标签页；恢复时按窗口一次性带 URL 启动
+    #[serde(default)]
+    pub browser_tabs: Vec<BrowserTab>,
     /// 复用策略：reuse_if_matched / always_launch / reuse_or_launch（缺省按后者）
     #[serde(default)]
     pub reuse_policy: String,

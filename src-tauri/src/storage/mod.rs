@@ -36,6 +36,17 @@ fn resolve_data_dir() -> PathBuf {
         }
     }
 
+    // 便携版：浏览器 Native Messaging host 由 Chrome 启动，拿不到 start.cmd 注入的
+    // WORKSCENE_DATA_DIR；此时 exe 同级的 data\ 就是权威目录。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let portable = parent.join("data");
+            if portable.is_dir() {
+                return portable;
+            }
+        }
+    }
+
     for candidate in fallback_candidates() {
         if is_writable(&candidate) {
             return candidate;
@@ -154,6 +165,7 @@ pub fn save_scene(name: &str, capture: &CaptureResult) -> AppResult<SceneSummary
 
         windows.push(SceneWindow {
             process_path: w.process_path.clone(),
+            browser_tabs: w.browser_tabs.clone(),
             process_name: w.process_name.clone(),
             class_name: w.class_name.clone(),
             title: w.title.clone(),

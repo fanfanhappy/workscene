@@ -1049,6 +1049,11 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
         let policy = parse_policy(&w.reuse_policy);
         let is_browser = adapters::classify(&w.process_name) == AdapterKind::Browser;
         let tabbed = is_browser && title_has_tabs(&w.title);
+        let tab_urls = if is_browser {
+            crate::browser_bridge::urls_for_launch(&w.browser_tabs)
+        } else {
+            Vec::new()
+        };
         if tabbed && policy != ReusePolicy::AlwaysLaunch {
             let running = available_by_exe.get(&key).copied().unwrap_or(0) > 0;
             if running {
@@ -1061,7 +1066,8 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
                 );
                 continue;
             }
-            if !tabbed_browser_launched.insert(key.clone()) {
+            // 没有 URL 数据时只能拉起一个空白窗口；有 URL 时每个窗口可以带自己的标签页。
+            if tab_urls.is_empty() && !tabbed_browser_launched.insert(key.clone()) {
                 tracing::info!(
                     exe = %path,
                     title = %w.title,
@@ -1090,8 +1096,16 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
 
         let mut args = split_args(w.launch_args.as_deref().unwrap_or(""));
         let existing = running_count.entry(key).or_insert(0);
-        if *existing > 0 {
+        if *existing > 0 || !tab_urls.is_empty() {
             inject_new_window_flag(path, &mut args);
+        }
+        if !tab_urls.is_empty() {
+            tracing::info!(
+                exe = %path,
+                urls = tab_urls.len(),
+                "browser launch will restore tabs in one window"
+            );
+            args.extend(tab_urls);
         }
         *existing += 1;
 
@@ -1419,6 +1433,7 @@ mod tests {
         let windows = (0..count)
             .map(|i| SceneWindow {
                 process_path: Some(path.into()),
+                browser_tabs: Vec::new(),
                 process_name: "app.exe".into(),
                 class_name: "Class".into(),
                 title: format!("w{i}"),
@@ -1539,6 +1554,38 @@ mod tests {
             plans.is_empty(),
             "浏览器已开着且窗口含标签页时，不能再新开窗口拆散标签"
         );
+    }
+
+    #[test]
+    fn closed_tabbed_browser_launches_each_window_with_urls() {
+        let mut scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            2,
+        );
+        for (i, w) in scene.windows.iter_mut().enumerate() {
+            w.process_name = "chrome.exe".into();
+            w.title = format!("工作页{i} 和另外 1 个页面 - Google Chrome");
+            w.browser_tabs = vec![
+                crate::core::models::BrowserTab {
+                    title: "A".into(),
+                    url: format!("https://example.test/{i}/a"),
+                    active: true,
+                },
+                crate::core::models::BrowserTab {
+                    title: "B".into(),
+                    url: format!("https://example.test/{i}/b"),
+                    active: false,
+                },
+            ];
+        }
+        let plans = plan_launches(&scene, &[]);
+        assert_eq!(plans.len(), 2);
+        for (i, plan) in plans.iter().enumerate() {
+            assert!(plan.args.iter().any(|a| a == "--new-window"));
+            assert!(plan.args.iter().any(|a| a == &format!("https://example.test/{i}/a")));
+            assert!(plan.args.iter().any(|a| a == &format!("https://example.test/{i}/b")));
+        }
     }
 
     #[test]

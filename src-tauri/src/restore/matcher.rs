@@ -309,6 +309,7 @@ mod tests {
     fn target(title: &str, class: &str, path: &str) -> SceneWindow {
         SceneWindow {
             process_path: Some(path.into()),
+            browser_tabs: Vec::new(),
             process_name: "notepad.exe".into(),
             class_name: class.into(),
             title: title.into(),

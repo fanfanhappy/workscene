@@ -440,6 +440,7 @@ mod tests {
     fn w(title: &str, x: f64, state: ShowState) -> SceneWindow {
         SceneWindow {
             process_path: Some(r"C:\app\a.exe".into()),
+            browser_tabs: Vec::new(),
             process_name: "a.exe".into(),
             class_name: "Cls".into(),
             title: title.into(),

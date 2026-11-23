@@ -59,6 +59,11 @@ export const api = {
     call<import("@/types/contract").HotkeyStatus>("system_hotkey_status"),
   openLogDir: () => call<void>("system_open_log_dir"),
   exportDiagnostics: () => call<string>("system_export_diagnostics"),
+  browserBridgeStatus: () =>
+    call<import("@/types/contract").BrowserBridgeStatus>("browser_bridge_status"),
+  browserBridgeInstall: () =>
+    call<import("@/types/contract").BrowserBridgeStatus>("browser_bridge_install"),
+  openBrowserExtensionDir: () => call<void>("browser_bridge_open_extension_dir"),
   captureStart: () => call<CaptureResult>("capture_start"),
   sceneHealth: () => call<SceneHealth>("scene_health"),
   windowSetTheme: (theme: "light" | "dark") => call<void>("window_set_theme", { theme }),

@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "WorkScene 浏览器标签页",
+  "version": "1.0.0",
+  "description": "把当前浏览器窗口和标签页 URL 同步给本机 WorkScene；不联网、不上传。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo5465qT/XxJmO7y96dsdw14pS6g1jwE2zusdZp7k+A6aslpU9v1clApP23ImI7oPtG1m9lSavGCSeKMcyOh6DyVEqErPsTjHsabFjpjS5nyLo0d4KhQhzt+S0Zx1FnYD0qSEBxgB9xjA3ksqUAljWrpPn/F8B9ZhdEiHydXSTUm2VkkxSCjxG85DgpkBH9hoH6uh22E6AdyfKmpdrDDJ3sQeyloHxU0WAhBivPbpHA03XDomHuDsOr/k2ZmIwK33DsPrrZJliC+Bg48aC4WESikzZkUi7B2d1UvYGKukYuCZjx3dHeysWd/WCpgzagoy/iVwm5Qmu13wgX2MAs0piwIDAQAB",
+  "permissions": ["tabs", "nativeMessaging", "storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "WorkScene 浏览器标签页",
+    "default_popup": "popup.html"
+  }
+}

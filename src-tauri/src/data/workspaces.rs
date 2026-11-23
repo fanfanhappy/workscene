@@ -88,6 +88,8 @@ pub struct WorkspaceWindow {
     pub source_dpi: Option<i64>,
     pub show_state: ShowState,
     pub z_order: i64,
+    #[serde(default)]
+    pub browser_tabs: Vec<crate::core::models::BrowserTab>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,8 +270,8 @@ pub async fn create_from_capture(
             "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
                 x_ratio, y_ratio, width_ratio, height_ratio,
                 original_x, original_y, original_width, original_height, source_dpi,
-                show_state, z_order, title, class_name, captured_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                show_state, z_order, title, class_name, window_match_json, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(format!("wl-{:x}-{}", now, idx))
         .bind(&ws_id)
@@ -288,6 +290,7 @@ pub async fn create_from_capture(
         .bind(idx as i64)
         .bind(&w.title)
         .bind(&w.class_name)
+        .bind(crate::browser_bridge::encode_tabs(&w.browser_tabs))
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -533,7 +536,8 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
     let window_rows = sqlx::query(
         "SELECT l.id, l.item_id, l.title, l.class_name, l.monitor_key,
                 l.x_ratio, l.y_ratio, l.width_ratio, l.height_ratio, l.source_dpi,
-                l.show_state, l.z_order, i.target AS process_path, i.display_name AS process_name
+                l.show_state, l.z_order, l.window_match_json,
+                i.target AS process_path, i.display_name AS process_name
          FROM window_layouts l
          JOIN workspace_items i ON i.id = l.item_id
          WHERE l.workspace_id = ?
@@ -562,6 +566,9 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
                 source_dpi: r.get("source_dpi"),
                 show_state: str_to_state(&state),
                 z_order: r.get("z_order"),
+                browser_tabs: crate::browser_bridge::decode_tabs(
+                    r.get::<Option<String>, _>("window_match_json").as_deref(),
+                ),
             }
         })
         .collect();
@@ -1298,6 +1305,7 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
                 source_dpi: w.source_dpi.unwrap_or(96) as u32,
                 show_state: w.show_state,
                 z_order: w.z_order as i32,
+                browser_tabs: w.browser_tabs.clone(),
                 reuse_policy: item
                     .map(|i| i.reuse_policy.clone())
                     .unwrap_or_else(|| "reuse_or_launch".into()),
@@ -1563,8 +1571,8 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         sqlx::query(
             "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
                 x_ratio, y_ratio, width_ratio, height_ratio, source_dpi,
-                show_state, z_order, title, class_name, captured_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                show_state, z_order, title, class_name, window_match_json, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new_win_id)
         .bind(&new_ws_id)
@@ -1579,6 +1587,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         .bind(w.z_order)
         .bind(&w.title)
         .bind(&w.class_name)
+        .bind(crate::browser_bridge::encode_tabs(&w.browser_tabs))
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -1726,6 +1735,8 @@ pub struct ExportWindow {
     pub show_state: ShowState,
     #[serde(default)]
     pub z_order: i64,
+    #[serde(default)]
+    pub browser_tabs: Vec<crate::core::models::BrowserTab>,
 }
 
 pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
@@ -1781,6 +1792,7 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
                 source_dpi: w.source_dpi,
                 show_state: w.show_state,
                 z_order: w.z_order,
+                browser_tabs: w.browser_tabs.clone(),
             })
         })
         .collect();
@@ -2249,8 +2261,8 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         sqlx::query(
             "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
                 x_ratio, y_ratio, width_ratio, height_ratio, source_dpi,
-                show_state, z_order, title, class_name, captured_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                show_state, z_order, title, class_name, window_match_json, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&win_id)
         .bind(&ws_id)
@@ -2265,6 +2277,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         .bind(w.z_order)
         .bind(&w.title)
         .bind(&w.class_name)
+        .bind(crate::browser_bridge::encode_tabs(&w.browser_tabs))
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -2481,8 +2494,8 @@ pub async fn recapture(
             "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
                 x_ratio, y_ratio, width_ratio, height_ratio,
                 original_x, original_y, original_width, original_height, source_dpi,
-                show_state, z_order, title, class_name, captured_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                show_state, z_order, title, class_name, window_match_json, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(format!(
             "wl-{:x}-{}-{}",
@@ -2506,6 +2519,7 @@ pub async fn recapture(
         .bind(idx as i64)
         .bind(&w.title)
         .bind(&w.class_name)
+        .bind(crate::browser_bridge::encode_tabs(&w.browser_tabs))
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -2790,8 +2804,8 @@ pub async fn create_from_scene(
             "INSERT INTO window_layouts (id, workspace_id, item_id, monitor_key,
                 x_ratio, y_ratio, width_ratio, height_ratio,
                 original_x, original_y, original_width, original_height, source_dpi,
-                show_state, z_order, title, class_name, captured_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                show_state, z_order, title, class_name, window_match_json, captured_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&win_id)
         .bind(&ws_id)
@@ -2810,6 +2824,7 @@ pub async fn create_from_scene(
         .bind(w.z_order as i64)
         .bind(&w.title)
         .bind(&w.class_name)
+        .bind(crate::browser_bridge::encode_tabs(&w.browser_tabs))
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -2892,6 +2907,7 @@ mod tests {
         };
         let win = |hwnd: usize, title: &str, class: &str, path: &str| WindowInfo {
             hwnd,
+            browser_tabs: Vec::new(),
             process_id: 10,
             process_path: Some(path.into()),
             process_name: "app.exe".into(),
@@ -3148,6 +3164,30 @@ mod tests {
         // 800x600 窗口在 1920x1040 工作区中的比例
         assert!((first.width_ratio - 800.0 / 1920.0).abs() < 1e-6);
         assert_eq!(first.monitor_key, "M1");
+    }
+
+    #[tokio::test]
+    async fn browser_tabs_roundtrip_through_layout_json() {
+        let db = db().await;
+        let mut cap = capture();
+        cap.windows[0].browser_tabs = vec![
+            crate::core::models::BrowserTab {
+                title: "首页".into(),
+                url: "https://example.test/a".into(),
+                active: false,
+            },
+            crate::core::models::BrowserTab {
+                title: "文档".into(),
+                url: "https://example.test/b".into(),
+                active: true,
+            },
+        ];
+        let s = create_from_capture(&db, "浏览器", &cap).await.unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        assert_eq!(detail.windows[0].browser_tabs.len(), 2);
+        let scene = to_scene(&db, &s.id).await.unwrap();
+        assert_eq!(scene.windows[0].browser_tabs.len(), 2);
+        assert_eq!(scene.windows[0].browser_tabs[1].url, "https://example.test/b");
     }
 
     #[tokio::test]

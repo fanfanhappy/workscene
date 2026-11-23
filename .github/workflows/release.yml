@@ -106,6 +106,7 @@ jobs:
           $stage = "dist-portable/WorkScene-$env:VER-portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "src-tauri/target/release/workscene.exe" "$stage/WorkScene.exe"
+          Copy-Item "src-tauri/resources/browser-extension" "$stage/browser-extension" -Recurse
 
           @(
             "@echo off",

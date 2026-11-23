@@ -36,7 +36,7 @@ import {
 } from "@/components/ui";
 import { AppIcon, useAppIcons } from "@/components/AppIcon";
 
-type SettingsTab = "general" | "behavior" | "storage" | "adapters" | "about";
+type SettingsTab = "general" | "behavior" | "browser" | "storage" | "adapters" | "about";
 
 /** 与恢复页共用同一个「已告知专注模式后果」标记 */
 const FOCUS_MODE_ACK_KEY = "workscene.focusModeAck";
@@ -133,6 +133,12 @@ export function SettingsPage() {
   });
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
+  const [installingBridge, setInstallingBridge] = useState(false);
+  const bridge = useQuery({
+    queryKey: ["browser-bridge"],
+    queryFn: api.browserBridgeStatus,
+    enabled: tab === "browser",
+  });
   const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
   // 汇总用户工作空间 + 当前桌面实际用到的软件，用于真实展示适配状态与一键忽略
@@ -318,6 +324,7 @@ export function SettingsPage() {
         items={[
           { id: "general", label: "外观与热键", icon: <Palette size={13} /> },
           { id: "behavior", label: "快照与恢复", icon: <Camera size={13} /> },
+          { id: "browser", label: "浏览器标签页", icon: <Globe size={13} /> },
           { id: "storage", label: "存储与目录", icon: <HardDrive size={13} /> },
           { id: "adapters", label: "应用适配 (L2)", icon: <Cpu size={13} /> },
           { id: "about", label: "关于", icon: <Info size={13} /> },
@@ -931,12 +938,119 @@ export function SettingsPage() {
         </div>
       ) : null}
 
+      {/* 浏览器标签页桥 */}
+      {tab === "browser" ? (
+        <div className="flex flex-col gap-3.5">
+          <Card className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-body font-medium text-ink">浏览器标签页恢复</p>
+                <p className="text-[11px] text-ink-3">
+                  通过本机扩展读取 Chrome / Edge 当前窗口的标签页 URL，恢复时按窗口一次性打开。
+                </p>
+              </div>
+              <Badge tone={bridge.data?.installed ? "success" : "neutral"}>
+                {bridge.data?.installed ? "本机连接已安装" : "未安装"}
+              </Badge>
+            </div>
+
+            {bridge.isPending ? (
+              <div className="flex items-center gap-2 text-aux text-ink-3">
+                <Spinner /> 正在检查…
+              </div>
+            ) : bridge.error ? (
+              <ErrorNote
+                message={`检查浏览器连接失败：${String((bridge.error as Error).message)}`}
+              />
+            ) : (
+              <>
+                <div className="grid gap-2 rounded-[9px] border border-line bg-canvas/55 px-3 py-2.5 text-aux sm:grid-cols-3">
+                  <div>
+                    <p className="text-[10px] text-ink-3">Chrome</p>
+                    <p className={bridge.data?.chromeRegistered ? "text-success" : "text-ink-3"}>
+                      {bridge.data?.chromeRegistered ? "已注册" : "未注册"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-ink-3">Edge</p>
+                    <p className={bridge.data?.edgeRegistered ? "text-success" : "text-ink-3"}>
+                      {bridge.data?.edgeRegistered ? "已注册" : "未注册"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-ink-3">最近同步</p>
+                    <p className="text-ink">
+                      {bridge.data?.lastSyncAt
+                        ? `${new Date(bridge.data.lastSyncAt).toLocaleString()} · ${bridge.data.tabCount} 个标签页`
+                        : "还没有同步"}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={installingBridge}
+                    onClick={async () => {
+                      setInstallingBridge(true);
+                      try {
+                        await api.browserBridgeInstall();
+                        await bridge.refetch();
+                        toast.success(
+                          "本机连接已安装",
+                          "下一步：打开扩展目录，在 chrome://extensions 或 edge://extensions 加载已解压的扩展。",
+                        );
+                      } catch (e) {
+                        toast.danger("安装本机连接失败", String((e as Error).message));
+                      } finally {
+                        setInstallingBridge(false);
+                      }
+                    }}
+                  >
+                    {installingBridge ? "安装中…" : "安装本机连接"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      api
+                        .openBrowserExtensionDir()
+                        .catch((e) => toast.danger("打开扩展目录失败", String((e as Error).message)))
+                    }
+                  >
+                    <FolderOpen size={13} /> 打开扩展目录
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => bridge.refetch()}>
+                    <RefreshCw size={13} /> 重新检查
+                  </Button>
+                </div>
+
+                <ol className="flex flex-col gap-1 text-[11px] text-ink-3">
+                  <li>1. 先点「安装本机连接」，写入 Chrome/Edge 的 Native Messaging 注册项。</li>
+                  <li>2. 点「打开扩展目录」，复制完整路径。</li>
+                  <li>
+                    3. 打开 <code>chrome://extensions</code> 或 <code>edge://extensions</code>，开启开发者模式，
+                    选择「加载已解压的扩展程序」，指向该目录。
+                  </li>
+                  <li>4. 扩展 ID 固定为 <code>pijcngaddijnocfoikelinkigoacigbl</code>；切回这里点「重新检查」。</li>
+                </ol>
+                <p className="rounded-[9px] border border-line bg-canvas/40 px-3 py-2 text-[11px] text-ink-3">
+                  隐私：扩展只同步当前窗口的标题和 URL，不读取 Cookie、密码、历史记录或页面内容；数据只写本机
+                  WorkScene 数据目录。浏览器完全关闭时无法读取标签页，恢复只能打开空白窗口。
+                </p>
+              </>
+            )}
+          </Card>
+        </div>
+      ) : null}
+
       {/* Tab 5: 关于 */}
       {tab === "about" ? (
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "2.0.4"}
+              WorkScene v{info.data?.version ?? "2.1.0"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -1011,7 +1125,7 @@ export function SettingsPage() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const data = (await res.json()) as { tag_name?: string; html_url?: string };
                   const latest = (data.tag_name ?? "").replace(/^v/i, "");
-                  const current = (info.data?.version ?? "2.0.4").replace(/^v/i, "");
+                  const current = (info.data?.version ?? "2.1.0").replace(/^v/i, "");
                   const toParts = (v: string) =>
                     v.split(".").map((n) => Number.parseInt(n, 10) || 0);
                   const a = toParts(latest);

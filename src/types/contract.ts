@@ -23,6 +23,7 @@ export interface WindowInfo {
   isMinimized: boolean;
   isMaximized: boolean;
   showState: ShowState;
+  browserTabs?: BrowserTab[];
 }
 
 export interface DisplayInfo {
@@ -77,6 +78,7 @@ export interface SceneWindow {
   sourceDpi: number;
   showState: ShowState;
   zOrder: number;
+  browserTabs?: BrowserTab[];
 }
 
 export interface SceneResource {
@@ -231,6 +233,13 @@ export interface WorkspaceWindow {
   sourceDpi: number | null;
   showState: ShowState;
   zOrder: number;
+  browserTabs?: BrowserTab[];
+}
+
+export interface BrowserTab {
+  title: string;
+  url: string;
+  active: boolean;
 }
 
 export interface WorkspaceDetail {
@@ -369,6 +378,17 @@ export interface RunSummary {  id: string;
   succeeded: number;
   failed: number;
   skipped: number;
+}
+
+export interface BrowserBridgeStatus {
+  installed: boolean;
+  manifestPath: string;
+  extensionDir: string;
+  chromeRegistered: boolean;
+  edgeRegistered: boolean;
+  lastSyncAt: number | null;
+  tabCount: number;
+  windowCount: number;
 }
 
 export interface AppInfo {

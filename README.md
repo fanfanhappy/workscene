@@ -79,18 +79,18 @@ Windows 10 / 11 · 本地优先 · 无需账号 · 数据不出本机
 |---|---|
 | ![历史快照与恢复记录](docs/screenshot-history.png) | ![设置页](docs/screenshot-settings.png) |
 
-> 截图取自 v1.1.3；v2.0.4 主要修复浏览器标签页被拆成多窗口，界面延续该版本。Windows 11 深色主题，150% 缩放。
+> 截图取自 v1.1.3；v2.1.0 新增可选的浏览器标签页 URL 恢复，界面延续该版本。Windows 11 深色主题，150% 缩放。
 
 ---
 
 ## 下载与安装
 
-前往 [GitHub Releases](https://github.com/fanfanhappy/workscene/releases/latest) 下载最新版本（当前正式版 **v2.0.4**）。
+前往 [GitHub Releases](https://github.com/fanfanhappy/workscene/releases/latest) 下载最新版本（当前正式版 **v2.1.0**）。
 
 | 版本形态 | 文件名 | 适用场景 |
 |---|---|---|
-| **标准安装版**（推荐） | `WorkScene_2.0.4_x64-setup.exe` | NSIS 当前用户安装，无需管理员权限，带开始菜单快捷方式与标准卸载。数据默认在 `%LOCALAPPDATA%\WorkScene`。 |
-| **绿色便携版** | `WorkScene-2.0.4-portable.zip` | 解压即用。双击 `start.cmd` 启动时自动使用同目录 `data\`，整个文件夹可拷入 U 盘或同步盘随身迁移。 |
+| **标准安装版**（推荐） | `WorkScene_2.1.0_x64-setup.exe` | NSIS 当前用户安装，无需管理员权限，带开始菜单快捷方式与标准卸载。数据默认在 `%LOCALAPPDATA%\WorkScene`。 |
+| **绿色便携版** | `WorkScene-2.1.0-portable.zip` | 解压即用。双击 `start.cmd` 启动时自动使用同目录 `data\`，整个文件夹可拷入 U 盘或同步盘随身迁移。 |
 
 - **系统要求**：Windows 10 / 11（x64）；安装包会在缺少 WebView2 Runtime 时自动下载安装（需联网）。
 - **完整性校验**：最新 Release 附带 `SHA256SUMS.txt`，下载后可执行 `certutil -hashfile <文件名> SHA256` 对照。
@@ -117,6 +117,7 @@ flowchart LR
    - `Ctrl+Alt+W` 唤起主窗口，`Ctrl+K` 打开命令面板；
    - 在设置中开启快捷槽后，给高频工作空间绑定 `Ctrl+Alt+1~9`，无需打开主界面即可切换；
    - 右键托盘图标可直接恢复常用工作空间，或立即给当前桌面拍一张快照。
+4. **（可选）浏览器标签页 URL**：设置 → 浏览器标签页 → 安装本机连接 → 打开扩展目录，在 Chrome/Edge 的扩展页「加载已解压的扩展程序」。之后捕获工作空间时会一并保存标签页 URL，恢复时按窗口一次性打开为标签页。
 
 ---
 
@@ -142,7 +143,7 @@ WorkScene 按可执行文件名识别常见生产力工具，并给出经过验�
 |---|---|---|
 | **代码编辑器 / AI IDE** | VS Code (`Code.exe` / Insiders)、Cursor、Windsurf、Trae、Antigravity | 自动识别当前工作区目录；补启窗口时注入 `-n` 并传入项目路径 |
 | **JetBrains IDE** | IntelliJ IDEA、PyCharm、WebStorm、GoLand、CLion、Rider、RustRover、DataGrip、PhpStorm | 把项目文件夹路径直接作为启动参数打开工程 |
-| **浏览器** | Chrome、Microsoft Edge、Brave、Arc、Vivaldi、Firefox、Opera、360 浏览器 | 导入 Chrome / Edge 书签夹；多窗口恢复时注入 `--new-window`（Firefox 为 `-new-window`） |
+| **浏览器** | Chrome、Microsoft Edge、Brave、Arc、Vivaldi、Firefox、Opera、360 浏览器 | 导入 Chrome / Edge 书签夹；可选扩展同步标签页 URL，恢复时按窗口一次性带 URL 打开（Firefox 为 `-new-window`） |
 | **终端** | Windows Terminal (`wt.exe`)、PowerShell、pwsh、CMD | `wt.exe` 生成 `-w new -d "<目录>"`，`pwsh` 使用 `-WorkingDirectory`，新窗口直接进入目标目录 |
 | **文件资源管理器** | Windows Explorer (`explorer.exe`) | 通过 COM 采集已打开窗口的真实文件夹路径，恢复时精准打开目录 |
 
@@ -152,6 +153,7 @@ WorkScene 按可执行文件名识别常见生产力工具，并给出经过验�
 
 - **100% 本地**：工作空间、快照 JSON 与恢复记录（SQLite，WAL 模式）全部存放在本机；没有账号体系、云端同步或后台遥测。
 - **最小采集**：不截屏、不注入其他进程、不读取浏览器 Cookie / 密码库 / 浏览历史。浏览器书签导入只读解析书签文件。
+- **可选浏览器扩展**：只有用户主动安装并启用扩展后，才读取当前窗口的标题和 URL；数据只写本机、不读取页面内容，可在设置中随时停用/卸载。
 - **外部导入防护**：导入他人分享的工作空间 JSON 时会先预检；指向 UNC 网络路径、不存在的路径、带自定义启动参数或钩子命令的条目默认停用或剥离，确认后才启用。
 - **唯一的网络请求**：仅当点击「设置 → 关于 → 检查新版本」时，前端会向 `api.github.com` 查询一次最新版本号，只读、不带任何用户数据。
 

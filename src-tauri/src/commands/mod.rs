@@ -39,6 +39,31 @@ pub fn system_hotkey_status() -> crate::win::hotkey::HotkeyUpdateResult {
 }
 
 #[tauri::command]
+pub fn browser_bridge_status(
+    app: tauri::AppHandle,
+) -> crate::browser_bridge::BrowserBridgeStatus {
+    crate::browser_bridge::load_status(&app)
+}
+
+#[tauri::command]
+pub fn browser_bridge_install(
+    app: tauri::AppHandle,
+) -> AppResult<crate::browser_bridge::BrowserBridgeStatus> {
+    crate::browser_bridge::install(&app).map_err(AppError::msg)
+}
+
+#[tauri::command]
+pub fn browser_bridge_open_extension_dir(app: tauri::AppHandle) -> AppResult<()> {
+    let dir = crate::browser_bridge::extension_dir(&app);
+    std::fs::create_dir_all(&dir)?;
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| AppError::msg(format!("打开扩展目录失败：{e}")))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn system_open_log_dir() -> AppResult<()> {
     let dir = crate::logging::log_dir();
     std::fs::create_dir_all(&dir)?;

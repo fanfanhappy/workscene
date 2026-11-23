@@ -52,6 +52,10 @@ pub fn scan_for_test() -> AppResult<CaptureResult> {
 fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
     let started = std::time::Instant::now();
     let self_pid = std::process::id();
+    let mut browser_cache: std::collections::HashMap<
+        String,
+        crate::browser_bridge::BrowserTabs,
+    > = std::collections::HashMap::new();
     tracing::debug!(allow_self_window, "desktop scan started");
 
     let monitors = display::enumerate();
@@ -145,6 +149,10 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
             state = ?raw.show_state,
             "window captured"
         );
+        let browser_tabs = browser_cache
+            .entry(pinfo.name.clone())
+            .or_insert_with(|| crate::browser_bridge::BrowserTabs::load(&pinfo.name))
+            .for_window(&raw.title);
         windows.push(WindowInfo {
             hwnd: raw.hwnd as usize,
             process_id: raw.pid,
@@ -163,6 +171,7 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
             is_minimized: raw.show_state == ShowState::Minimized,
             is_maximized: raw.show_state == ShowState::Maximized,
             show_state: raw.show_state,
+            browser_tabs,
         });
     }
 
@@ -196,6 +205,7 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         windows = windows.len(),
         excluded = excluded_total,
         displays = displays.len(),
+        browser_tabs = windows.iter().map(|w| w.browser_tabs.len()).sum::<usize>(),
         duration_ms,
         "desktop scan finished"
     );

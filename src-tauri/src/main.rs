@@ -2,10 +2,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // Chrome/Edge 通过 Native Messaging 启动同一个 exe；此时不能进入 GUI。
+    if workscene_lib::native_host::is_native_messaging_host() {
+        workscene_lib::native_host::run();
+        return;
+    }
+
     // CLI 自检/基线也要留下日志，方便用户把失败现场发回来。
     workscene_lib::logging::init();
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--native-host") {
+        workscene_lib::native_host::run();
+        return;
+    }
+    if args.iter().any(|a| a == "--install-browser-host") {
+        match workscene_lib::browser_bridge::install_native_host() {
+            Ok(path) => eprintln!("native host manifest: {}", path.display()),
+            Err(e) => eprintln!("install failed: {e}"),
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--selftest") {
         workscene_lib::selftest();
         return;
