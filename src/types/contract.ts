@@ -128,6 +128,8 @@ export interface RestorePreview {
 }
 
 export interface RestoreStepResult {
+  /** window / resource / hook / focus */
+  stepType?: string;
   targetName: string;
   status: StepStatus;
   message: string;
@@ -298,6 +300,14 @@ export interface RecoveryHint {
   workspaceName: string | null;
   snapshotId: string | null;
   snapshotAt: number | null;
+  /** 快照类型（manual/auto/initial/protection），旧 hint 可能没有 */
+  snapshotType?: string | null;
+}
+
+export interface HotkeyStatus {
+  mainOk: boolean;
+  /** 未能注册的 Ctrl+Alt+1..9 槽位 */
+  failedSlots: number[];
 }
 
 export interface AdapterSuggestion {
@@ -318,7 +328,7 @@ export interface AppSettings {
   autostart: boolean;
   /** 全局快捷键预设，空串表示关闭 */
   hotkey: string;
-  /** 是否启用 Ctrl+Alt+1~5 快速切换前 5 个工作空间 */
+  /** 是否启用 Ctrl+Alt+1~9 快速切换已绑定的工作空间 */
   workspaceHotkeysEnabled: boolean;
   /** 启动 WorkScene 时自动恢复的工作空间 ID */
   startupWorkspaceId: string | null;
@@ -375,7 +385,9 @@ export interface ImportPreview {
   name: string;
   appCount: number;
   resourceCount: number;
-  /** 路径不存在或位于网络位置，导入后会停用 */
+  /** 导入文件里所有应用的目标路径 */
+  appTargets: string[];
+  /** 路径不存在、位于网络/不可信位置，导入后会停用 */
   disabledApps: string[];
   /** 文件里带了启动参数，导入时会被剥离 */
   appsWithArgs: string[];

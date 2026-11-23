@@ -31,7 +31,8 @@ pub fn run() {
             // 会话标记：上次是否正常退出。崩溃时在数据目录留下 recovery-hint.json，
             // 本次启动据此在总览页提示"可以恢复上次现场"。
             if let Some(previous) = data::session::begin() {
-                let hint = tauri::async_runtime::block_on(build_recovery_hint(&db, previous.started_at));
+                let hint =
+                    tauri::async_runtime::block_on(build_recovery_hint(&db, previous.started_at));
                 let _ = data::session::write_hint(&hint);
             }
 
@@ -60,7 +61,7 @@ pub fn run() {
             win::tray::build_tray(app)?;
             win::tray::intercept_close(app);
 
-            // 快捷键以设置为准；同时按设置注册 Ctrl+Alt+1~5 工作空间快捷切屏
+            // 快捷键以设置为准；同时按设置注册 Ctrl+Alt+1~9 工作空间快捷切屏
             let init_settings = {
                 let db = app.state::<data::Db>().inner().clone();
                 tauri::async_runtime::block_on(data::settings::get(&db)).unwrap_or_default()
@@ -77,11 +78,17 @@ pub fn run() {
                 let db = app.state::<data::Db>().inner().clone();
                 let _ = tauri::async_runtime::block_on(data::settings::set(&db, &fixed));
             }
-            win::tray::spawn_hotkey(
+            let hotkey_status = win::tray::spawn_hotkey(
                 app.handle().clone(),
                 &init_settings.hotkey,
                 init_settings.workspace_hotkeys_enabled,
             );
+            if !hotkey_status.main_ok || !hotkey_status.failed_slots.is_empty() {
+                eprintln!(
+                    "热键注册未完全成功：主键={}，失败槽={:?}",
+                    hotkey_status.main_ok, hotkey_status.failed_slots
+                );
+            }
 
             spawn_auto_snapshot(app.handle().clone());
             spawn_display_watcher(app.handle().clone());
@@ -113,6 +120,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system_get_info,
+            commands::system_hotkey_status,
             commands::system_get_displays,
             commands::capture_start,
             commands::capture_detect_context,
@@ -133,8 +141,10 @@ pub fn run() {
             commands::workspace_update_from_capture,
             commands::workspace_delete,
             commands::workspace_item_update,
+            commands::workspace_item_patch,
             commands::workspace_item_relocate,
             commands::workspace_layout_update,
+            commands::workspace_layout_save,
             commands::workspace_window_delete,
             commands::workspace_item_delete,
             commands::workspace_item_add,
@@ -212,6 +222,7 @@ async fn build_recovery_hint(db: &data::Db, crashed_at: i64) -> data::session::R
         workspace_name: None,
         snapshot_id: None,
         snapshot_at: None,
+        snapshot_type: None,
     };
 
     let Ok(Some(ws_id)) = data::snapshots::active_workspace(db).await else {
@@ -223,10 +234,16 @@ async fn build_recovery_hint(db: &data::Db, crashed_at: i64) -> data::session::R
         hint.workspace_name = Some(detail.name);
     }
 
-    if let Ok(snaps) = data::snapshots::list(db, &ws_id, 1).await {
+    // 优先选非 protection 的现场快照；只有保护快照时才回退并标明类型。
+    if let Ok(Some(latest)) = data::snapshots::latest_for_recovery(db, &ws_id).await {
+        hint.snapshot_id = Some(latest.id.clone());
+        hint.snapshot_at = Some(latest.captured_at);
+        hint.snapshot_type = Some(latest.snapshot_type.clone());
+    } else if let Ok(snaps) = data::snapshots::list(db, &ws_id, 1).await {
         if let Some(latest) = snaps.first() {
             hint.snapshot_id = Some(latest.id.clone());
             hint.snapshot_at = Some(latest.captured_at);
+            hint.snapshot_type = Some(latest.snapshot_type.clone());
         }
     }
 
@@ -264,9 +281,8 @@ pub fn cli_capture(name: &str) {
             return;
         }
     };
-    match tauri::async_runtime::block_on(data::workspaces::create_from_capture(
-        &db, name, &capture,
-    )) {
+    match tauri::async_runtime::block_on(data::workspaces::create_from_capture(&db, name, &capture))
+    {
         Ok(w) => println!(
             "已保存工作空间：{}（{} 个应用 / {} 个窗口）→ {}",
             w.name, w.item_count, w.window_count, w.id
@@ -300,7 +316,11 @@ pub fn cli_snapshot(name: &str) {
             return;
         }
     };
-    let Some(ws) = list.iter().find(|w| w.name == name).or_else(|| list.first()) else {
+    let Some(ws) = list
+        .iter()
+        .find(|w| w.name == name)
+        .or_else(|| list.first())
+    else {
         eprintln!("没有可用的工作空间");
         return;
     };
@@ -313,9 +333,8 @@ pub fn cli_snapshot(name: &str) {
         Ok(s) => {
             // 命令行给某个工作空间拍快照，视为把它设为当前工作空间，
             // 这样自动快照与崩溃恢复提示都能找到归属
-            let _ = tauri::async_runtime::block_on(data::snapshots::set_active_workspace(
-                &db, &ws.id,
-            ));
+            let _ =
+                tauri::async_runtime::block_on(data::snapshots::set_active_workspace(&db, &ws.id));
             println!(
                 "已写入快照：{}（{} 个窗口，类型 {}）",
                 s.id, s.window_count, s.snapshot_type
@@ -394,7 +413,8 @@ pub fn m1test() {
     let normal_moved = (900, 480, 640, 420);
     let max_normal_rect = (600, 320, 800, 600);
 
-    let Some(mock_a) = win::mock::MockWindow::spawn("WorkScene 模拟应用 A", normal_target) else {
+    let Some(mock_a) = win::mock::MockWindow::spawn("WorkScene 模拟应用 A", normal_target)
+    else {
         eprintln!("无法创建模拟窗口 A，自检中止");
         std::process::exit(2);
     };
@@ -477,14 +497,7 @@ pub fn m1test() {
         normal_moved.2,
         normal_moved.3,
     );
-    win::window::apply_placement(
-        mock_b.hwnd,
-        100,
-        100,
-        700,
-        500,
-        ShowState::Normal,
-    );
+    win::window::apply_placement(mock_b.hwnd, 100, 100, 700, 500, ShowState::Normal);
     std::thread::sleep(Duration::from_millis(400));
     println!(
         "[3/6] 已破坏现场：A 移到 {:?}，B 取消最大化={}",
@@ -565,25 +578,20 @@ pub fn m2test() {
     let mut ok = true;
     let normal_target = (260, 180, 880, 600);
 
-    let Some(mock_a) = win::mock::MockWindow::spawn("WorkScene M2 模拟应用", normal_target) else {
+    let Some(mock_a) = win::mock::MockWindow::spawn("WorkScene M2 模拟应用", normal_target)
+    else {
         eprintln!("无法创建模拟窗口，自检中止");
         std::process::exit(2);
     };
-    let Some(mock_b) = win::mock::MockWindow::spawn("WorkScene M2 最大化窗口", (700, 380, 760, 560))
+    let Some(mock_b) =
+        win::mock::MockWindow::spawn("WorkScene M2 最大化窗口", (700, 380, 760, 560))
     else {
         eprintln!("无法创建第二个模拟窗口，自检中止");
         mock_a.close();
         std::process::exit(2);
     };
     std::thread::sleep(Duration::from_millis(300));
-    win::window::apply_placement(
-        mock_b.hwnd,
-        700,
-        380,
-        760,
-        560,
-        ShowState::Maximized,
-    );
+    win::window::apply_placement(mock_b.hwnd, 700, 380, 760, 560, ShowState::Maximized);
     std::thread::sleep(Duration::from_millis(250));
 
     let db = match tauri::async_runtime::block_on(data::init()) {
@@ -650,7 +658,10 @@ pub fn m2test() {
             listed.len(),
             d.items.len(),
             d.windows.len(),
-            d.windows.first().map(|w| w.monitor_key.clone()).unwrap_or_default()
+            d.windows
+                .first()
+                .map(|w| w.monitor_key.clone())
+                .unwrap_or_default()
         ),
         Err(e) => {
             eprintln!("读取详情失败：{e}");
@@ -663,10 +674,7 @@ pub fn m2test() {
     win::window::apply_placement(mock_b.hwnd, 120, 120, 700, 500, ShowState::Normal);
     std::thread::sleep(Duration::from_millis(300));
 
-    let scene = match tauri::async_runtime::block_on(data::workspaces::to_scene(
-        &db,
-        &created.id,
-    )) {
+    let scene = match tauri::async_runtime::block_on(data::workspaces::to_scene(&db, &created.id)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("由工作空间构造恢复计划失败：{e}");
@@ -675,7 +683,10 @@ pub fn m2test() {
             std::process::exit(2);
         }
     };
-    println!("[4/7] 已由 DB 布局构造恢复计划：{} 个窗口", scene.windows.len());
+    println!(
+        "[4/7] 已由 DB 布局构造恢复计划：{} 个窗口",
+        scene.windows.len()
+    );
 
     let report = match restore::apply(None, &scene, false, None) {
         Ok(r) => r,
@@ -713,7 +724,8 @@ pub fn m2test() {
         "m2test",
     ));
     let runs = tauri::async_runtime::block_on(data::runs::list(&db, 10)).unwrap_or_default();
-    let stats = tauri::async_runtime::block_on(data::runs::error_code_stats(&db)).unwrap_or_default();
+    let stats =
+        tauri::async_runtime::block_on(data::runs::error_code_stats(&db)).unwrap_or_default();
     println!(
         "[7/7] 报告入库={:?}，runs={}，首条 steps={}，错误码分布={:?}",
         saved.is_ok(),
@@ -730,11 +742,11 @@ pub fn m2test() {
     let after_files = std::fs::read_dir(storage::snapshot_dir())
         .map(|d| d.filter_map(|e| e.ok()).count())
         .unwrap_or(0);
-    let items_left: i64 = tauri::async_runtime::block_on(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workspace_items WHERE workspace_id = ?",
+    let items_left: i64 = tauri::async_runtime::block_on(
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_items WHERE workspace_id = ?")
+            .bind(&created.id)
+            .fetch_one(&db.pool),
     )
-    .bind(&created.id)
-    .fetch_one(&db.pool))
     .unwrap_or(-1);
     println!(
         "     删除={:?}，残留 items={}，快照文件 {} → {}",
@@ -789,7 +801,14 @@ pub fn baseline(iterations: usize) {
     // 按快照里的期望状态初始化（C 设为最大化）
     for (m, (_, rect, maximized)) in mocks.iter().zip(specs.iter()) {
         if *maximized {
-            win::window::apply_placement(m.hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+            win::window::apply_placement(
+                m.hwnd,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                ShowState::Maximized,
+            );
         } else {
             win::window::set_window_rect(m.hwnd, rect.0, rect.1, rect.2, rect.3);
         }
@@ -864,7 +883,14 @@ pub fn baseline(iterations: usize) {
         let dy = (i as i32 * 53) % 180;
         for (idx, m) in mocks.iter().enumerate() {
             if idx as usize == 2 {
-                win::window::apply_placement(m.hwnd, 120 + dx, 90 + dy, 700, 480, ShowState::Normal);
+                win::window::apply_placement(
+                    m.hwnd,
+                    120 + dx,
+                    90 + dy,
+                    700,
+                    480,
+                    ShowState::Normal,
+                );
             } else {
                 win::window::set_window_rect(m.hwnd, 100 + dx + idx as i32 * 40, 80 + dy, 820, 540);
             }
@@ -944,10 +970,26 @@ pub fn baseline(iterations: usize) {
 /// 每分钟看一次桌面，指纹不变就不写库（红线二：不能每次窗口变化都落库）。
 fn spawn_auto_snapshot(app: tauri::AppHandle) {
     use tauri::Emitter;
+    const LOOP_SECS: u64 = 60;
+    const RESUME_PAUSE_SECS: u64 = 90;
     std::thread::spawn(move || {
         // 启动后先等一会，避免与应用启动抢资源
         std::thread::sleep(Duration::from_secs(40));
+        let mut last_wall = core::time::now_ms();
         loop {
+            let now = core::time::now_ms();
+            let gap = now.saturating_sub(last_wall);
+            if core::time::looks_like_resume(last_wall, now) {
+                // 休眠唤醒后显示器/驱动可能重排窗口；先暂停一段时间，
+                // 等桌面稳定再允许自动快照，避免把“幽灵坐标”存成现场。
+                eprintln!("检测到系统休眠/唤醒（墙钟跳变 {gap}ms），暂停自动快照 {RESUME_PAUSE_SECS}s");
+                let _ = app.emit("system:resumed", gap);
+                std::thread::sleep(Duration::from_secs(RESUME_PAUSE_SECS));
+                last_wall = core::time::now_ms();
+                continue;
+            }
+            last_wall = now;
+
             let db = app.state::<data::Db>().inner().clone();
             match tauri::async_runtime::block_on(auto_snapshot_once(&db)) {
                 Ok(Some(ws_id)) => {
@@ -956,7 +998,7 @@ fn spawn_auto_snapshot(app: tauri::AppHandle) {
                 Ok(None) => {}
                 Err(e) => eprintln!("自动快照失败：{e}"),
             }
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_secs(LOOP_SECS));
         }
     });
 }
@@ -997,6 +1039,10 @@ fn spawn_display_watcher(app: tauri::AppHandle) {
 }
 
 async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
+    // 恢复过程中桌面是“半成品”：此时自动快照会把中间状态写成历史。
+    if crate::restore::is_busy() {
+        return Ok(None);
+    }
     let settings = data::settings::get(db).await?;
     if !settings.auto_snapshot_enabled {
         return Ok(None);
@@ -1006,26 +1052,24 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
         return Ok(None);
     };
 
-    let enabled: Option<i64> = sqlx::query_scalar(
-        "SELECT auto_snapshot_enabled FROM workspaces WHERE id = ?",
-    )
-    .bind(&ws)
-    .fetch_optional(&db.pool)
-    .await?;
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT auto_snapshot_enabled FROM workspaces WHERE id = ?")
+            .bind(&ws)
+            .fetch_optional(&db.pool)
+            .await?;
 
     if enabled.unwrap_or(0) == 0 {
         return Ok(None);
     }
 
     let capture = capture::scan()?;
-    if data::snapshots::create_auto(
-        db,
-        &ws,
-        &capture,
-        settings.auto_min_interval_secs * 1000,
-    )
-    .await?
-    .is_some()
+    // 扫描期间可能刚好开始恢复；再检查一次，避免把半恢复的桌面落库。
+    if crate::restore::is_busy() {
+        return Ok(None);
+    }
+    if data::snapshots::create_auto(db, &ws, &capture, settings.auto_min_interval_secs * 1000)
+        .await?
+        .is_some()
     {
         // 新写入后才需要按保留策略清理
         let _ = data::snapshots::prune(db, &ws, settings.auto_keep as usize).await;
@@ -1111,12 +1155,8 @@ pub fn m5test() {
     println!("[1/6] 初始快照数：{count_initial}（建空间时自动写入 1 份）");
 
     // 指纹相同 -> 跳过
-    let same = tauri::async_runtime::block_on(data::snapshots::create_auto(
-        &db,
-        &ws.id,
-        &isolated,
-        0,
-    ));
+    let same =
+        tauri::async_runtime::block_on(data::snapshots::create_auto(&db, &ws.id, &isolated, 0));
     let same_skipped = matches!(same, Ok(None));
     println!("[2/6] 桌面未变时自动快照被去重：{same_skipped}");
     if !same_skipped {
@@ -1144,12 +1184,8 @@ pub fn m5test() {
             .collect(),
         ..capture2
     };
-    let created_auto = tauri::async_runtime::block_on(data::snapshots::create_auto(
-        &db,
-        &ws.id,
-        &capture2,
-        0,
-    ));
+    let created_auto =
+        tauri::async_runtime::block_on(data::snapshots::create_auto(&db, &ws.id, &capture2, 0));
     let auto_ok = matches!(created_auto, Ok(Some(_)));
     println!("[3/6] 桌面变化后写入自动快照：{auto_ok}");
     if !auto_ok {
@@ -1192,8 +1228,8 @@ pub fn m5test() {
 
     // 保留策略：只留 1 份自动快照
     let removed = tauri::async_runtime::block_on(data::snapshots::prune(&db, &ws.id, 1));
-    let after = tauri::async_runtime::block_on(data::snapshots::list(&db, &ws.id, 50))
-        .unwrap_or_default();
+    let after =
+        tauri::async_runtime::block_on(data::snapshots::list(&db, &ws.id, 50)).unwrap_or_default();
     let autos = after.iter().filter(|s| s.snapshot_type == "auto").count();
     let manuals = after.iter().filter(|s| s.snapshot_type == "manual").count();
     println!(
@@ -1205,16 +1241,16 @@ pub fn m5test() {
     }
 
     // 差异比较：初始快照 vs 最新自动快照
-    let initial = after.iter().find(|s| s.snapshot_type == "initial").map(|s| s.id.clone());
+    let initial = after
+        .iter()
+        .find(|s| s.snapshot_type == "initial")
+        .map(|s| s.id.clone());
     let newest = after
         .iter()
         .find(|s| s.snapshot_type == "auto")
         .map(|s| s.id.clone());
     if let (Some(a), Some(b)) = (initial, newest) {
-        match (
-            storage::load_scene(&a),
-            storage::load_scene(&b),
-        ) {
+        match (storage::load_scene(&a), storage::load_scene(&b)) {
             (Ok(sa), Ok(sb)) => {
                 let d = data::snapshots::diff(&sa, &sb);
                 println!(
@@ -1314,14 +1350,13 @@ pub fn m9test() {
         ("file", real_file.to_string_lossy().to_string()),
         ("folder", real_folder.to_string_lossy().to_string()),
         ("url", "https://example.com/docs".to_string()),
-        ("file", repo.join("no-such-file.md").to_string_lossy().to_string()),
+        (
+            "file",
+            repo.join("no-such-file.md").to_string_lossy().to_string(),
+        ),
     ] {
         match tauri::async_runtime::block_on(data::workspaces::add_item(
-            &db,
-            &ws.id,
-            kind,
-            &target,
-            None,
+            &db, &ws.id, kind, &target, None,
         )) {
             Ok(_) => added += 1,
             Err(e) => {
@@ -1334,7 +1369,12 @@ pub fn m9test() {
 
     let detail = tauri::async_runtime::block_on(data::workspaces::get(&db, &ws.id));
     let resources = detail
-        .map(|d| d.items.iter().filter(|i| i.item_type != "application").count())
+        .map(|d| {
+            d.items
+                .iter()
+                .filter(|i| i.item_type != "application")
+                .count()
+        })
         .unwrap_or(0);
     println!("[2/3] 工作空间内资源项：{resources}");
     if resources != 4 {
@@ -1578,9 +1618,7 @@ pub fn baseline_live(max_windows: usize) {
     let path = dir.join(format!("live-{:x}.jsonl", core::time::now_ms()));
     let _ = std::fs::write(&path, lines.join("\n"));
 
-    println!(
-        "\n真实窗口基线：{passed}/{measured} 通过，成功率 {rate:.1}%，最大偏差 {worst}px"
-    );
+    println!("\n真实窗口基线：{passed}/{measured} 通过，成功率 {rate:.1}%，最大偏差 {worst}px");
     println!("明细：{}", path.display());
     println!(
         "报告口径：成功 {} / 失败 {} / 跳过 {}",

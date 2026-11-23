@@ -1,7 +1,9 @@
 //! 单实例：两个 WorkScene 同时跑会互相抢窗口、互相覆盖快照。
 
 use std::sync::OnceLock;
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, TRUE};
+use windows_sys::Win32::Foundation::{
+    GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, TRUE,
+};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextW, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow,
@@ -19,6 +21,9 @@ pub fn acquire() -> bool {
         .collect();
 
     unsafe {
+        // GetLastError 只在 CreateMutex 后可靠；先清零，避免线程上残留的错误码
+        // 让第一个实例被误判成“已有实例”。
+        SetLastError(0);
         let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         if handle.is_null() {
             // 拿不到互斥体时不阻止启动，避免把权限问题变成"打不开应用"

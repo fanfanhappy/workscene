@@ -34,8 +34,9 @@ pub struct AppSettings {
     /// 全局快捷键预设；空串表示关闭
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
-    /// 是否启用 Ctrl+Alt+1~5 全局快速切换前 5 个工作空间
-    #[serde(default = "default_true")]
+    /// 是否启用 Ctrl+Alt+1~9 全局快速切换已绑定的工作空间。
+    /// 默认关闭：九个全局热键一次性抢占太多，容易和 IDE/游戏/输入法冲突。
+    #[serde(default)]
     pub workspace_hotkeys_enabled: bool,
     /// 启动 WorkScene 时自动恢复的工作空间 ID（None 表示不自动恢复）
     #[serde(default)]
@@ -49,10 +50,6 @@ fn default_hotkey() -> String {
     "Ctrl+Alt+W".to_string()
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for AppSettings {
     fn default() -> Self {
         AppSettings {
@@ -64,7 +61,7 @@ impl Default for AppSettings {
             restore_focus_mode_default: false,
             autostart: false,
             hotkey: default_hotkey(),
-            workspace_hotkeys_enabled: true,
+            workspace_hotkeys_enabled: false,
             startup_workspace_id: None,
             ignored_processes: Vec::new(),
         }
@@ -101,7 +98,11 @@ async fn read_raw(db: &Db, key: &str) -> AppResult<Option<String>> {
     Ok(row.map(|r| r.get::<String, _>("value_json")))
 }
 
-async fn write_raw(db: &Db, key: &str, value: &str) -> AppResult<()> {
+async fn write_raw_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    value: &str,
+) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
@@ -110,7 +111,7 @@ async fn write_raw(db: &Db, key: &str, value: &str) -> AppResult<()> {
     .bind(key)
     .bind(value)
     .bind(now_ms())
-    .execute(&db.pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -162,38 +163,68 @@ pub async fn get(db: &Db) -> AppResult<AppSettings> {
 
 pub async fn set(db: &Db, settings: &AppSettings) -> AppResult<AppSettings> {
     let s = settings.clone().sanitized();
+    // 设置必须整批成功/整批失败：逐 key 写入时断电会留下“一半旧一半新”，
+    // 例如开机启动已关但热键还是新的。
+    let mut tx = db.pool.begin().await?;
 
-    write_raw(db, KEY_AUTO_ENABLED, if s.auto_snapshot_enabled { "true" } else { "false" }).await?;
-    write_raw(db, KEY_AUTO_KEEP, &s.auto_keep.to_string()).await?;
-    write_raw(db, KEY_AUTO_INTERVAL, &s.auto_min_interval_secs.to_string()).await?;
-    write_raw(
-        db,
+    write_raw_tx(
+        &mut tx,
+        KEY_AUTO_ENABLED,
+        if s.auto_snapshot_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )
+    .await?;
+    write_raw_tx(&mut tx, KEY_AUTO_KEEP, &s.auto_keep.to_string()).await?;
+    write_raw_tx(
+        &mut tx,
+        KEY_AUTO_INTERVAL,
+        &s.auto_min_interval_secs.to_string(),
+    )
+    .await?;
+    write_raw_tx(
+        &mut tx,
         KEY_RELAUNCH_DEFAULT,
-        if s.restore_relaunch_default { "true" } else { "false" },
+        if s.restore_relaunch_default {
+            "true"
+        } else {
+            "false"
+        },
     )
     .await?;
-    write_raw(
-        db,
+    write_raw_tx(
+        &mut tx,
         KEY_FOCUS_MODE_DEFAULT,
-        if s.restore_focus_mode_default { "true" } else { "false" },
+        if s.restore_focus_mode_default {
+            "true"
+        } else {
+            "false"
+        },
     )
     .await?;
-    write_raw(db, KEY_HOTKEY, &s.hotkey).await?;
-    write_raw(
-        db,
+    write_raw_tx(&mut tx, KEY_HOTKEY, &s.hotkey).await?;
+    write_raw_tx(
+        &mut tx,
         KEY_WS_HOTKEYS,
-        if s.workspace_hotkeys_enabled { "true" } else { "false" },
+        if s.workspace_hotkeys_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
     .await?;
-    write_raw(
-        db,
+    write_raw_tx(
+        &mut tx,
         KEY_STARTUP_WORKSPACE,
         s.startup_workspace_id.as_deref().unwrap_or(""),
     )
     .await?;
     let ignored_json = serde_json::to_string(&s.ignored_processes).unwrap_or_else(|_| "[]".into());
-    write_raw(db, KEY_IGNORED_PROCESSES, &ignored_json).await?;
+    write_raw_tx(&mut tx, KEY_IGNORED_PROCESSES, &ignored_json).await?;
 
+    tx.commit().await?;
     Ok(s)
 }
 
@@ -259,7 +290,9 @@ pub async fn prune_all(db: &Db) -> AppResult<usize> {
 
     let mut removed = 0usize;
     for id in ids {
-        removed += super::snapshots::prune(db, &id, keep).await.unwrap_or(0);
+        // 不能吞掉错误：清理失败却返回 0 会让 UI 显示“暂无自动快照”，
+        // 用户会以为已经清理干净了。失败就向上报，至少让界面看到。
+        removed += super::snapshots::prune(db, &id, keep).await?;
     }
     Ok(removed)
 }
@@ -277,6 +310,10 @@ mod tests {
         assert_eq!(s.auto_keep, 20);
         assert_eq!(s.auto_min_interval_secs, 180);
         assert!(s.restore_relaunch_default);
+        assert!(
+            !s.workspace_hotkeys_enabled,
+            "九个全局快捷槽默认必须关闭，避免启动即抢占快捷键"
+        );
     }
 
     #[tokio::test]
@@ -286,7 +323,7 @@ mod tests {
             &db,
             &AppSettings {
                 auto_snapshot_enabled: false,
-                auto_keep: 0,          // 应被夹到 1
+                auto_keep: 0,              // 应被夹到 1
                 auto_min_interval_secs: 1, // 应被夹到 10
                 restore_relaunch_default: false,
                 restore_focus_mode_default: true,

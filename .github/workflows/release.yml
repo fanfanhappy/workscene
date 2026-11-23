@@ -120,7 +120,8 @@ jobs:
             "使用方式：",
             "1. 推荐双击 start.cmd 启动：所有工作空间与快照数据将保存在本目录 data\ 下，拷贝文件夹即可随身带走。",
             "2. 如直接双击 WorkScene.exe 启动，数据默认保存在 %LOCALAPPDATA%\WorkScene。",
-            "3. 本软件 100% 本地离线，无遥测、不上传数据；如 Windows SmartScreen 提示未知发布者，点击「更多信息」->「仍要运行」即可。"
+            "3. 便携版需要系统已安装 Microsoft Edge WebView2 Runtime；安装版会自动下载，便携版请先确认系统已有该运行时。",
+            "4. 本软件 100% 本地离线，无遥测、不上传数据；如 Windows SmartScreen 提示未知发布者，点击「更多信息」->「仍要运行」即可。"
           ) | Set-Content -Path "$stage/启动说明.txt" -Encoding UTF8
 
           $zipPath = "dist-portable/WorkScene-$env:VER-portable.zip"

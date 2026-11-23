@@ -60,9 +60,11 @@ pub async fn create_auto(
     min_interval_ms: i64,
 ) -> AppResult<Option<SnapshotSummary>> {
     let fp = workspaces::fingerprint(capture);
+    // 只和上一份“自动快照”比较指纹/节流；手动或保护快照不应阻塞自动快照。
     let latest: Option<(String, i64, Option<String>)> = sqlx::query_as(
         "SELECT id, captured_at, content_fingerprint FROM snapshots
-         WHERE workspace_id = ? ORDER BY captured_at DESC LIMIT 1",
+         WHERE workspace_id = ? AND snapshot_type = 'auto'
+         ORDER BY captured_at DESC LIMIT 1",
     )
     .bind(workspace_id)
     .fetch_optional(&db.pool)
@@ -140,6 +142,25 @@ pub async fn list(db: &Db, workspace_id: &str, limit: usize) -> AppResult<Vec<Sn
     Ok(rows.iter().map(row_to_summary).collect())
 }
 
+/// 崩溃恢复优先使用“真正的现场快照”：跳过恢复前保护快照。
+/// 保护快照记录的是上一次恢复之前的状态，拿它做“恢复上次现场”会把用户带回更早的桌面。
+pub async fn latest_for_recovery(
+    db: &Db,
+    workspace_id: &str,
+) -> AppResult<Option<SnapshotSummary>> {
+    let row = sqlx::query(
+        "SELECT id, workspace_id, name, snapshot_type, trigger_type, captured_at,
+                window_count, display_count, is_protected, content_fingerprint
+         FROM snapshots
+         WHERE workspace_id = ? AND snapshot_type <> 'protection'
+         ORDER BY captured_at DESC LIMIT 1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&db.pool)
+    .await?;
+    Ok(row.as_ref().map(row_to_summary))
+}
+
 pub async fn get(db: &Db, id: &str) -> AppResult<SnapshotSummary> {
     let row = sqlx::query(
         "SELECT id, workspace_id, name, snapshot_type, trigger_type, captured_at,
@@ -153,25 +174,43 @@ pub async fn get(db: &Db, id: &str) -> AppResult<SnapshotSummary> {
     Ok(row_to_summary(&row))
 }
 
+/// 删除快照 payload 及其 .bak/.tmp；文件不存在视为已删除，权限错误必须上报。
+fn remove_payload_files(path: &str) -> AppResult<()> {
+    for candidate in [
+        path.to_string(),
+        format!("{path}.bak"),
+        format!("{path}.tmp"),
+    ] {
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
-    let path: Option<String> = sqlx::query_scalar("SELECT payload_path FROM snapshots WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&db.pool)
-        .await?;
+    let path: Option<String> =
+        sqlx::query_scalar("SELECT payload_path FROM snapshots WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&db.pool)
+            .await?;
     let Some(path) = path else {
         return Err(AppError::msg("快照不存在"));
     };
+    // 先删文件再删索引：文件删不掉时保留索引，用户还能重试，而不是留下孤儿 payload。
+    remove_payload_files(&path)?;
     sqlx::query("DELETE FROM snapshots WHERE id = ?")
         .bind(id)
         .execute(&db.pool)
         .await?;
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(format!("{path}.bak"));
     Ok(())
 }
 
 /// 保留策略：只淘汰最旧的自动快照，保护快照与手动快照永不淘汰。
 pub async fn prune(db: &Db, workspace_id: &str, keep: usize) -> AppResult<usize> {
+    let keep = keep.max(1);
     let rows = sqlx::query(
         "SELECT id, payload_path FROM snapshots
          WHERE workspace_id = ? AND snapshot_type = 'auto' AND is_protected = 0
@@ -189,12 +228,11 @@ pub async fn prune(db: &Db, workspace_id: &str, keep: usize) -> AppResult<usize>
     for row in rows.into_iter().skip(keep) {
         let id: String = row.get("id");
         let path: String = row.get("payload_path");
+        remove_payload_files(&path)?;
         sqlx::query("DELETE FROM snapshots WHERE id = ?")
             .bind(&id)
             .execute(&db.pool)
             .await?;
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(format!("{path}.bak"));
         removed += 1;
     }
     Ok(removed)
@@ -207,7 +245,7 @@ pub async fn active_workspace(db: &Db) -> AppResult<Option<String>> {
         sqlx::query_scalar("SELECT value_json FROM app_settings WHERE key = 'active_workspace'")
             .fetch_optional(&db.pool)
             .await?;
-    Ok(v)
+    Ok(v.filter(|id| !id.trim().is_empty()))
 }
 
 pub async fn set_active_workspace(db: &Db, workspace_id: &str) -> AppResult<()> {
@@ -284,21 +322,24 @@ pub fn diff(a: &SceneFile, b: &SceneFile) -> SnapshotDiff {
             let dw = (x.width_ratio - y.width_ratio).abs();
             let dh = (x.height_ratio - y.height_ratio).abs();
 
-            if x.show_state != y.show_state {
+            let state_diff = x.show_state != y.show_state;
+            let moved_diff = dx > MOVE_EPS || dy > MOVE_EPS || dw > MOVE_EPS || dh > MOVE_EPS;
+            if state_diff {
                 state_changed += 1;
-                windows.push(WindowDiff {
-                    change: "state_changed".into(),
-                    title_a: x.title.clone(),
-                    title_b: y.title.clone(),
-                    detail: format!("{:?} → {:?}", x.show_state, y.show_state),
-                });
-            } else if dx > MOVE_EPS || dy > MOVE_EPS || dw > MOVE_EPS || dh > MOVE_EPS {
+            }
+            if moved_diff {
                 moved += 1;
-                windows.push(WindowDiff {
-                    change: "moved".into(),
-                    title_a: x.title.clone(),
-                    title_b: y.title.clone(),
-                    detail: format!(
+            }
+            if state_diff || moved_diff {
+                let mut detail = String::new();
+                if state_diff {
+                    detail.push_str(&format!("{:?} → {:?}", x.show_state, y.show_state));
+                }
+                if moved_diff {
+                    if !detail.is_empty() {
+                        detail.push('；');
+                    }
+                    detail.push_str(&format!(
                         "位置 ({:.1}%, {:.1}%) → ({:.1}%, {:.1}%)，尺寸 {:.0}%×{:.0}% → {:.0}%×{:.0}%",
                         x.x_ratio * 100.0,
                         x.y_ratio * 100.0,
@@ -308,7 +349,17 @@ pub fn diff(a: &SceneFile, b: &SceneFile) -> SnapshotDiff {
                         x.height_ratio * 100.0,
                         y.width_ratio * 100.0,
                         y.height_ratio * 100.0
-                    ),
+                    ));
+                }
+                windows.push(WindowDiff {
+                    change: if state_diff {
+                        "state_changed".into()
+                    } else {
+                        "moved".into()
+                    },
+                    title_a: x.title.clone(),
+                    title_b: y.title.clone(),
+                    detail,
                 });
             } else {
                 unchanged += 1;
@@ -419,10 +470,10 @@ mod tests {
             w("C", 0.30, ShowState::Maximized),
         ]);
         let b = scene(vec![
-            w("A", 0.10, ShowState::Normal),       // 未变
-            w("B", 0.60, ShowState::Normal),       // 移动
-            w("C", 0.30, ShowState::Normal),       // 状态变化
-            w("D", 0.40, ShowState::Normal),       // 新增
+            w("A", 0.10, ShowState::Normal), // 未变
+            w("B", 0.60, ShowState::Normal), // 移动
+            w("C", 0.30, ShowState::Normal), // 状态变化
+            w("D", 0.40, ShowState::Normal), // 新增
         ]);
 
         let d = diff(&a, &b);

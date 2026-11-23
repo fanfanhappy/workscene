@@ -167,13 +167,20 @@ pub async fn create_from_capture(
     capture: &CaptureResult,
 ) -> AppResult<WorkspaceSummary> {
     if capture.windows.is_empty() {
-        return Err(AppError::msg("当前没有可保存的窗口，请先打开需要记录的应用"));
+        return Err(AppError::msg(
+            "当前没有可保存的窗口，请先打开需要记录的应用",
+        ));
     }
 
     let name = name.trim();
-    let name = if name.is_empty() { "未命名工作空间" } else { name };
+    let name = if name.is_empty() {
+        "未命名工作空间"
+    } else {
+        name
+    };
     let now = now_ms();
-    let ws_id = format!("ws-{:x}", now);
+    // 同一毫秒内连续创建也不能撞主键；next_ws_id 带进程内序号。
+    let ws_id = next_ws_id(now);
     let mut tx = db.pool.begin().await?;
 
     sqlx::query(
@@ -381,9 +388,8 @@ pub async fn save_enriched_snapshot(
         })
         .collect();
 
-    if let Ok(json) = serde_json::to_string_pretty(&scene) {
-        let _ = std::fs::write(&saved.path, json);
-    }
+    // 富化结果必须原子覆盖；失败就返回错误，让调用方不要把半成品登记进数据库。
+    storage::overwrite_scene(&scene)?;
     Ok(saved)
 }
 
@@ -492,7 +498,7 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
 
     let item_rows = sqlx::query(
         "SELECT i.id, i.item_type, i.display_name, i.target, i.target_kind, i.enabled,
-                i.sort_order,
+                i.sort_order, i.launch_priority,
                 COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
                 c.launch_args_json,
                 c.adapter_config_json
@@ -518,7 +524,7 @@ pub async fn get(db: &Db, id: &str) -> AppResult<WorkspaceDetail> {
                 enabled: r.get::<i64, _>("enabled") != 0,
                 reuse_policy: r.get("reuse_policy"),
                 launch_args: r.get("launch_args_json"),
-                launch_priority: r.get("sort_order"),
+                launch_priority: r.get("launch_priority"),
                 launch_delay_ms: parse_delay_ms(adapter_cfg.as_deref()),
             }
         })
@@ -604,6 +610,18 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
             .fetch_all(&db.pool)
             .await?;
 
+    // 先删 payload 文件：文件删不掉时保留数据库记录，用户还能重试；
+    // 反过来先删库会留下永远无法清理的孤儿文件。
+    for p in &payloads {
+        for candidate in [p.clone(), format!("{p}.bak"), format!("{p}.tmp")] {
+            match std::fs::remove_file(&candidate) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     let affected = sqlx::query("DELETE FROM workspaces WHERE id = ?")
         .bind(id)
         .execute(&db.pool)
@@ -613,14 +631,9 @@ pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
         return Err(AppError::msg(format!("工作空间不存在：{id}")));
     }
 
-    for p in payloads {
-        let _ = std::fs::remove_file(&p);
-        let _ = std::fs::remove_file(format!("{p}.bak"));
-    }
-
     // 若被删空间是"启动自动恢复目标"或"当前激活空间"，同步清空引用避免下次启动报错
     let _ = sqlx::query(
-        "UPDATE app_settings SET value_json = '' WHERE key IN ('startup_workspace_id', 'active_workspace_id') AND value_json = ?",
+        "UPDATE app_settings SET value_json = '' WHERE key IN ('startup_workspace_id', 'active_workspace') AND value_json = ?",
     )
     .bind(id)
     .execute(&db.pool)
@@ -646,7 +659,7 @@ pub async fn update_item(
     };
 
     let row = sqlx::query(
-        "SELECT i.workspace_id, i.sort_order, c.adapter_config_json
+        "SELECT i.workspace_id, i.launch_priority, c.adapter_config_json
          FROM workspace_items i
          LEFT JOIN app_configs c ON c.item_id = i.id
          WHERE i.id = ?",
@@ -657,7 +670,7 @@ pub async fn update_item(
     .ok_or_else(|| AppError::msg("应用项不存在"))?;
 
     let workspace_id: String = row.get("workspace_id");
-    let sort_order: i64 = launch_priority.unwrap_or_else(|| row.get("sort_order"));
+    let priority: i64 = launch_priority.unwrap_or_else(|| row.get("launch_priority"));
     let existing_cfg: Option<String> = row.get("adapter_config_json");
     let delay_ms = launch_delay_ms
         .map(|d| d.clamp(0, 15_000))
@@ -667,13 +680,15 @@ pub async fn update_item(
     let now = now_ms();
     let mut tx = db.pool.begin().await?;
 
-    sqlx::query("UPDATE workspace_items SET enabled = ?, sort_order = ?, updated_at = ? WHERE id = ?")
-        .bind(if enabled { 1 } else { 0 })
-        .bind(sort_order)
-        .bind(now)
-        .bind(item_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE workspace_items SET enabled = ?, launch_priority = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(if enabled { 1 } else { 0 })
+    .bind(priority)
+    .bind(now)
+    .bind(item_id)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query(
         "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms, adapter_config_json)
@@ -700,6 +715,51 @@ pub async fn update_item(
     Ok(())
 }
 
+/// 局部更新应用项：只写用户真正改动的字段，避免“失焦 + 点击”两次全量写入互相覆盖。
+/// `launch_args = Some("")` 表示清空；`None` 表示保持原值。
+#[allow(clippy::too_many_arguments)]
+pub async fn patch_item(
+    db: &Db,
+    item_id: &str,
+    reuse_policy: Option<String>,
+    launch_args: Option<String>,
+    enabled: Option<bool>,
+    launch_priority: Option<i64>,
+    launch_delay_ms: Option<i64>,
+) -> AppResult<()> {
+    let row = sqlx::query(
+        "SELECT i.enabled, i.launch_priority,
+                COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
+                c.launch_args_json
+         FROM workspace_items i
+         LEFT JOIN app_configs c ON c.item_id = i.id
+         WHERE i.id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(&db.pool)
+    .await?
+    .ok_or_else(|| AppError::msg("应用项不存在"))?;
+
+    let policy = reuse_policy.unwrap_or_else(|| row.get("reuse_policy"));
+    let args = match launch_args {
+        Some(next) if next.trim().is_empty() => None,
+        Some(next) => Some(next),
+        None => row.get::<Option<String>, _>("launch_args_json"),
+    };
+    let enabled = enabled.unwrap_or(row.get::<i64, _>("enabled") != 0);
+    let priority = launch_priority.unwrap_or_else(|| row.get("launch_priority"));
+    update_item(
+        db,
+        item_id,
+        &policy,
+        args,
+        enabled,
+        Some(priority),
+        launch_delay_ms,
+    )
+    .await
+}
+
 /// 重新定位应用可执行路径（软件重装、换盘符或导入他人工作空间后快速修复）
 pub async fn relocate_item(
     db: &Db,
@@ -716,7 +776,7 @@ pub async fn relocate_item(
     }
 
     let row = sqlx::query(
-        "SELECT i.item_type, i.display_name, i.target_kind, i.enabled, i.sort_order,
+        "SELECT i.item_type, i.display_name, i.target_kind, i.enabled, i.launch_priority,
                 COALESCE(c.reuse_policy, 'reuse_or_launch') AS reuse_policy,
                 c.launch_args_json, c.adapter_config_json
          FROM workspace_items i
@@ -788,7 +848,7 @@ pub async fn relocate_item(
         enabled: row.get::<i64, _>("enabled") != 0,
         reuse_policy: row.get("reuse_policy"),
         launch_args: row.get("launch_args_json"),
-        launch_priority: row.get("sort_order"),
+        launch_priority: row.get("launch_priority"),
         launch_delay_ms: parse_delay_ms(adapter_cfg.as_deref()),
     })
 }
@@ -829,17 +889,11 @@ pub fn sanitize_layout(u: &LayoutUpdate) -> (f64, f64, f64, f64) {
     (x, y, w, h)
 }
 
-pub async fn update_layouts(
-    db: &Db,
+async fn apply_layout_updates_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     workspace_id: &str,
     updates: &[LayoutUpdate],
 ) -> AppResult<()> {
-    if updates.is_empty() {
-        return Ok(());
-    }
-    let now = now_ms();
-    let mut tx = db.pool.begin().await?;
-
     for u in updates {
         let (x, y, w, h) = sanitize_layout(u);
         let state_str = u.show_state.map(state_to_str);
@@ -864,7 +918,7 @@ pub async fn update_layouts(
         .bind(state_str)
         .bind(&u.window_id)
         .bind(workspace_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
 
@@ -875,6 +929,20 @@ pub async fn update_layouts(
             )));
         }
     }
+    Ok(())
+}
+
+pub async fn update_layouts(
+    db: &Db,
+    workspace_id: &str,
+    updates: &[LayoutUpdate],
+) -> AppResult<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+    apply_layout_updates_tx(&mut tx, workspace_id, updates).await?;
 
     sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
         .bind(now)
@@ -883,18 +951,49 @@ pub async fn update_layouts(
         .await?;
 
     tx.commit().await?;
+    // 当前显示器如果已有专属方案，画布保存必须同步过去；否则恢复时旧方案会覆盖新布局。
+    let _ = crate::data::extras::sync_current_profile(db, workspace_id).await;
+    Ok(())
+}
+
+/// 画布整体保存：删除窗口 + 更新窗口坐标必须在同一个事务里。
+/// 前端原先逐条调用删除/更新，任一步失败会留下“删了一半、摆了一半”的布局。
+pub async fn save_layout(
+    db: &Db,
+    workspace_id: &str,
+    removed_window_ids: &[String],
+    updates: &[LayoutUpdate],
+) -> AppResult<()> {
+    let now = now_ms();
+    let mut tx = db.pool.begin().await?;
+
+    for window_id in removed_window_ids {
+        sqlx::query("DELETE FROM window_layouts WHERE id = ? AND workspace_id = ?")
+            .bind(window_id)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    apply_layout_updates_tx(&mut tx, workspace_id, updates).await?;
+
+    sqlx::query("UPDATE workspaces SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    let _ = crate::data::extras::sync_current_profile(db, workspace_id).await;
     Ok(())
 }
 
 pub async fn delete_window(db: &Db, workspace_id: &str, window_id: &str) -> AppResult<()> {
-    let affected = sqlx::query(
-        "DELETE FROM window_layouts WHERE id = ? AND workspace_id = ?",
-    )
-    .bind(window_id)
-    .bind(workspace_id)
-    .execute(&db.pool)
-    .await?
-    .rows_affected();
+    let affected = sqlx::query("DELETE FROM window_layouts WHERE id = ? AND workspace_id = ?")
+        .bind(window_id)
+        .bind(workspace_id)
+        .execute(&db.pool)
+        .await?
+        .rows_affected();
 
     if affected == 0 {
         return Err(AppError::msg("窗口布局不存在或不属于该工作空间"));
@@ -904,14 +1003,12 @@ pub async fn delete_window(db: &Db, workspace_id: &str, window_id: &str) -> AppR
 
 /// 删除应用项：其窗口布局由外键级联删除（migration 里 ON DELETE CASCADE）
 pub async fn delete_item(db: &Db, workspace_id: &str, item_id: &str) -> AppResult<()> {
-    let affected = sqlx::query(
-        "DELETE FROM workspace_items WHERE id = ? AND workspace_id = ?",
-    )
-    .bind(item_id)
-    .bind(workspace_id)
-    .execute(&db.pool)
-    .await?
-    .rows_affected();
+    let affected = sqlx::query("DELETE FROM workspace_items WHERE id = ? AND workspace_id = ?")
+        .bind(item_id)
+        .bind(workspace_id)
+        .execute(&db.pool)
+        .await?
+        .rows_affected();
 
     if affected == 0 {
         return Err(AppError::msg("应用项不存在或不属于该工作空间"));
@@ -939,11 +1036,10 @@ pub async fn add_item(
         return Err(AppError::msg("网址必须以 http:// 或 https:// 开头"));
     }
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM workspaces WHERE id = ?")
-            .bind(workspace_id)
-            .fetch_optional(&db.pool)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM workspaces WHERE id = ?")
+        .bind(workspace_id)
+        .fetch_optional(&db.pool)
+        .await?;
     if exists.is_none() {
         return Err(AppError::msg("工作空间不存在"));
     }
@@ -1039,7 +1135,11 @@ fn looks_like_other_scheme(s: &str) -> bool {
     if rest.starts_with("//") {
         return true;
     }
-    !rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    !rest
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
 }
 pub async fn add_urls_batch(
     db: &Db,
@@ -1282,15 +1382,14 @@ pub async fn id_for_slot(db: &Db, slot: i64) -> Option<String> {
         .flatten()
 }
 pub async fn set_favorite(db: &Db, id: &str, is_favorite: bool) -> AppResult<()> {
-    let affected = sqlx::query(
-        "UPDATE workspaces SET is_favorite = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(if is_favorite { 1 } else { 0 })
-    .bind(now_ms())
-    .bind(id)
-    .execute(&db.pool)
-    .await?
-    .rows_affected();
+    let affected =
+        sqlx::query("UPDATE workspaces SET is_favorite = ?, updated_at = ? WHERE id = ?")
+            .bind(if is_favorite { 1 } else { 0 })
+            .bind(now_ms())
+            .bind(id)
+            .execute(&db.pool)
+            .await?
+            .rows_affected();
     if affected == 0 {
         return Err(AppError::msg(format!("工作空间不存在：{id}")));
     }
@@ -1399,8 +1498,9 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
 
         sqlx::query(
             "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
-                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                identity_key, target, target_kind, enabled, sort_order, launch_priority,
+                created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new_item_id)
         .bind(&new_ws_id)
@@ -1410,6 +1510,7 @@ pub async fn duplicate(db: &Db, source_id: &str, new_name: &str) -> AppResult<Wo
         .bind(&item.target)
         .bind(&item.target_kind)
         .bind(if item.enabled { 1 } else { 0 })
+        .bind(idx as i64)
         .bind(item.launch_priority)
         .bind(now)
         .bind(now)
@@ -1687,17 +1788,20 @@ pub async fn export_json(db: &Db, id: &str) -> AppResult<String> {
         })
         .collect();
 
-    let hooks = crate::data::extras::get_hooks(db, id).await.ok().and_then(|h| {
-        if h.pre_restore_cmd.is_empty() && h.post_close_cmd.is_empty() && !h.enabled {
-            None
-        } else {
-            Some(ExportHooks {
-                pre_restore_cmd: h.pre_restore_cmd,
-                post_close_cmd: h.post_close_cmd,
-                enabled: h.enabled,
-            })
-        }
-    });
+    let hooks = crate::data::extras::get_hooks(db, id)
+        .await
+        .ok()
+        .and_then(|h| {
+            if h.pre_restore_cmd.is_empty() && h.post_close_cmd.is_empty() && !h.enabled {
+                None
+            } else {
+                Some(ExportHooks {
+                    pre_restore_cmd: h.pre_restore_cmd,
+                    post_close_cmd: h.post_close_cmd,
+                    enabled: h.enabled,
+                })
+            }
+        });
 
     let payload = WorkspaceExport {
         schema_version: 1,
@@ -1730,6 +1834,52 @@ pub enum TargetRisk {
     Missing,
     /// UNC 路径（\\server\share）——可能指向别人机器上的程序
     Network,
+    /// 本地可执行文件，但位于下载/桌面/临时目录等不可信位置。
+    /// 这类应用导入后默认停用，由用户确认后手动启用。
+    Suspicious,
+}
+
+/// 外部 JSON 里的 exe 是否位于“用户随手放文件”的高风险目录。
+/// 采用“常规安装根目录白名单 + 高风险目录黑名单”：
+/// 下载/桌面/临时/可移动路径一律可疑；不在 Program Files / ProgramData /
+/// LocalAppData / Windows 等常规安装根下的也默认停用。用户仍可在导入后手动启用。
+fn is_suspicious_location(path: &std::path::Path) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    let lower = path.to_string_lossy().replace('/', "\\").to_lowercase();
+    const RISKY: &[&str] = &[
+        "\\downloads\\",
+        "\\desktop\\",
+        "\\temp\\",
+        "\\tmp\\",
+        "\\appdata\\local\\temp\\",
+    ];
+    if RISKY.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    const ROOT_ENVS: &[&str] = &[
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "WINDIR",
+        "SystemRoot",
+    ];
+    for key in ROOT_ENVS {
+        let Ok(root) = std::env::var(key) else {
+            continue;
+        };
+        let root = root
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase();
+        if !root.is_empty() && (lower == root || lower.starts_with(&format!("{root}\\"))) {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn classify_target(target: &str) -> TargetRisk {
@@ -1737,12 +1887,15 @@ pub fn classify_target(target: &str) -> TargetRisk {
     if t.is_empty() {
         return TargetRisk::Empty;
     }
-    if t.starts_with(r"\\") {
+    if t.starts_with(r"\\") || t.starts_with("//") {
         return TargetRisk::Network;
     }
     let p = std::path::Path::new(t);
     if !p.is_file() {
         return TargetRisk::Missing;
+    }
+    if is_suspicious_location(p) {
+        return TargetRisk::Suspicious;
     }
     TargetRisk::Ok
 }
@@ -1754,7 +1907,9 @@ pub struct ImportPreview {
     pub name: String,
     pub app_count: usize,
     pub resource_count: usize,
-    /// 会因路径不存在/网络位置而被停用的应用
+    /// 导入文件里所有应用的目标路径（供 UI 明确列出“将启动什么”）
+    pub app_targets: Vec<String>,
+    /// 会因路径不存在、网络位置或不可信目录而被停用的应用
     pub disabled_apps: Vec<String>,
     /// 原始文件里带启动参数的应用名（导入时会被剥离）
     pub apps_with_args: Vec<String>,
@@ -1769,6 +1924,13 @@ pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
     let parsed: WorkspaceExport = serde_json::from_str(raw_json)
         .map_err(|e| AppError::msg(format!("无效的工作空间 JSON 文件：{e}")))?;
 
+    let app_targets: Vec<String> = parsed
+        .apps
+        .iter()
+        .filter_map(|a| a.target.as_deref().map(str::trim).filter(|t| !t.is_empty()))
+        .map(str::to_string)
+        .collect();
+
     let disabled_apps = parsed
         .apps
         .iter()
@@ -1779,7 +1941,12 @@ pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
     let apps_with_args = parsed
         .apps
         .iter()
-        .filter(|a| a.launch_args.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+        .filter(|a| {
+            a.launch_args
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        })
         .map(|a| a.display_name.clone())
         .collect();
 
@@ -1791,6 +1958,7 @@ pub fn import_preview(raw_json: &str) -> AppResult<ImportPreview> {
         name: parsed.name.clone(),
         app_count: parsed.apps.len(),
         resource_count: parsed.resources.len(),
+        app_targets,
         disabled_apps,
         apps_with_args,
         has_hooks,
@@ -1847,7 +2015,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
     let mut notes: Vec<String> = Vec::new();
     if !disabled_apps.is_empty() {
         notes.push(format!(
-            "{} 个应用的路径不存在或位于网络位置，已停用：{}",
+            "{} 个应用的路径不存在、位于网络位置或下载/桌面/临时目录，已停用：{}",
             disabled_apps.len(),
             disabled_apps.join("、")
         ));
@@ -1897,7 +2065,11 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
 
     for (idx, app) in parsed.apps.iter().enumerate() {
         let display = app.display_name.trim();
-        let display = if display.is_empty() { "未命名应用" } else { display };
+        let display = if display.is_empty() {
+            "未命名应用"
+        } else {
+            display
+        };
         let identity = identity_of(&app.target, display);
         if !seen_app_keys.insert(identity.clone()) {
             // 重复应用项合并映射到已创建项
@@ -1928,8 +2100,9 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
 
         sqlx::query(
             "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
-                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
-             VALUES (?, ?, 'application', ?, ?, ?, 'path', ?, ?, ?, ?)",
+                identity_key, target, target_kind, enabled, sort_order, launch_priority,
+                created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', ?, ?, ?, ?, ?)",
         )
         .bind(&item_id)
         .bind(&ws_id)
@@ -1942,6 +2115,7 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         } else {
             0
         })
+        .bind(app_count)
         .bind(app.launch_priority)
         .bind(now)
         .bind(now)
@@ -1968,7 +2142,10 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
         std::collections::HashSet::new();
     for (idx, r) in parsed.resources.iter().enumerate() {
         if !matches!(r.item_type.as_str(), "file" | "folder" | "url") {
-            return Err(AppError::msg(format!("导入文件包含不支持的资源类型：{}", r.item_type)));
+            return Err(AppError::msg(format!(
+                "导入文件包含不支持的资源类型：{}",
+                r.item_type
+            )));
         }
         let target = r.target.trim();
         if target.is_empty() {
@@ -2152,25 +2329,6 @@ pub async fn recapture(
 
     let prev = get(db, workspace_id).await?;
 
-    // 保留已有应用的复用策略、启动参数、启用状态、启动优先级与延迟（按 identity_key 匹配）
-    let mut prev_configs: std::collections::HashMap<
-        String,
-        (String, Option<String>, bool, i64, i64),
-    > = std::collections::HashMap::new();
-    for it in prev.items.iter().filter(|i| i.item_type == "application") {
-        let key = identity_of(&it.target, &it.display_name);
-        prev_configs.insert(
-            key,
-            (
-                it.reuse_policy.clone(),
-                it.launch_args.clone(),
-                it.enabled,
-                it.launch_priority,
-                it.launch_delay_ms,
-            ),
-        );
-    }
-
     // 覆盖前先生成一份受保护快照，避免配置丢失
     if let Ok(prev_scene) = to_scene(db, workspace_id).await {
         if let Ok(saved) = storage::save_scene_file("重新捕获前保护", prev_scene) {
@@ -2195,70 +2353,80 @@ pub async fn recapture(
     let now = now_ms();
     let mut tx = db.pool.begin().await?;
 
-    // 仅清理应用项与窗口布局，保留用户手动维护的资源（file / folder / url）
-    sqlx::query("DELETE FROM window_layouts WHERE workspace_id = ?")
-        .bind(workspace_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "DELETE FROM workspace_items WHERE workspace_id = ? AND item_type = 'application'",
-    )
-    .bind(workspace_id)
-    .execute(&mut *tx)
-    .await?;
+    // 关键：只替换本次捕获到的应用所拥有的窗口布局。
+    // 未在本次捕获中出现的应用（手动添加、当前关闭、已禁用）及其上次布局必须保留，
+    // 否则“用当前桌面更新”会静默删掉用户配置的软件。
+    let prev_apps: Vec<&WorkspaceItem> = prev
+        .items
+        .iter()
+        .filter(|i| i.item_type == "application")
+        .collect();
+    let prev_app_count = prev_apps.len() as i64;
+    let mut existing_by_identity: std::collections::HashMap<String, &WorkspaceItem> =
+        std::collections::HashMap::new();
+    for it in &prev_apps {
+        existing_by_identity.insert(identity_of(&it.target, &it.display_name), it);
+    }
 
     let mut item_ids: Vec<(String, String)> = Vec::new();
+    let mut captured_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for w in &capture.windows {
         let identity = identity_of(&w.process_path, &w.process_name);
         if item_ids.iter().any(|(k, _)| *k == identity) {
             continue;
         }
-        let item_id = format!(
-            "it-{:x}-{}-{}",
-            now,
-            WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            item_ids.len()
-        );
-        let display_name = if w.process_name.is_empty() {
-            w.title.clone()
+        let item_id = if let Some(existing) = existing_by_identity.get(&identity) {
+            existing.id.clone()
         } else {
-            w.process_name.clone()
+            let new_id = format!(
+                "it-{:x}-{}-{}",
+                now,
+                WS_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                item_ids.len()
+            );
+            let display_name = if w.process_name.is_empty() {
+                w.title.clone()
+            } else {
+                w.process_name.clone()
+            };
+            sqlx::query(
+                "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
+                    identity_key, target, target_kind, enabled, sort_order, launch_priority,
+                    created_at, updated_at)
+                 VALUES (?, ?, 'application', ?, ?, ?, 'path', 1, ?, 0, ?, ?)",
+            )
+            .bind(&new_id)
+            .bind(workspace_id)
+            .bind(&display_name)
+            .bind(&identity)
+            .bind(&w.process_path)
+            .bind(prev_app_count + item_ids.len() as i64)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, wait_timeout_ms)
+                 VALUES (?, 'reuse_or_launch', NULL, 8000)",
+            )
+            .bind(&new_id)
+            .execute(&mut *tx)
+            .await?;
+            new_id
         };
-        let (policy, args, enabled, priority, delay_ms) = prev_configs
-            .get(&identity)
-            .cloned()
-            .unwrap_or_else(|| ("reuse_or_launch".to_string(), None, true, item_ids.len() as i64, 0));
 
-        sqlx::query(
-            "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
-                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
-             VALUES (?, ?, 'application', ?, ?, ?, 'path', ?, ?, ?, ?)",
-        )
-        .bind(&item_id)
-        .bind(workspace_id)
-        .bind(&display_name)
-        .bind(&identity)
-        .bind(&w.process_path)
-        .bind(if enabled { 1 } else { 0 })
-        .bind(priority)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        let adapter_json = encode_delay_ms(delay_ms);
-        sqlx::query(
-            "INSERT INTO app_configs (item_id, reuse_policy, launch_args_json, adapter_config_json, wait_timeout_ms)
-             VALUES (?, ?, ?, ?, 8000)",
-        )
-        .bind(&item_id)
-        .bind(&policy)
-        .bind(&args)
-        .bind(&adapter_json)
-        .execute(&mut *tx)
-        .await?;
-
+        captured_item_ids.insert(item_id.clone());
         item_ids.push((identity, item_id));
+    }
+
+    // 清理“本次捕获到的应用”的旧窗口，未捕获应用的上次布局保留。
+    for item_id in &captured_item_ids {
+        sqlx::query("DELETE FROM window_layouts WHERE workspace_id = ? AND item_id = ?")
+            .bind(workspace_id)
+            .bind(item_id)
+            .execute(&mut *tx)
+            .await?;
     }
 
     for (idx, w) in capture.windows.iter().enumerate() {
@@ -2342,6 +2510,9 @@ pub async fn recapture(
         true,
     )
     .await;
+    // 如果当前显示器组合已保存过专属布局方案，同步更新它，
+    // 否则下次恢复会继续套用旧方案，把刚捕获的布局覆盖掉。
+    let _ = crate::data::extras::sync_current_profile(db, workspace_id).await;
 
     get(db, workspace_id).await
 }
@@ -2381,11 +2552,9 @@ pub async fn add_app(
     let mut tx = db.pool.begin().await?;
 
     // 如果同一程序已在应用列表里，直接复用 item_id 并新增一条窗口布局
-    let item_id = if let Some(existing) = detail
-        .items
-        .iter()
-        .find(|i| i.item_type == "application" && identity_of(&i.target, &i.display_name) == identity)
-    {
+    let item_id = if let Some(existing) = detail.items.iter().find(|i| {
+        i.item_type == "application" && identity_of(&i.target, &i.display_name) == identity
+    }) {
         existing.id.clone()
     } else {
         let new_id = format!(
@@ -2520,14 +2689,16 @@ pub async fn create_from_scene(
         };
         sqlx::query(
             "INSERT INTO workspace_items (id, workspace_id, item_type, display_name,
-                identity_key, target, target_kind, enabled, sort_order, created_at, updated_at)
-             VALUES (?, ?, 'application', ?, ?, ?, 'path', 1, ?, ?, ?)",
+                identity_key, target, target_kind, enabled, sort_order, launch_priority,
+                created_at, updated_at)
+             VALUES (?, ?, 'application', ?, ?, ?, 'path', 1, ?, ?, ?, ?)",
         )
         .bind(&item_id)
         .bind(&ws_id)
         .bind(&display)
         .bind(&identity)
         .bind(&w.process_path)
+        .bind(item_ids.len() as i64)
         .bind(w.launch_priority)
         .bind(now)
         .bind(now)
@@ -2654,11 +2825,10 @@ pub async fn mark_restored(db: &Db, id: &str) -> AppResult<()> {
 
 /// 快照属于哪个工作空间（撤销/回退时需要把 run 归档到正确的空间）
 pub async fn workspace_of_snapshot(db: &Db, snapshot_id: &str) -> AppResult<Option<String>> {
-    let id: Option<String> =
-        sqlx::query_scalar("SELECT workspace_id FROM snapshots WHERE id = ?")
-            .bind(snapshot_id)
-            .fetch_optional(&db.pool)
-            .await?;
+    let id: Option<String> = sqlx::query_scalar("SELECT workspace_id FROM snapshots WHERE id = ?")
+        .bind(snapshot_id)
+        .fetch_optional(&db.pool)
+        .await?;
     Ok(id)
 }
 
@@ -2850,11 +3020,13 @@ mod tests {
             "裸域名应补 https://"
         );
         assert!(
-            urls.iter().any(|(_, t)| t == "https://example.com:8080/path"),
+            urls.iter()
+                .any(|(_, t)| t == "https://example.com:8080/path"),
             "带端口的裸域名也应补前缀"
         );
         assert!(
-            urls.iter().any(|(n, t)| n == "Rust 文档" && t == "https://docs.rs"),
+            urls.iter()
+                .any(|(n, t)| n == "Rust 文档" && t == "https://docs.rs"),
             "自定义名称应保留"
         );
         assert!(
@@ -2887,6 +3059,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_active_workspace_clears_active_pointer() {
+        let db = db().await;
+        let s = create_from_capture(&db, "激活", &capture()).await.unwrap();
+        crate::data::snapshots::set_active_workspace(&db, &s.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::data::snapshots::active_workspace(&db).await.unwrap(),
+            Some(s.id.clone())
+        );
+        delete(&db, &s.id).await.unwrap();
+        assert_eq!(
+            crate::data::snapshots::active_workspace(&db).await.unwrap(),
+            None,
+            "删除激活空间后不能留下悬空 id"
+        );
+    }
+
+    #[test]
+    fn suspicious_install_locations_are_flagged() {
+        assert!(is_suspicious_location(std::path::Path::new(
+            r"C:\Users\me\Downloads\tool.exe"
+        )));
+        assert!(is_suspicious_location(std::path::Path::new(
+            r"C:\Users\me\Desktop\tool.exe"
+        )));
+        assert!(is_suspicious_location(std::path::Path::new(
+            r"C:\Users\me\AppData\Local\Temp\tool.exe"
+        )));
+        assert!(!is_suspicious_location(std::path::Path::new(
+            r"C:\Program Files\App\app.exe"
+        )));
+    }
+
+    #[tokio::test]
     async fn duplicate_identity_is_rejected_by_unique_constraint() {
         let db = db().await;
         let s = create_from_capture(&db, "开发", &capture()).await.unwrap();
@@ -2899,7 +3106,10 @@ mod tests {
         .bind(r"c:\app\a.exe")
         .execute(&db.pool)
         .await;
-        assert!(err.is_err(), "同一工作空间内相同 identity 必须被 UNIQUE 拒绝");
+        assert!(
+            err.is_err(),
+            "同一工作空间内相同 identity 必须被 UNIQUE 拒绝"
+        );
     }
 
     #[tokio::test]
@@ -3000,7 +3210,9 @@ mod tests {
     #[tokio::test]
     async fn disabled_application_is_excluded_from_scene() {
         let db = db().await;
-        let s = create_from_capture(&db, "禁用应用", &capture()).await.unwrap();
+        let s = create_from_capture(&db, "禁用应用", &capture())
+            .await
+            .unwrap();
         let detail = get(&db, &s.id).await.unwrap();
         let first_app = detail
             .items
@@ -3013,9 +3225,17 @@ mod tests {
             .filter(|w| w.item_id == first_app.id)
             .count();
 
-        update_item(&db, &first_app.id, "reuse_or_launch", None, false, None, None)
-            .await
-            .unwrap();
+        update_item(
+            &db,
+            &first_app.id,
+            "reuse_or_launch",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let scene = to_scene(&db, &s.id).await.unwrap();
         assert_eq!(scene.windows.len(), detail.windows.len() - owned);
@@ -3024,7 +3244,9 @@ mod tests {
     #[tokio::test]
     async fn favorite_meta_duplicate_and_export_import_roundtrip() {
         let db = db().await;
-        let s = create_from_capture(&db, "原始空间", &capture()).await.unwrap();
+        let s = create_from_capture(&db, "原始空间", &capture())
+            .await
+            .unwrap();
         add_item(&db, &s.id, "url", "https://example.com", Some("示例"))
             .await
             .unwrap();
@@ -3080,14 +3302,35 @@ mod tests {
     #[tokio::test]
     async fn recapture_preserves_resources_and_creates_protection_snapshot() {
         let db = db().await;
-        let s = create_from_capture(&db, "重捕测试", &capture()).await.unwrap();
-        add_item(&db, &s.id, "folder", r"D:\Work", None).await.unwrap();
+        let s = create_from_capture(&db, "重捕测试", &capture())
+            .await
+            .unwrap();
+        add_item(&db, &s.id, "folder", r"D:\Work", None)
+            .await
+            .unwrap();
 
         let mut next_cap = capture();
         next_cap.windows.truncate(1);
         let updated = recapture(&db, &s.id, &next_cap).await.unwrap();
 
-        assert_eq!(updated.windows.len(), 1);
+        // 只替换本次捕获到的应用（a.exe 的窗口），未捕获的 b.exe 必须连同旧布局保留。
+        assert_eq!(updated.windows.len(), 2, "未捕获应用的上次窗口布局应保留");
+        assert_eq!(
+            updated
+                .items
+                .iter()
+                .filter(|i| i.item_type == "application")
+                .count(),
+            2,
+            "未在本次捕获中出现的应用不能被删除"
+        );
+        assert!(
+            updated
+                .windows
+                .iter()
+                .any(|w| w.process_path.as_deref() == Some(r"C:\app\b.exe")),
+            "b.exe 的旧布局必须保留"
+        );
         assert!(
             updated.items.iter().any(|i| i.item_type == "folder"),
             "重新捕获必须保留用户添加的资源"
@@ -3103,9 +3346,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_layout_removes_and_updates_in_one_call() {
+        let db = db().await;
+        let s = create_from_capture(&db, "整体保存", &capture())
+            .await
+            .unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let removed = detail.windows[0].id.clone();
+        let kept = detail.windows[1].clone();
+
+        save_layout(
+            &db,
+            &s.id,
+            &[removed],
+            &[LayoutUpdate {
+                window_id: kept.id.clone(),
+                x_ratio: 0.1,
+                y_ratio: 0.2,
+                width_ratio: 0.3,
+                height_ratio: 0.4,
+                monitor_key: None,
+                show_state: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        let after = get(&db, &s.id).await.unwrap();
+        assert_eq!(after.windows.len(), 2);
+        let saved = after.windows.iter().find(|w| w.id == kept.id).unwrap();
+        assert!((saved.x_ratio - 0.1).abs() < 1e-9);
+        assert!((saved.height_ratio - 0.4).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn patch_item_updates_only_requested_fields() {
+        let db = db().await;
+        let s = create_from_capture(&db, "局部更新", &capture())
+            .await
+            .unwrap();
+        let detail = get(&db, &s.id).await.unwrap();
+        let app = detail
+            .items
+            .iter()
+            .find(|i| i.item_type == "application")
+            .unwrap();
+
+        patch_item(
+            &db,
+            &app.id,
+            Some("always_launch".into()),
+            Some("--flag".into()),
+            Some(false),
+            Some(-10),
+            Some(1500),
+        )
+        .await
+        .unwrap();
+
+        let after = get(&db, &s.id)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| i.id == app.id)
+            .unwrap();
+        assert_eq!(after.reuse_policy, "always_launch");
+        assert_eq!(after.launch_args.as_deref(), Some("--flag"));
+        assert!(!after.enabled);
+        assert_eq!(after.launch_priority, -10);
+        assert_eq!(after.launch_delay_ms, 1500);
+
+        // 空串表示清空参数，同时不能把未提交字段冲掉
+        patch_item(&db, &app.id, None, Some(String::new()), None, None, None)
+            .await
+            .unwrap();
+        let cleared = get(&db, &s.id)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| i.id == app.id)
+            .unwrap();
+        assert!(cleared.launch_args.is_none());
+        assert_eq!(cleared.reuse_policy, "always_launch");
+        assert_eq!(cleared.launch_priority, -10);
+        assert_eq!(cleared.launch_delay_ms, 1500);
+    }
+
+    #[tokio::test]
     async fn relocate_item_updates_path_and_rejects_missing_file() {
         let db = db().await;
-        let s = create_from_capture(&db, "重定位", &capture()).await.unwrap();
+        let s = create_from_capture(&db, "重定位", &capture())
+            .await
+            .unwrap();
         let detail = get(&db, &s.id).await.unwrap();
         let app = detail
             .items
@@ -3114,9 +3448,11 @@ mod tests {
             .unwrap();
 
         // 不存在的文件必须拒绝
-        assert!(relocate_item(&db, &s.id, &app.id, r"Z:\nonexistent\foo.exe")
-            .await
-            .is_err());
+        assert!(
+            relocate_item(&db, &s.id, &app.id, r"Z:\nonexistent\foo.exe")
+                .await
+                .is_err()
+        );
 
         // 用真实存在的当前测试可执行文件验证重定位
         let exe = std::env::current_exe().unwrap();
@@ -3130,21 +3466,31 @@ mod tests {
         let db = db().await;
         let s = create_from_capture(&db, "资源", &capture()).await.unwrap();
 
-        let file = add_item(&db, &s.id, "file", r"D:\docs\spec.md", None).await.unwrap();
+        let file = add_item(&db, &s.id, "file", r"D:\docs\spec.md", None)
+            .await
+            .unwrap();
         assert_eq!(file.display_name, "spec.md");
 
-        add_item(&db, &s.id, "folder", r"D:\docs", None).await.unwrap();
+        add_item(&db, &s.id, "folder", r"D:\docs", None)
+            .await
+            .unwrap();
         let url = add_item(&db, &s.id, "url", "https://example.com/x", None)
             .await
             .unwrap();
         assert_eq!(url.display_name, "example.com/x");
 
         // 同一资源重复添加必须被拒绝（UNIQUE + 前置检查）
-        assert!(add_item(&db, &s.id, "file", r"d:\docs\SPEC.md", None).await.is_err());
+        assert!(add_item(&db, &s.id, "file", r"d:\docs\SPEC.md", None)
+            .await
+            .is_err());
         // 非 http(s) 的网址直接拒绝
-        assert!(add_item(&db, &s.id, "url", "file:///etc/passwd", None).await.is_err());
+        assert!(add_item(&db, &s.id, "url", "file:///etc/passwd", None)
+            .await
+            .is_err());
         // 不支持的类型
-        assert!(add_item(&db, &s.id, "application", r"C:\a.exe", None).await.is_err());
+        assert!(add_item(&db, &s.id, "application", r"C:\a.exe", None)
+            .await
+            .is_err());
 
         let scene = to_scene(&db, &s.id).await.unwrap();
         assert_eq!(scene.resources.len(), 3);
@@ -3154,9 +3500,10 @@ mod tests {
     #[tokio::test]
     async fn import_disables_untrusted_apps_and_strips_launch_args() {
         let db = db().await;
-        let real_exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        // 用 Windows 目录下的系统程序作为“常规安装路径”的正例。
+        let real_exe = std::env::var("WINDIR")
+            .map(|w| format!(r"{w}\System32\notepad.exe"))
+            .unwrap_or_else(|_| r"C:\Windows\System32\notepad.exe".into());
 
         let json = serde_json::json!({
             "schemaVersion": 1,
@@ -3195,15 +3542,18 @@ mod tests {
         let desc = detail.description.unwrap_or_default();
         assert!(desc.contains("[导入提示]"), "描述里应有导入提示：{desc}");
         assert!(desc.contains("2 个应用的路径"), "应说明停用数量：{desc}");
-        assert!(desc.contains("启动参数已在导入时剥离"), "应说明参数被剥离：{desc}");
+        assert!(
+            desc.contains("启动参数已在导入时剥离"),
+            "应说明参数被剥离：{desc}"
+        );
         assert!(desc.starts_with("来自同事"), "不应丢掉原描述：{desc}");
     }
 
     #[tokio::test]
     async fn import_preview_lists_risky_apps_without_writing() {
-        let real_exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let real_exe = std::env::var("WINDIR")
+            .map(|w| format!(r"{w}\System32\notepad.exe"))
+            .unwrap_or_else(|_| r"C:\Windows\System32\notepad.exe".into());
         let json = serde_json::json!({
             "schemaVersion": 1,
             "exportedAt": 0,
@@ -3226,10 +3576,16 @@ mod tests {
     #[tokio::test]
     async fn delete_item_cascades_its_windows() {
         let db = db().await;
-        let s = create_from_capture(&db, "删应用", &capture()).await.unwrap();
+        let s = create_from_capture(&db, "删应用", &capture())
+            .await
+            .unwrap();
         let detail = get(&db, &s.id).await.unwrap();
         let item = &detail.items[0];
-        let owned = detail.windows.iter().filter(|w| w.item_id == item.id).count();
+        let owned = detail
+            .windows
+            .iter()
+            .filter(|w| w.item_id == item.id)
+            .count();
         assert!(owned > 0);
 
         delete_item(&db, &s.id, &item.id).await.unwrap();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Camera,
@@ -37,6 +37,9 @@ import {
 import { AppIcon, useAppIcons } from "@/components/AppIcon";
 
 type SettingsTab = "general" | "behavior" | "storage" | "adapters" | "about";
+
+/** 与恢复页共用同一个「已告知专注模式后果」标记 */
+const FOCUS_MODE_ACK_KEY = "workscene.focusModeAck";
 
 const BUILTIN_ADAPTERS = [
   {
@@ -87,12 +90,28 @@ export function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
+  /** 同步镜像最新的 draft：确认框等异步回调里不能用渲染时的旧闭包，否则会覆盖期间的改动 */
+  const draftRef = useRef<AppSettings | null>(null);
   const [ignoreInput, setIgnoreInput] = useState("");
 
   const themeMode = useUiStore((s) => s.themeMode);
   const setThemeMode = useUiStore((s) => s.setThemeMode);
 
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.settingsGet });
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: api.settingsGet,
+    // 开机启动的真源是注册表，窗口重新获得焦点时重读，避免用陈旧值把用户在任务管理器里的改动写回去
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+
+  const hotkeyStatus = useQuery({
+    queryKey: ["hotkey-status"],
+    queryFn: api.getHotkeyStatus,
+    staleTime: 10_000,
+    retry: 0,
+  });
+
   const workspaces = useQuery({
     queryKey: ["workspaces"],
     queryFn: api.workspaceList,
@@ -145,22 +164,29 @@ export function SettingsPage() {
   });
 
   useEffect(() => {
-    if (settings.data) setDraft(settings.data);
+    if (!settings.data) return;
+    setDraft(settings.data);
+    draftRef.current = settings.data;
   }, [settings.data]);
 
   const save = useMutation({
+    // 同一个 scope 的变更按顺序串行执行：快速连点开关时不会出现两个 settings_set 并发、
+    // 让先发的旧响应把后发的新状态覆盖回去（表现为开关自己弹回去 / 库里与界面不一致）。
+    scope: { id: "settings-save" },
     mutationFn: (next: AppSettings) => api.settingsSet(next),
     onSuccess: (saved) => {
       setError(null);
       setDraft(saved);
+      draftRef.current = saved;
       qc.setQueryData(["settings"], saved);
       qc.invalidateQueries({ queryKey: ["settings"] });
-      qc.invalidateQueries({ queryKey: ["capture"] });
+      qc.invalidateQueries({ queryKey: ["hotkey-status"] });
       toast.success("设置已保存");
     },
     onError: (e) => {
       const msg = String((e as Error).message);
       setError(msg);
+      qc.invalidateQueries({ queryKey: ["hotkey-status"] });
       toast.danger("保存失败", msg);
       // 失败时以服务端为准重新取一次：开关不能停留在"看起来开了"的状态。
       // 注意不能用缓存里的 settings.data（结构共享可能返回同一引用，draft 不会被重置）。
@@ -169,8 +195,12 @@ export function SettingsPage() {
           const fresh = await api.settingsGet();
           qc.setQueryData(["settings"], fresh);
           setDraft(fresh);
+          draftRef.current = fresh;
         } catch {
-          if (settings.data) setDraft(settings.data);
+          if (settings.data) {
+            setDraft(settings.data);
+            draftRef.current = settings.data;
+          }
         }
       })();
     },
@@ -181,15 +211,22 @@ export function SettingsPage() {
     onSuccess: (n) => {
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
       qc.invalidateQueries({ queryKey: ["snapshots"] });
-      toast.success(n > 0 ? `已清理 ${n} 份旧自动快照` : "暂无可清理的自动快照");
+      // 0 也可能是正常结果（没有超出保留策略的快照），失败时后端会直接返回错误走 onError
+      toast.success(n > 0 ? `已清理 ${n} 份旧自动快照` : "清理完成，没有需要删除的旧自动快照");
     },
     onError: (e) => toast.danger("清理失败", String((e as Error).message)),
   });
 
   const patch = (next: Partial<AppSettings>) => {
-    if (!draft) return;
-    const merged = { ...draft, ...next };
+    const base = draftRef.current;
+    if (!base) return;
+    const merged = { ...base, ...next };
+    draftRef.current = merged;
     setDraft(merged);
+    // 只有忽略名单变化才需要重新扫描适配页的软件列表；其它设置保存不应触发桌面扫描。
+    if (next.ignoredProcesses !== undefined) {
+      qc.invalidateQueries({ queryKey: ["capture"] });
+    }
     save.mutate(merged);
   };
 
@@ -200,10 +237,11 @@ export function SettingsPage() {
   };
 
   const toggleIgnored = (rawExe: string) => {
-    if (!draft) return;
+    const base = draftRef.current;
+    if (!base) return;
     const key = normalizeExe(rawExe);
     if (!key) return;
-    const cur = draft.ignoredProcesses ?? [];
+    const cur = base.ignoredProcesses ?? [];
     const exists = cur.includes(key);
     const next = exists ? cur.filter((x) => x !== key) : [...cur, key];
     patch({ ignoredProcesses: next });
@@ -211,9 +249,10 @@ export function SettingsPage() {
 
   const addIgnoredFromInput = (e: React.FormEvent) => {
     e.preventDefault();
+    const base = draftRef.current;
     const key = normalizeExe(ignoreInput);
-    if (!key || !draft) return;
-    const cur = draft.ignoredProcesses ?? [];
+    if (!key || !base) return;
+    const cur = base.ignoredProcesses ?? [];
     if (cur.includes(key)) {
       toast.info(`${key} 已在忽略名单中`);
       setIgnoreInput("");
@@ -257,6 +296,20 @@ export function SettingsPage() {
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
       {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
+
+      {hotkeyStatus.data &&
+      (!hotkeyStatus.data.mainOk ||
+        (draft.workspaceHotkeysEnabled && hotkeyStatus.data.failedSlots.length > 0)) ? (
+        <ErrorNote
+          message={
+            !hotkeyStatus.data.mainOk
+              ? `全局唤起热键「${draft.hotkey || "关闭"}」注册失败，可能被其他程序占用。请在下方换一个组合，或改为「关闭」。`
+              : `以下工作空间快捷槽被其他程序占用，未生效：${hotkeyStatus.data.failedSlots
+                  .map((n) => `Ctrl+Alt+${n}`)
+                  .join("、")}`
+          }
+        />
+      ) : null}
 
       <Tabs
         value={tab}
@@ -356,7 +409,7 @@ export function SettingsPage() {
             </Row>
             <Row
               label="工作空间快捷槽（Ctrl + Alt + 1 ~ 9）"
-              hint="按下后直接恢复该槽绑定的工作空间；下方可直接为每个数字键绑定固定空间"
+              hint="默认关闭，避免一次性抢占 9 个全局快捷键；开启后可按下直接恢复该槽绑定的工作空间"
             >
               <Switch
                 checked={draft.workspaceHotkeysEnabled}
@@ -499,11 +552,36 @@ export function SettingsPage() {
             </Row>
             <Row
               label="默认开启专注模式（自动最小化无关窗口）"
-              hint="切换工作空间时自动把非本空间的窗口收进任务栏，绝不关闭软件"
+              hint="切换工作空间时自动把非本空间的窗口收进任务栏，绝不关闭软件；被收起的窗口需要你手动点回来"
             >
               <Switch
                 checked={draft.restoreFocusModeDefault}
-                onChange={(v) => patch({ restoreFocusModeDefault: v })}
+                onChange={(v) => {
+                  if (!v) {
+                    patch({ restoreFocusModeDefault: false });
+                    return;
+                  }
+                  // 与恢复页共用同一次「首次开启」确认：托盘 / Ctrl+Alt+N 直接恢复也要走这里知情
+                  if (localStorage.getItem(FOCUS_MODE_ACK_KEY)) {
+                    patch({ restoreFocusModeDefault: true });
+                    return;
+                  }
+                  void (async () => {
+                    const ok = await confirmAction({
+                      title: "开启专注模式？",
+                      description:
+                        "以后恢复工作空间时，不属于该空间的窗口会被最小化到任务栏（不会关闭任何软件，也不会丢数据）。它们需要你手动点回来。",
+                      confirmLabel: "开启",
+                    });
+                    if (!ok) return;
+                    try {
+                      localStorage.setItem(FOCUS_MODE_ACK_KEY, "1");
+                    } catch {
+                      // ignore storage errors
+                    }
+                    patch({ restoreFocusModeDefault: true });
+                  })();
+                }}
                 ariaLabel="默认开启专注模式"
               />
             </Row>
@@ -783,10 +861,34 @@ export function SettingsPage() {
               </Button>
             </div>
 
+            {liveCapture.isError ? (
+              <div className="flex flex-col items-start gap-2 border-b border-line px-4 py-4">
+                <ErrorNote
+                  message={`读取当前桌面软件失败：${String(
+                    (liveCapture.error as Error)?.message ?? "未知错误",
+                  )}`}
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={liveCapture.isFetching}
+                  onClick={() => liveCapture.refetch()}
+                >
+                  <RefreshCw
+                    size={13}
+                    className={liveCapture.isFetching ? "animate-spin" : ""}
+                  />
+                  重试
+                </Button>
+              </div>
+            ) : null}
+
             {knownApps.length === 0 ? (
-              <p className="px-4 py-6 text-center text-aux text-ink-3">
-                暂未检测到已捕获软件，捕获一次桌面后这里会自动展示。
-              </p>
+              liveCapture.isError ? null : (
+                <p className="px-4 py-6 text-center text-aux text-ink-3">
+                  暂未检测到已捕获软件，捕获一次桌面后这里会自动展示。
+                </p>
+              )
             ) : (
               <ul className="divide-y divide-line">
                 {knownApps.map((app) => {

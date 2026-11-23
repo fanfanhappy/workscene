@@ -113,10 +113,14 @@ export function HistoryPage() {
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["snapshots", activeId] });
+    qc.invalidateQueries({ queryKey: ["snapshot-scene"] });
     qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
     qc.invalidateQueries({ queryKey: ["runs"] });
+    qc.invalidateQueries({ queryKey: ["run-error-stats"] });
     qc.invalidateQueries({ queryKey: ["storage-stats"] });
     qc.invalidateQueries({ queryKey: ["scene-health"] });
+    // 快照恢复也会占用后端的恢复锁，刷新 busy 让恢复中心立刻解锁
+    qc.invalidateQueries({ queryKey: ["restore-busy"] });
   };
 
   const create = useMutation({
@@ -155,12 +159,18 @@ export function HistoryPage() {
     },
   });
 
-  const pruneKeep = settings.data?.autoKeep ?? 10;
+  const pruneKeep = settings.data?.autoKeep ?? 20;
 
   const prune = useMutation({
     mutationFn: () => api.snapshotPrune(activeId!, pruneKeep),
     onSuccess: (count) => {
+      // 被清理掉的自动快照可能正被勾选/预览/对比：状态必须一起清，
+      // 否则「比较」会拿着已删除的 id 去请求，预览卡片也会继续显示已删除的快照
+      setPicked([]);
+      setDiff(null);
+      setInspectedId(null);
       refresh();
+      qc.invalidateQueries({ queryKey: ["snapshot-scene"] });
       toast.success(count > 0 ? `已清理 ${count} 份旧自动快照` : "暂无可清理的自动快照");
     },
     onError: (e) => {
@@ -170,9 +180,30 @@ export function HistoryPage() {
     },
   });
 
+  // 清理会用“保留几份”来删真实文件：设置没读到就不能猜一个默认值去删
+  const pruneBlocked = prune.isPending || settings.isPending || settings.isError;
+
+  // 按拍摄时间排序：A=较早（基准），B=较新，与后端 diff(a, b) 的「新增/移除」方向一致
+  const pickedPair = useMemo(() => {
+    const byId = new Map((list.data ?? []).map((s) => [s.id, s]));
+    return picked
+      .map((id) => byId.get(id))
+      .filter((s): s is SnapshotSummary => Boolean(s))
+      .sort((a, b) => a.capturedAt - b.capturedAt);
+  }, [picked, list.data]);
+
   const compare = useMutation({
-    mutationFn: () => api.snapshotDiff(picked[0]!, picked[1]!),
-    onSuccess: setDiff,
+    mutationFn: () => {
+      const a = pickedPair[0];
+      const b = pickedPair[1];
+      if (!a || !b) throw new Error("所选快照已不存在，请重新选择两份快照");
+      if (a.id === b.id) throw new Error("不能比较同一份快照");
+      return api.snapshotDiff(a.id, b.id);
+    },
+    onSuccess: (d) => {
+      setError(null);
+      setDiff(d);
+    },
     onError: (e) => setError(String((e as Error).message)),
   });
 
@@ -181,7 +212,9 @@ export function HistoryPage() {
     onSuccess: (r) => {
       refresh();
       setRestoreReport(r);
-      if (r.failed === 0 && r.skipped === 0) {
+      if (r.totalSteps === 0) {
+        toast.warning("快照里没有可恢复的窗口", "未对桌面做任何改动");
+      } else if (r.failed === 0 && r.skipped === 0) {
         toast.success("快照恢复完成", `共完成 ${r.succeeded} 项`);
       } else if (r.succeeded > 0) {
         toast.warning("快照部分恢复", `成功 ${r.succeeded} · 跳过 ${r.skipped} · 失败 ${r.failed}`);
@@ -218,6 +251,13 @@ export function HistoryPage() {
     return m;
   }, [workspaces.data]);
 
+  const pickedPairLabel = useMemo(() => {
+    const a = pickedPair[0];
+    const b = pickedPair[1];
+    if (!a || !b) return undefined;
+    return `${formatTime(a.capturedAt)} → ${formatTime(b.capturedAt)}`;
+  }, [pickedPair]);
+
   const toggle = (id: string) => {
     setDiff(null);
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id].slice(-2)));
@@ -227,6 +267,27 @@ export function HistoryPage() {
     return (
       <Card className="flex items-center gap-2 text-aux text-ink-3">
         <Spinner /> 读取工作空间…
+      </Card>
+    );
+  }
+
+  // 读取失败 ≠ 没有工作空间：不能把后端错误显示成“还没有历史快照”
+  if (workspaces.isError) {
+    return (
+      <Card className="flex flex-col gap-2.5">
+        <ErrorNote
+          message={`读取工作空间失败：${String(workspaces.error?.message ?? "未知错误")}`}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={workspaces.isFetching}
+            onClick={() => workspaces.refetch()}
+          >
+            重试
+          </Button>
+        </div>
       </Card>
     );
   }
@@ -324,14 +385,21 @@ export function HistoryPage() {
             <Button
               size="xs"
               variant="secondary"
-              disabled={picked.length !== 2 || compare.isPending}
+              disabled={pickedPair.length !== 2 || compare.isPending}
               onClick={() => compare.mutate()}
+              title="按拍摄时间比较：A 为较早的基准，B 为较新的对比目标"
             >
-              <ArrowRightLeft size={12} /> 比较 ({picked.length}/2)
+              <ArrowRightLeft size={12} /> 比较 ({pickedPair.length}/2)
             </Button>
             <Button
               size="xs"
               variant="ghost"
+              disabled={pruneBlocked}
+              title={
+                settings.isError
+                  ? "读取保留份数设置失败，暂不能清理"
+                  : `保留最近 ${pruneKeep} 份自动快照`
+              }
               onClick={async () => {
                 const ok = await confirmAction({
                   title: "清理旧自动快照？",
@@ -346,7 +414,9 @@ export function HistoryPage() {
           </div>
         </Card>
 
-        {diff ? <DiffCard diff={diff} onClose={() => setDiff(null)} /> : null}
+        {diff ? (
+          <DiffCard diff={diff} pairLabel={pickedPairLabel} onClose={() => setDiff(null)} />
+        ) : null}
 
         {inspectedId ? (
           <SnapshotPreview
@@ -361,8 +431,30 @@ export function HistoryPage() {
           <Card className="flex items-center gap-2 text-aux text-ink-3">
             <Spinner /> 读取快照…
           </Card>
+        ) : list.isError ? (
+          // 读取失败 ≠ 没有快照：不能把后端错误显示成「暂无快照」
+          <Card className="flex flex-col gap-2.5">
+            <ErrorNote message={`读取快照失败：${String(list.error?.message ?? "未知错误")}`} />
+            <div className="flex items-center gap-2">
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={list.isFetching}
+                onClick={() => list.refetch()}
+              >
+                重试
+              </Button>
+            </div>
+          </Card>
         ) : snapshots.length === 0 ? (
-          <EmptyState title="暂无快照" description="点击上方「立即快照」记录当前桌面现场。" />
+          filterType === "all" ? (
+            <EmptyState title="暂无快照" description="点击上方「立即快照」记录当前桌面现场。" />
+          ) : (
+            <EmptyState
+              title="没有这一类型的快照"
+              description="当前筛选下没有快照，切换到「全部」查看其它快照。"
+            />
+          )
         ) : (
           <Card padded={false} className="overflow-hidden">
             <ul className="divide-y divide-line">
@@ -371,8 +463,9 @@ export function HistoryPage() {
                   label: s.snapshotType,
                   tone: "neutral" as const,
                 };
-                const idx = picked.indexOf(s.id);
-                const isPicked = idx !== -1;
+                const isPicked = picked.includes(s.id);
+                // A=较早（基准）、B=较新，与 compare 的排序保持一致
+                const pairIdx = pickedPair.findIndex((p) => p.id === s.id);
                 return (
                   <li key={s.id} className="flex items-center gap-2.5 px-4 py-2.5">
                     <button
@@ -393,7 +486,7 @@ export function HistoryPage() {
                         </span>
                         <Badge tone={meta.tone}>{meta.label}</Badge>
                         {isPicked ? (
-                          <Badge tone="accent">{idx === 0 ? "A" : "B"}</Badge>
+                          <Badge tone="accent">{pairIdx === 0 ? "A 较早" : "B 较新"}</Badge>
                         ) : null}
                         {s.isProtected ? (
                           <ShieldCheck size={12} className="text-warning" />
@@ -661,7 +754,15 @@ function SnapshotPreview({
   );
 }
 
-function DiffCard({ diff, onClose }: { diff: SnapshotDiff; onClose: () => void }) {
+function DiffCard({
+  diff,
+  pairLabel,
+  onClose,
+}: {
+  diff: SnapshotDiff;
+  pairLabel?: string;
+  onClose: () => void;
+}) {
   return (
     <Card className="flex flex-col gap-2.5 border-accent/35">
       <div className="flex items-center justify-between">
@@ -672,6 +773,10 @@ function DiffCard({ diff, onClose }: { diff: SnapshotDiff; onClose: () => void }
           关闭
         </Button>
       </div>
+      <p className="text-[11px] text-ink-3">
+        A 为较早的基准，B 为较新的对比：新增/移除描述 B 相对 A 的变化
+        {pairLabel ? ` · ${pairLabel}` : ""}
+      </p>
       <div className="flex flex-wrap gap-1.5">
         <Badge tone="success">新增 {diff.added}</Badge>
         <Badge tone="danger">移除 {diff.removed}</Badge>
@@ -774,9 +879,21 @@ function RunHistorySection({
   const tone = (status: string) =>
     status === "completed"
       ? "success"
-      : status === "partial" || status === "cancelled"
+      : status === "partial" || status === "cancelled" || status === "skipped"
         ? "warning"
         : "danger";
+
+  // 后端 runs.status 有 completed / partial / failed / cancelled / skipped 五种
+  const runLabel = (status: string) =>
+    status === "completed"
+      ? "成功"
+      : status === "partial"
+        ? "部分"
+        : status === "cancelled"
+          ? "取消"
+          : status === "skipped"
+            ? "跳过"
+            : "失败";
 
   return (
     <Card padded={false} className="overflow-hidden">
@@ -842,8 +959,25 @@ function RunHistorySection({
         <div className="flex items-center gap-2 p-4 text-aux text-ink-3">
           <Spinner /> 读取记录…
         </div>
+      ) : runs.isError ? (
+        // 读取失败 ≠ 没有记录
+        <div className="flex flex-col gap-2 p-4">
+          <ErrorNote message={`读取恢复记录失败：${String(runs.error?.message ?? "未知错误")}`} />
+          <div className="flex items-center gap-2">
+            <Button
+              size="xs"
+              variant="secondary"
+              disabled={runs.isFetching}
+              onClick={() => runs.refetch()}
+            >
+              重试
+            </Button>
+          </div>
+        </div>
       ) : visible.length === 0 ? (
-        <p className="px-4 py-5 text-center text-aux text-ink-3">暂无恢复记录</p>
+        <p className="px-4 py-5 text-center text-aux text-ink-3">
+          {scope === "current" ? "当前空间暂无恢复记录" : "暂无恢复记录"}
+        </p>
       ) : (
         <ul className="divide-y divide-line">
           {visible.map((r) => {
@@ -855,15 +989,7 @@ function RunHistorySection({
                   onClick={() => setExpanded((c) => (c === r.id ? null : r.id))}
                   className="flex w-full cursor-pointer items-center gap-2.5 px-4 py-2.5 text-left hover:bg-raised/45"
                 >
-                  <Badge tone={tone(r.status)}>
-                    {r.status === "completed"
-                      ? "成功"
-                      : r.status === "partial"
-                        ? "部分"
-                        : r.status === "cancelled"
-                          ? "取消"
-                          : "失败"}
-                  </Badge>
+                  <Badge tone={tone(r.status)}>{runLabel(r.status)}</Badge>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-aux font-medium text-ink">
                       {(r.workspaceId && wsMap.get(r.workspaceId)) || "历史快照"}
@@ -884,6 +1010,24 @@ function RunHistorySection({
                   <div className="border-t border-line bg-canvas/55 px-4 py-2">
                     {steps.isPending ? (
                       <p className="py-1 text-aux text-ink-3">读取步骤…</p>
+                    ) : steps.isError ? (
+                      <div className="flex flex-col gap-2 py-1">
+                        <ErrorNote
+                          message={`读取步骤失败：${String(steps.error?.message ?? "未知错误")}`}
+                        />
+                        <div>
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            disabled={steps.isFetching}
+                            onClick={() => steps.refetch()}
+                          >
+                            重试
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (steps.data ?? []).length === 0 ? (
+                      <p className="py-1 text-aux text-ink-3">这次恢复没有记录步骤</p>
                     ) : (
                       <ul className="divide-y divide-line/60">
                         {(steps.data ?? []).map((s) => (

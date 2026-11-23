@@ -247,6 +247,17 @@ pub fn save_scene_file(name: &str, mut scene: SceneFile) -> AppResult<SceneSumma
     })
 }
 
+/// 覆盖已有快照内容（仅用于快照富化：资源/启动参数回填）。
+/// 必须走与其他快照相同的原子写，否则断电会留下半个 JSON。
+pub fn overwrite_scene(scene: &SceneFile) -> AppResult<()> {
+    if !valid_id(&scene.id) {
+        return Err(AppError::msg("非法的快照 ID"));
+    }
+    ensure_dirs()?;
+    let json = serde_json::to_string_pretty(scene)?;
+    write_atomic(&scene_path(&scene.id), &json)
+}
+
 pub fn load_scene(id: &str) -> AppResult<SceneFile> {
     if !valid_id(id) {
         return Err(AppError::msg("非法的快照 ID"));
@@ -274,7 +285,9 @@ pub fn delete_scene(id: &str) -> AppResult<()> {
     if !path.exists() {
         return Ok(());
     }
-    std::fs::remove_file(path)?;
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.bak", path.display()));
+    let _ = std::fs::remove_file(format!("{}.tmp", path.display()));
     Ok(())
 }
 

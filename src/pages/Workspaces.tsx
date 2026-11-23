@@ -64,6 +64,32 @@ type ViewMode = "grid" | "list" | "compact";
 type SortKey = "updated" | "restored" | "name" | "windows";
 type EditorTab = "layout" | "apps" | "resources";
 
+/**
+ * 把服务端窗口列表合并进本地草稿：
+ * - 本地已有的窗口保留本地值（未保存的拖拽/缩放不会被无关的详情刷新覆盖）；
+ * - 服务端已删除的窗口从草稿里移除；
+ * - 服务端新增的窗口（如「添加软件」后生成的默认位置）追加进草稿。
+ * 集合完全一致时返回原数组，避免无意义的重新渲染。
+ */
+function mergeServerWindows(
+  prev: WorkspaceWindow[],
+  server: WorkspaceWindow[],
+): WorkspaceWindow[] {
+  const localById = new Map(prev.map((w) => [w.id, w]));
+  let changed = prev.length !== server.length;
+  const next = server.map((s) => {
+    const local = localById.get(s.id);
+    if (local) {
+      localById.delete(s.id);
+      return local;
+    }
+    changed = true;
+    return s;
+  });
+  if (localById.size > 0) changed = true;
+  return changed ? next : prev;
+}
+
 function SuggestArgs({
   exeName,
   target,
@@ -103,6 +129,12 @@ export function WorkspacesPage() {
   const activeId = params.get("id");
   const importInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  /** 上一次同步 draft 的工作空间 id：只有真正切换工作空间才整体重置 */
+  const lastDetailIdRef = useRef<string | null>(null);
+  /** 保存/重新捕获成功后，等下一次详情回流时强制整体重置（此时服务端才是权威数据） */
+  const resetDraftOnceRef = useRef(false);
+  /** 最近一次渲染的脏状态：mutation 回调里读取，避免闭包拿到过期的 layoutDirty */
+  const layoutDirtyRef = useRef(false);
 
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [sortBy, setSortBy] = useState<SortKey>("updated");
@@ -172,9 +204,32 @@ export function WorkspacesPage() {
   const appIcons = useAppIcons(allIconPaths);
 
   const [draft, setDraft] = useState<WorkspaceWindow[]>([]);
+  // 详情刷新可能来自任意无关操作（改备注、开关应用、加资源…）：默认只按窗口 id 合并，
+  // 保留本地未保存的拖拽结果；只有切换工作空间、或保存/重新捕获成功后才整体重置。
   useEffect(() => {
-    if (detail.data) setDraft(detail.data.windows);
-  }, [detail.data]);
+    // 离开详情页（含 AppShell 确认“放弃未保存摆法”后回到列表）时清掉草稿，
+    // 否则再次打开同一空间会把用户刚确认放弃的本地改动又合并回来。
+    if (!activeId) {
+      lastDetailIdRef.current = null;
+      resetDraftOnceRef.current = false;
+      setDraft([]);
+      return;
+    }
+    const data = detail.data;
+    if (!data) return;
+    if (lastDetailIdRef.current !== data.id) {
+      lastDetailIdRef.current = data.id;
+      resetDraftOnceRef.current = false;
+      setDraft(data.windows);
+      return;
+    }
+    if (resetDraftOnceRef.current) {
+      resetDraftOnceRef.current = false;
+      setDraft(data.windows);
+      return;
+    }
+    setDraft((prev) => mergeServerWindows(prev, data.windows));
+  }, [detail.data, activeId]);
 
   useEffect(() => {
     if (metaOpen && detail.data) {
@@ -184,7 +239,7 @@ export function WorkspacesPage() {
   }, [metaOpen, detail.data, list.data]);
 
   const layoutDirty = useMemo(() => {
-    if (!detail.data) return false;
+    if (!activeId || !detail.data) return false;
     const orig = detail.data.windows;
     if (orig.length !== draft.length) return true;
     return draft.some((d) => {
@@ -199,13 +254,38 @@ export function WorkspacesPage() {
         o.showState !== d.showState
       );
     });
-  }, [detail.data, draft]);
+  }, [activeId, detail.data, draft]);
 
   // 同步未保存状态到全局，拦截侧栏导航与 Ctrl+K 跳转避免改动丢失
   useEffect(() => {
+    layoutDirtyRef.current = layoutDirty;
     useUiStore.getState().setHasUnsavedLayout(Boolean(activeId) && layoutDirty);
     return () => useUiStore.getState().setHasUnsavedLayout(false);
   }, [activeId, layoutDirty]);
+
+  /**
+   * 复制/导入成功后需要切到新工作空间。若当前画布有未保存摆法，必须先确认：
+   * 取消时留在原处（副本/导入已经建好，可从列表打开），不能静默丢弃改动。
+   */
+  const navigateAfterCreate = async (createdId: string, createdName: string) => {
+    if (!layoutDirtyRef.current) {
+      setParams({ id: createdId });
+      return;
+    }
+    const discard = await confirmAction({
+      title: "放弃未保存的窗口摆法？",
+      description: "打开新建的工作空间会丢弃当前尚未保存的窗口位置调整。",
+      detail: `「${createdName}」已经创建，留在本页不会影响它，可稍后从列表打开。`,
+      confirmLabel: "放弃并打开",
+      variant: "danger",
+    });
+    if (!discard) {
+      toast.info(`「${createdName}」已创建`, "已保留当前未保存的窗口摆法");
+      return;
+    }
+    if (detail.data) setDraft(detail.data.windows);
+    setParams({ id: createdId });
+  };
 
   const filteredList = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -230,12 +310,9 @@ export function WorkspacesPage() {
   const saveLayout = useMutation({
     mutationFn: async () => {
       const ws = detail.data!;
-      let changes = 0;
-      const removed = ws.windows.filter((w) => !draft.some((d) => d.id === w.id));
-      for (const w of removed) {
-        await api.workspaceWindowDelete(ws.id, w.id);
-        changes += 1;
-      }
+      const removedIds = ws.windows
+        .filter((w) => !draft.some((d) => d.id === w.id))
+        .map((w) => w.id);
       const modified = draft.filter((d) => {
         const o = ws.windows.find((w) => w.id === d.id);
         return (
@@ -248,13 +325,15 @@ export function WorkspacesPage() {
             o.showState !== d.showState)
         );
       });
-      if (modified.length > 0) {
-        await api.workspaceLayoutUpdate(ws.id, toLayoutUpdates(modified));
-        changes += modified.length;
-      }
+      const changes = removedIds.length + modified.length;
+      if (changes === 0) return 0;
+      // 删除 + 更新一次事务提交；逐条调用时中途失败会留下半个布局
+      await api.workspaceLayoutSave(ws.id, removedIds, toLayoutUpdates(modified));
       return changes;
     },
     onSuccess: (changes) => {
+      // 保存成功后服务端才是权威数据：等详情回流时整体重置草稿
+      resetDraftOnceRef.current = true;
       qc.invalidateQueries({ queryKey: ["workspace", activeId] });
       qc.invalidateQueries({ queryKey: ["workspaces"] });
       toast.success("窗口摆法已保存", changes > 0 ? `已保存 ${changes} 处修改` : undefined);
@@ -336,7 +415,7 @@ export function WorkspacesPage() {
       );
       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
       toast.success(`已复制「${created.name}」`);
-      setParams({ id: created.id });
+      void navigateAfterCreate(created.id, created.name);
     },
     onError: (e) => {
       const msg = String((e as Error).message);
@@ -362,7 +441,7 @@ export function WorkspacesPage() {
       } else {
         toast.success(`已导入「${created.name}」`);
       }
-      setParams({ id: created.id });
+      void navigateAfterCreate(created.id, created.name);
     },
     onError: (e) => toast.danger("导入失败", String((e as Error).message)),
   });
@@ -370,6 +449,8 @@ export function WorkspacesPage() {
   const recaptureWs = useMutation({
     mutationFn: () => api.workspaceRecapture(detail.data!.id),
     onSuccess: (updated) => {
+      // 重新捕获会重写窗口 id：等详情回流时整体重置，避免残留旧窗口
+      resetDraftOnceRef.current = true;
       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
       qc.invalidateQueries({ queryKey: ["workspace", activeId] });
       qc.invalidateQueries({ queryKey: ["snapshots", activeId] });
@@ -424,25 +505,31 @@ export function WorkspacesPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [activeId, layoutDirty, tab, saveLayout]);
 
-  const saveItem = useMutation({
+  /**
+   * 应用项局部更新：只提交用户改动的字段。
+   * 之前用整行更新时，「失焦保存启动参数」和「点击开关」两次写入会互相覆盖；
+   * scope 保证同一应用的多次改动按顺序落地，而不是并发竞争。
+   */
+  const patchItem = useMutation({
+    scope: { id: "item-patch" },
     mutationFn: (v: {
       itemId: string;
-      reusePolicy: string;
-      launchArgs: string | null;
-      enabled: boolean;
+      reusePolicy?: string;
+      launchArgs?: string | null;
+      enabled?: boolean;
       launchPriority?: number;
       launchDelayMs?: number;
     }) =>
-      api.workspaceItemUpdate(
-        v.itemId,
-        v.reusePolicy,
-        v.launchArgs,
-        v.enabled,
-        v.launchPriority,
-        v.launchDelayMs,
-      ),
+      api.workspaceItemPatch(v.itemId, {
+        reusePolicy: v.reusePolicy,
+        launchArgs: v.launchArgs,
+        enabled: v.enabled,
+        launchPriority: v.launchPriority,
+        launchDelayMs: v.launchDelayMs,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
       toast.success("设置已保存");
     },
     onError: (e) => {
@@ -468,6 +555,8 @@ export function WorkspacesPage() {
       api.workspaceItemRelocate(detail.data!.id, itemId, newPath),
     onSuccess: (updated) => {
       qc.invalidateQueries({ queryKey: ["workspace", activeId] });
+      // 列表卡片的图标来自 appPaths，换程序后也要刷新
+      qc.invalidateQueries({ queryKey: ["workspaces"] });
       toast.success(`已更新程序为 ${updated.displayName}`);
     },
     onError: (e) => toast.danger("更换程序失败", String((e as Error).message)),
@@ -559,9 +648,14 @@ export function WorkspacesPage() {
       // 导入的文件可能是别人给的：先预检"它会启动什么"，再让用户决定
       const preview = await api.workspaceImportPreview(json);
       const risky: string[] = [];
+      if (preview.appTargets.length > 0) {
+        const shown = preview.appTargets.slice(0, 5).join("\n");
+        const more = preview.appTargets.length > 5 ? `\n…等 ${preview.appTargets.length} 个` : "";
+        risky.push(`文件将登记以下可执行文件（启用后恢复时会启动）：\n${shown}${more}`);
+      }
       if (preview.disabledApps.length > 0) {
         risky.push(
-          `${preview.disabledApps.length} 个应用的路径不存在或位于网络位置，导入后会被停用：${preview.disabledApps.join("、")}`,
+          `${preview.disabledApps.length} 个应用的路径不存在、位于网络位置或不在常规安装目录，导入后会被停用：${preview.disabledApps.join("、")}`,
         );
       }
       if (preview.appsWithArgs.length > 0) {
@@ -594,6 +688,26 @@ export function WorkspacesPage() {
     return (
       <Card className="flex items-center gap-2 text-aux text-ink-3">
         <Spinner /> 读取工作空间…
+      </Card>
+    );
+  }
+
+  // 读库失败必须如实报错：不能把 IPC 异常显示成「还没有工作空间」，
+  // 否则用户会以为数据被清空而去重新捕获/导入。
+  if (list.isError && !activeId) {
+    return (
+      <Card className="flex flex-col items-start gap-3">
+        <ErrorNote
+          message={`读取工作空间失败：${String(list.error?.message ?? "未知错误")}`}
+        />
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={list.isFetching}
+          onClick={() => void list.refetch()}
+        >
+          <RefreshCw size={13} /> {list.isFetching ? "重新读取中…" : "重新读取"}
+        </Button>
       </Card>
     );
   }
@@ -1133,9 +1247,29 @@ export function WorkspacesPage() {
           </div>
 
           {tab === "layout" ? (
-            displays.data ? (
+            (!displays.data && displays.isError) || displays.data?.length === 0 ? (
+              <Card className="flex flex-col items-start gap-3">
+                <ErrorNote
+                  message={
+                    displays.isError
+                      ? `读取显示器失败：${String(displays.error?.message ?? "未知错误")}`
+                      : "没有读取到任何显示器，暂时无法在画布上编辑窗口位置。请确认显示器已连接后重试。"
+                  }
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={displays.isFetching}
+                  onClick={() => void displays.refetch()}
+                >
+                  <RefreshCw size={13} />
+                  {displays.isFetching ? "重新读取中…" : "重新读取"}
+                </Button>
+              </Card>
+            ) : displays.data ? (
               <div className="flex flex-col gap-3">
                 <LayoutEditor
+                  key={detail.data.id}
                   displays={displays.data}
                   windows={draft}
                   dirty={layoutDirty}
@@ -1235,19 +1369,9 @@ export function WorkspacesPage() {
                       icons={appIcons}
                       suggestTarget={matchedResource}
                       disabled={
-                        saveItem.isPending || removeItem.isPending || relocateItem.isPending
+                        patchItem.isPending || removeItem.isPending || relocateItem.isPending
                       }
-                      onUpdate={(patch) =>
-                        saveItem.mutate({
-                          itemId: it.id,
-                          reusePolicy: patch.reusePolicy ?? it.reusePolicy,
-                          launchArgs:
-                            patch.launchArgs !== undefined ? patch.launchArgs : it.launchArgs,
-                          enabled: patch.enabled ?? it.enabled,
-                          launchPriority: patch.launchPriority ?? it.launchPriority,
-                          launchDelayMs: patch.launchDelayMs ?? it.launchDelayMs,
-                        })
-                      }
+                      onUpdate={(patch) => patchItem.mutate({ itemId: it.id, ...patch })}
                       onRelocate={async () => {
                         try {
                           const picked = await api.dialogPickFile(true);
@@ -1464,7 +1588,8 @@ function AppItemRow({
   const commit = () => {
     const trimmed = argsText.trim();
     if (trimmed === (item.launchArgs ?? "")) return;
-    onUpdate({ launchArgs: trimmed === "" ? null : trimmed });
+    // 空串表示"清空启动参数"（后端 Some("") → NULL）；null 会被当成"保持原值"
+    onUpdate({ launchArgs: trimmed });
   };
 
   const isPriority = item.launchPriority < 0;

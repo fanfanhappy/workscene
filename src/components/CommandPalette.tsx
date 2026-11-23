@@ -52,15 +52,17 @@ export function CommandPalette() {
 
   useEffect(() => {
     const onGlobalKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-        // 若已有其他模态框（Dialog / 确认框 / 新手引导）打开，不叠加唤起命令面板
-        const isOpen = useUiStore.getState().commandPaletteOpen;
-        if (!isOpen && document.querySelector('[data-ws-modal="true"]')) {
-          return;
-        }
-        e.preventDefault();
-        useUiStore.getState().toggleCommandPalette();
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "k") return;
+      // 按住不放时操作系统会连续触发 keydown：忽略重复，否则面板会反复开/关
+      if (e.repeat) return;
+      const state = useUiStore.getState();
+      // 若已有其他模态框（Dialog / 确认框 / 新手引导）打开，不叠加唤起命令面板
+      if (!state.commandPaletteOpen && document.querySelector('[data-ws-modal="true"]')) {
+        return;
       }
+      e.preventDefault();
+      // 单次按键：关闭时打开、已打开时关闭（重复按键已在上面过滤掉）
+      state.setCommandPaletteOpen(!state.commandPaletteOpen);
     };
     window.addEventListener("keydown", onGlobalKey);
     return () => window.removeEventListener("keydown", onGlobalKey);

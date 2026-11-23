@@ -56,6 +56,115 @@ const statusMeta: Record<
   needsReview: { preview: "需留意", report: "需确认", tone: "warning", icon: AlertTriangle },
 };
 
+type ReportOutcome = {
+  tone: "success" | "warning" | "danger";
+  title: string;
+  detail: string;
+};
+
+/** 重试合并用的稳定键：同类步骤 + 目标名（后端 stepType 为 window / resource / hook / focus） */
+function stepKey(s: RestoreStepResult): string {
+  return `${s.stepType ?? "window"}|${s.targetName}`;
+}
+
+/**
+ * 只有场景里的窗口/资源可以重试。钩子步骤没有对应的窗口或资源（后端会按名字过滤出 0 步），
+ * 专注模式步骤是执行后的清理统计，重试它们只会得到 0 步报告并误报成功，必须排除。
+ */
+function isRetryableStep(s: RestoreStepResult): boolean {
+  if (s.status === "success") return false;
+  if (s.stepType === "hook" || s.stepType === "focus") return false;
+  return true;
+}
+
+/** 与后端 runs 的统计口径一致：success→成功，failed/timeout→未成功，其余（skipped/needsReview）→跳过 */
+function countSteps(steps: RestoreStepResult[]): {
+  succeeded: number;
+  failed: number;
+  skipped: number;
+} {
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const s of steps) {
+    if (s.status === "success") succeeded += 1;
+    else if (s.status === "failed" || s.status === "timeout") failed += 1;
+    else skipped += 1;
+  }
+  return { succeeded, failed, skipped };
+}
+
+/** 重试只返回被重试的子集报告：按步骤键合并回原报告，保留整体进度、统计与撤销快照 */
+function mergeRetryReport(base: RestoreReport, retry: RestoreReport): RestoreReport {
+  // 同名目标可能有多条（两个「下载」窗口）：按出现顺序消费重试步骤，
+  // 不能只用 findIndex，否则第二条会把第一条刚替换的结果再覆盖掉。
+  const pending = new Map<string, RestoreStepResult[]>();
+  for (const step of retry.steps) {
+    const key = stepKey(step);
+    const list = pending.get(key) ?? [];
+    list.push(step);
+    pending.set(key, list);
+  }
+  const steps = base.steps.map((step) => {
+    if (step.status === "success") return step;
+    const list = pending.get(stepKey(step));
+    if (list && list.length > 0) return list.shift()!;
+    return step;
+  });
+  for (const list of pending.values()) steps.push(...list);
+  return {
+    ...base,
+    steps,
+    totalSteps: steps.length,
+    ...countSteps(steps),
+    finishedAt: retry.finishedAt,
+    preRestoreSceneId: base.preRestoreSceneId ?? retry.preRestoreSceneId,
+  };
+}
+
+/** 报告 → 用户可见结论。0 步报告绝不能被当成“完成”。 */
+function reportOutcome(r: RestoreReport, labelPrefix = ""): ReportOutcome {
+  if (r.steps.some((s) => s.code === "cancelled")) {
+    return {
+      tone: "warning",
+      title: `${labelPrefix}「${r.sceneName}」恢复已取消`,
+      detail: `已完成 ${r.succeeded} 项`,
+    };
+  }
+  if (r.totalSteps === 0) {
+    return {
+      tone: "warning",
+      title: `${labelPrefix}「${r.sceneName}」没有可执行的项目`,
+      detail: "未对桌面做任何改动，请确认目标是否已关闭或改名",
+    };
+  }
+  if (r.failed === 0 && r.skipped === 0) {
+    return {
+      tone: "success",
+      title: `${labelPrefix}「${r.sceneName}」已恢复完成`,
+      detail: `共完成 ${r.succeeded} 项`,
+    };
+  }
+  if (r.succeeded > 0) {
+    return {
+      tone: "warning",
+      title: `${labelPrefix}「${r.sceneName}」部分完成`,
+      detail: `完成 ${r.succeeded} · 未完成 ${r.failed + r.skipped}`,
+    };
+  }
+  return {
+    tone: "danger",
+    title: `${labelPrefix}「${r.sceneName}」恢复未完成`,
+    detail: "请查看原因或点击重试",
+  };
+}
+
+function notifyOutcome(o: ReportOutcome) {
+  if (o.tone === "success") toast.success(o.title, o.detail);
+  else if (o.tone === "warning") toast.warning(o.title, o.detail);
+  else toast.danger(o.title, o.detail);
+}
+
 export function RestorePage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -78,6 +187,8 @@ export function RestorePage() {
   const [cancelling, setCancelling] = useState(false);
   const [autoPausedNote, setAutoPausedNote] = useState<string | null>(null);
   const autoTriggeredFor = useRef<string | null>(null);
+  // 重试/撤销期间先把原报告收起来，失败时用它还原（也避免旧报告上的按钮被重复点击）
+  const savedReportRef = useRef<RestoreReport | null>(null);
 
   const settings = useQuery({
     queryKey: ["settings"],
@@ -125,6 +236,7 @@ export function RestorePage() {
       setError(null);
       setAutoPausedNote(null);
       autoTriggeredFor.current = null;
+      savedReportRef.current = null;
     }
     lastWorkspaceIdRef.current = workspaceId;
   }, [workspaceId]);
@@ -152,27 +264,25 @@ export function RestorePage() {
     };
   }, []);
 
+  const invalidateAfterReport = () => {
+    qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
+    qc.invalidateQueries({ queryKey: ["runs"] });
+    qc.invalidateQueries({ queryKey: ["run-error-stats"] });
+    qc.invalidateQueries({ queryKey: ["snapshots"] });
+    qc.invalidateQueries({ queryKey: ["storage-stats"] });
+    // 恢复结束后 busy 标记由后端释放，立即刷新才能解锁按钮 / 撤掉“另一个任务在执行”横幅
+    qc.invalidateQueries({ queryKey: ["restore-busy"] });
+    qc.invalidateQueries({ queryKey: ["preview", active?.id] });
+  };
+
   const handleReportResult = (r: RestoreReport, labelPrefix = "") => {
     setCancelling(false);
     setReport(r);
-    qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
-    qc.invalidateQueries({ queryKey: ["runs"] });
-    qc.invalidateQueries({ queryKey: ["snapshots"] });
-    qc.invalidateQueries({ queryKey: ["storage-stats"] });
-    qc.invalidateQueries({ queryKey: ["preview", active?.id] });
-    const wasCancelled = r.steps.some((s) => s.code === "cancelled");
-    if (wasCancelled) {
-      toast.warning(`「${r.sceneName}」恢复已取消`, `已完成 ${r.succeeded} 项`);
-    } else if (r.failed === 0 && r.skipped === 0) {
-      toast.success(`${labelPrefix}「${r.sceneName}」已恢复完成`, `共完成 ${r.succeeded} 项`);
-    } else if (r.succeeded > 0) {
-      toast.warning(
-        `${labelPrefix}「${r.sceneName}」部分完成`,
-        `完成 ${r.succeeded} · 未完成 ${r.failed + r.skipped}`,
-      );
-    } else {
-      toast.danger(`「${r.sceneName}」恢复未完成`, `请查看原因或点击重试`);
-    }
+    savedReportRef.current = r;
+    // 拿到结果后重新允许一键恢复（Ctrl+K / 路由带 auto=1）再次触发
+    autoTriggeredFor.current = null;
+    invalidateAfterReport();
+    notifyOutcome(reportOutcome(r, labelPrefix));
   };
 
   const run = useMutation({
@@ -180,6 +290,7 @@ export function RestorePage() {
     onMutate: () => {
       setLiveSteps([]);
       setReport(null);
+      savedReportRef.current = null;
       setIsUndoReport(false);
       setExpectedSteps(Math.max(1, preview.data?.summary.total ?? 1));
       setReportFilter("all");
@@ -191,6 +302,8 @@ export function RestorePage() {
     onSuccess: (r) => handleReportResult(r),
     onError: (e) => {
       setCancelling(false);
+      autoTriggeredFor.current = null;
+      qc.invalidateQueries({ queryKey: ["restore-busy"] });
       const msg = String((e as Error).message);
       setError(msg);
       toast.danger("恢复失败", msg);
@@ -212,11 +325,14 @@ export function RestorePage() {
     onError: (e) => toast.danger("收工失败", String((e as Error).message)),
   });
 
-  // 仅重试未完成/失败项（支持全量重试或单条重试）
+  // 仅重试未完成/失败项（支持全量重试或单条重试）：结果合并回原报告，不覆盖整体进度
   const retryFailed = useMutation({
     mutationFn: (targets: string[]) =>
       api.workspaceRestoreRetry(active!.id, relaunch, targets),
     onMutate: (targets) => {
+      // 旧报告先收起：重试期间它上面的「重试此项 / 撤销」不能再被点，避免并发起第二次恢复
+      savedReportRef.current = report;
+      setReport(null);
       setLiveSteps([]);
       setIsUndoReport(false);
       setExpectedSteps(Math.max(1, targets.length));
@@ -224,29 +340,123 @@ export function RestorePage() {
       setElapsedMs(0);
       setCancelling(false);
     },
-    onSuccess: (r) => handleReportResult(r, "重试"),
+    onSuccess: (r) => {
+      const base = savedReportRef.current;
+      if (r.totalSteps === 0) {
+        // 后端现在会拒绝空重试；这里兜底，绝不把 0 步报告报成“重试完成”
+        setCancelling(false);
+        if (base) setReport(base);
+        qc.invalidateQueries({ queryKey: ["restore-busy"] });
+        const msg = "没有匹配到可重试的窗口或资源（可能已被关闭或改名）";
+        setError(msg);
+        toast.warning("重试未执行", msg);
+        return;
+      }
+      handleReportResult(base ? mergeRetryReport(base, r) : r, "重试");
+    },
     onError: (e) => {
       setCancelling(false);
+      // 失败时把原报告放回来，别让用户丢掉上一次的恢复明细
+      if (savedReportRef.current) setReport(savedReportRef.current);
+      qc.invalidateQueries({ queryKey: ["restore-busy"] });
       const msg = String((e as Error).message);
       setError(msg);
       toast.danger("重试失败", msg);
     },
   });
 
+  const cancelRun = useMutation({
+    mutationFn: api.restoreCancel,
+    onMutate: () => setCancelling(true),
+    onSuccess: (ok) => {
+      if (ok) {
+        toast.info("正在安全停止", "已经打开的软件不会被关闭");
+      } else {
+        // 没有正在跑的任务（比如刚结束）：别让按钮卡在“正在停止…”
+        setCancelling(false);
+        qc.invalidateQueries({ queryKey: ["restore-busy"] });
+      }
+    },
+    onError: (e) => {
+      setCancelling(false);
+      toast.danger("取消失败", String((e as Error).message));
+    },
+  });
+
+  const undo = useMutation({
+    mutationFn: (preId: string) => api.snapshotRestore(preId, true),
+    onMutate: () => {
+      // 撤销期间同样收起旧报告，避免它上面的「重试此项 / 撤销」被再次点击
+      savedReportRef.current = report;
+      setReport(null);
+      setLiveSteps([]);
+      setError(null);
+      setCancelling(false);
+    },
+    onSuccess: (r) => {
+      setIsUndoReport(true);
+      setReport(r);
+      invalidateAfterReport();
+      if (r.steps.some((s) => s.code === "cancelled")) {
+        toast.warning("撤销已取消", `已还原 ${r.succeeded} 项`);
+      } else if (r.totalSteps === 0) {
+        toast.warning("没有可撤销的窗口", "撤销快照里没有窗口，桌面未做改动。");
+      } else if (r.failed === 0 && r.skipped === 0) {
+        toast.success("已撤销上次恢复", `已还原 ${r.succeeded} 项`);
+      } else if (r.succeeded > 0) {
+        toast.warning(
+          "撤销未完全还原",
+          `已还原 ${r.succeeded} · 未还原 ${r.failed + r.skipped}`,
+        );
+      } else {
+        toast.danger("撤销未成功", "请查看下方明细，或在「历史」里手动选择快照恢复");
+      }
+    },
+    onError: (e) => {
+      if (savedReportRef.current) setReport(savedReportRef.current);
+      qc.invalidateQueries({ queryKey: ["restore-busy"] });
+      const msg = String((e as Error).message);
+      setError(msg);
+      toast.danger("撤销失败", msg);
+    },
+  });
+
+  const running = run.isPending || retryFailed.isPending || undo.isPending;
+
   // 智能一键恢复：只要没有缺失/失效的程序路径（未打开软件属于正常一键补启），直接自动开始恢复；
   // 仅当存在失效路径时停在预览页让用户核对或修复路径。
+  // 放在 running/undo 之后：deps 里引用了它们，必须先完成初始化。
   useEffect(() => {
-    if (!autoStart || !active?.id || !preview.data || !relaunchSynced) return;
-    if (autoTriggeredFor.current === active.id) return;
-    if (run.isPending || report || busy.data === true) return;
+    if (!autoStart) return;
+    // 数据还没到齐时先保留 auto 参数，等预览可用后再决策
+    if (!active?.id || !preview.data || !relaunchSynced) return;
+
+    // 能决策之后，无论走哪条分支都先消费掉 auto，
+    // 否则它会留在 URL 里，等报告关闭/任务结束后“迟到触发”一次没人要的恢复
+    const consumeAuto = () => setParams({ workspace: active.id }, { replace: true });
+
+    if (running) {
+      consumeAuto();
+      return;
+    }
+    if (busy.data === true) {
+      consumeAuto();
+      setAutoPausedNote(
+        "另一个恢复任务正在执行，这次一键恢复已暂停；等它结束后再点「开始恢复」。",
+      );
+      return;
+    }
+    if (autoTriggeredFor.current === active.id) {
+      consumeAuto();
+      return;
+    }
 
     autoTriggeredFor.current = active.id;
     const isClean =
       preview.data.summary.missing === 0 &&
       preview.data.summary.total > 0;
 
-    // 清除 URL 上的 auto 参数，避免返回预览后反复触发
-    setParams({ workspace: active.id }, { replace: true });
+    consumeAuto();
 
     if (isClean) {
       run.mutate();
@@ -261,47 +471,10 @@ export function RestorePage() {
     preview.data,
     relaunchSynced,
     run,
-    report,
+    running,
     busy.data,
     setParams,
   ]);
-
-  const cancelRun = useMutation({
-    mutationFn: api.restoreCancel,
-    onMutate: () => setCancelling(true),
-    onSuccess: (ok) => {
-      if (ok) toast.info("正在安全停止", "已经打开的软件不会被关闭");
-    },
-    onError: (e) => {
-      setCancelling(false);
-      toast.danger("取消失败", String((e as Error).message));
-    },
-  });
-
-  const undo = useMutation({
-    mutationFn: (preId: string) => api.snapshotRestore(preId, true),
-    onMutate: () => {
-      setLiveSteps([]);
-      setError(null);
-    },
-    onSuccess: (r) => {
-      setIsUndoReport(true);
-      setReport(r);
-      qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
-      qc.invalidateQueries({ queryKey: ["runs"] });
-      qc.invalidateQueries({ queryKey: ["snapshots"] });
-      qc.invalidateQueries({ queryKey: ["storage-stats"] });
-      qc.invalidateQueries({ queryKey: ["preview", active?.id] });
-      toast.success("已撤销上次恢复", `已还原 ${r.succeeded} 个窗口`);
-    },
-    onError: (e) => {
-      const msg = String((e as Error).message);
-      setError(msg);
-      toast.danger("撤销失败", msg);
-    },
-  });
-
-  const running = run.isPending || retryFailed.isPending || undo.isPending;
 
   useEffect(() => {
     if (!running) return;
@@ -324,8 +497,16 @@ export function RestorePage() {
   const incompleteTargets = useMemo(() => {
     if (!report) return [];
     const set = new Set<string>();
+    // 后端重试按“标题/显示名”过滤，同名目标无法区分。若同名项里已有成功的，
+    // 重试会把成功项再移动一次；这种目标只能整体“再恢复一次”，不能走精确重试。
+    const succeededNames = new Set(
+      report.steps.filter((s) => s.status === "success").map((s) => s.targetName),
+    );
     for (const s of report.steps) {
-      if (s.status !== "success") set.add(s.targetName);
+      // 钩子/专注模式步骤不是场景目标，交给重试只会得到 0 步报告
+      if (isRetryableStep(s) && !succeededNames.has(s.targetName)) {
+        set.add(s.targetName);
+      }
     }
     return [...set];
   }, [report]);
@@ -348,6 +529,28 @@ export function RestorePage() {
     );
   }
 
+  // 读取失败 ≠ 没有工作空间：不能把数据库/权限错误显示成“还没有可恢复的工作空间”
+  if (workspaces.isError) {
+    return (
+      <Card className="flex flex-col gap-2.5">
+        <ErrorNote
+          message={`读取工作空间失败：${String(workspaces.error?.message ?? "未知错误")}`}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={workspaces.isFetching}
+            onClick={() => workspaces.refetch()}
+          >
+            <RefreshCw size={13} className={workspaces.isFetching ? "animate-spin" : ""} />
+            重试
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
   if ((workspaces.data ?? []).length === 0) {
     return (
       <EmptyState
@@ -366,14 +569,31 @@ export function RestorePage() {
   const headline = report
     ? reportCancelled
       ? { title: "恢复已取消", tone: "warning" as const, icon: CircleSlash }
-      : report.failed === 0 && report.skipped === 0
-        ? { title: "全部恢复完成", tone: "success" as const, icon: CheckCircle2 }
-        : report.succeeded > 0
-          ? { title: "部分恢复完成", tone: "warning" as const, icon: AlertTriangle }
-          : report.failed === 0
-            ? { title: "步骤均已跳过", tone: "warning" as const, icon: CircleSlash }
-            : { title: "恢复未成功", tone: "danger" as const, icon: XCircle }
+      : report.totalSteps === 0
+        ? { title: "没有可执行的项目", tone: "warning" as const, icon: AlertTriangle }
+        : report.failed === 0 && report.skipped === 0
+          ? { title: "全部恢复完成", tone: "success" as const, icon: CheckCircle2 }
+          : report.succeeded > 0
+            ? { title: "部分恢复完成", tone: "warning" as const, icon: AlertTriangle }
+            : report.failed === 0
+              ? { title: "步骤均已跳过", tone: "warning" as const, icon: CircleSlash }
+              : { title: "恢复未成功", tone: "danger" as const, icon: XCircle }
     : null;
+
+  // 撤销报告只有在“全部还原成功且确实有窗口”时才敢说“已撤销”，否则如实显示
+  const reportTitle = !report
+    ? ""
+    : !isUndoReport
+      ? (headline?.title ?? "")
+      : report.steps.some((s) => s.code === "cancelled")
+        ? "撤销已取消"
+        : report.totalSteps === 0
+          ? "没有可撤销的窗口"
+          : report.failed === 0 && report.skipped === 0
+            ? "已撤销上次恢复"
+            : report.succeeded > 0
+              ? "撤销未完全还原"
+              : "撤销未成功";
 
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-4 lg:flex-row">
@@ -392,6 +612,7 @@ export function RestorePage() {
                   disabled={running}
                   onClick={() => {
                     autoTriggeredFor.current = null;
+                    savedReportRef.current = null;
                     setAutoPausedNote(null);
                     setParams({ workspace: s.id });
                     setReport(null);
@@ -427,6 +648,27 @@ export function RestorePage() {
       {/* 右侧三态主体 */}
       <div className="flex min-w-0 flex-1 flex-col gap-3.5">
         {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
+
+        {/* 别的恢复任务（托盘 / 全局快捷键）正在跑：说清原因并给一个取消入口，而不是只把按钮变灰 */}
+        {busy.data === true && !running ? (
+          <div className="flex items-start gap-2 rounded-[10px] border border-warning/35 bg-warning/10 px-3.5 py-2.5 text-aux text-warning">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">另一个恢复任务正在执行</p>
+              <p className="mt-0.5 text-[11px]">
+                可能来自托盘或全局快捷键。等它结束，或在这里请求安全停止（不会关闭已启动的软件）。
+              </p>
+            </div>
+            <Button
+              size="xs"
+              variant="secondary"
+              disabled={cancelling}
+              onClick={() => cancelRun.mutate()}
+            >
+              {cancelling ? "正在停止…" : "请求取消"}
+            </Button>
+          </div>
+        ) : null}
 
         {autoPausedNote && !report && !running ? (
           <div className="flex items-start gap-2 rounded-[10px] border border-warning/35 bg-warning/10 px-3.5 py-2.5 text-aux text-warning">
@@ -678,9 +920,7 @@ export function RestorePage() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <headline.icon size={17} className={toneText(headline.tone)} />
-                  <h2 className="text-card font-semibold text-ink">
-                    {isUndoReport ? "已撤销上次恢复" : headline.title}
-                  </h2>
+                  <h2 className="text-card font-semibold text-ink">{reportTitle}</h2>
                   <Badge tone={headline.tone}>
                     完成 {report.succeeded}/{report.totalSteps}
                   </Badge>
@@ -785,7 +1025,15 @@ export function RestorePage() {
                     step={s}
                     showTech={showTech}
                     onRetry={
-                      !isUndoReport && active && s.status !== "success" && s.code !== "focus_mode"
+                      // 钩子/专注模式步骤没有对应的窗口或资源，重试它们只会拿到 0 步报告；
+                      // 同名目标里已有成功项时也不做单条重试，避免把成功窗口再移动一次。
+                      !isUndoReport &&
+                      active &&
+                      isRetryableStep(s) &&
+                      !report.steps.some(
+                        (other) =>
+                          other.status === "success" && other.targetName === s.targetName,
+                      )
                         ? () => retryFailed.mutate([s.targetName])
                         : undefined
                     }

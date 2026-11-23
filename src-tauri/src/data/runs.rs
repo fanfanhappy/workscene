@@ -42,6 +42,11 @@ pub async fn save(
         } else {
             "failed"
         }
+    } else if report.succeeded == 0 {
+        // 全是 skipped，或目标过滤后为 0 步：不能记为“成功”。
+        "skipped"
+    } else if report.skipped > 0 {
+        "partial"
     } else {
         "completed"
     };
@@ -253,6 +258,39 @@ mod tests {
         assert_eq!(steps[1].step_type, "resource");
         assert_eq!(steps[1].error_code.as_deref(), Some("resource_open_failed"));
         assert!(steps[0].state_restored);
+    }
+
+    #[tokio::test]
+    async fn all_skipped_is_not_completed() {
+        let db = crate::data::in_memory().await.unwrap();
+        let report = RestoreReport {
+            run_id: "run-skip".into(),
+            scene_id: "scene".into(),
+            scene_name: "跳过".into(),
+            started_at: 1,
+            finished_at: 2,
+            total_steps: 1,
+            succeeded: 0,
+            failed: 0,
+            skipped: 1,
+            steps: vec![RestoreStepResult {
+                step_type: "window".into(),
+                target_name: "未运行".into(),
+                status: StepStatus::Skipped,
+                message: "未找到".into(),
+                match_note: String::new(),
+                duration_ms: 1,
+                delta_x: None,
+                delta_y: None,
+                state_restored: false,
+                code: Some("window_not_found".into()),
+            }],
+            display_notes: vec![],
+            pre_restore_scene_id: None,
+        };
+        save(&db, &report, None, None, "test").await.unwrap();
+        let runs = list(&db, 10).await.unwrap();
+        assert_eq!(runs[0].status, "skipped");
     }
 
     #[tokio::test]

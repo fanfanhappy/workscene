@@ -106,7 +106,14 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                     close_active_from_tray(&handle);
                 });
             } else if id == "quit" {
-                app.exit(0);
+                if crate::restore::is_busy() {
+                    let _ = app.emit(
+                        "tray:notice",
+                        "恢复任务正在执行，请等它结束或先在恢复中心取消后再退出",
+                    );
+                } else {
+                    app.exit(0);
+                }
             } else if let Some(ws_id) = id.strip_prefix(RESTORE_PREFIX) {
                 let handle = app.clone();
                 let ws_id = ws_id.to_string();
@@ -164,7 +171,9 @@ fn restore_from_tray(app: &AppHandle, workspace_id: &str) {
         let _ = data::extras::apply_matching_profile(&db, workspace_id, &mut scene).await;
         let hook_step = if let Ok(hooks) = data::extras::get_hooks(&db, workspace_id).await {
             if hooks.enabled && !hooks.pre_restore_cmd.trim().is_empty() {
-                Some(crate::commands::run_pre_restore_hook_step(&hooks.pre_restore_cmd))
+                Some(crate::commands::run_pre_restore_hook_step(
+                    &hooks.pre_restore_cmd,
+                ))
             } else {
                 None
             }
@@ -266,7 +275,10 @@ fn take_snapshot_now(app: &AppHandle) {
         }
         Ok(None) => {
             show_main(app);
-            let _ = app.emit("tray:notice", "还没有可备份的工作空间，请先捕获并保存一个工作空间");
+            let _ = app.emit(
+                "tray:notice",
+                "还没有可备份的工作空间，请先捕获并保存一个工作空间",
+            );
         }
         Err(e) => {
             let _ = app.emit("tray:notice", format!("托盘快照保存失败：{e}"));
@@ -276,6 +288,10 @@ fn take_snapshot_now(app: &AppHandle) {
 
 /// 托盘菜单「收工」：优雅关闭当前激活工作空间（若无则首个工作空间）的窗口
 fn close_active_from_tray(app: &AppHandle) {
+    let Some(_guard) = crate::restore::try_acquire() else {
+        let _ = app.emit("tray:notice", "恢复任务正在执行，请等它结束再收工");
+        return;
+    };
     let db = app.state::<data::Db>().inner().clone();
     let res = tauri::async_runtime::block_on(async {
         let ws_id = match data::snapshots::active_workspace(&db).await? {
@@ -291,7 +307,9 @@ fn close_active_from_tray(app: &AppHandle) {
         let mut scene = data::workspaces::to_scene(&db, &ws_id).await?;
         let _ = data::extras::apply_matching_profile(&db, &ws_id, &mut scene).await;
         let name = scene.name.clone();
-        let hooks = data::extras::get_hooks(&db, &ws_id).await.unwrap_or_default();
+        let hooks = data::extras::get_hooks(&db, &ws_id)
+            .await
+            .unwrap_or_default();
         let closed = crate::restore::close_workspace_windows(&scene)?;
         if hooks.enabled && !hooks.post_close_cmd.trim().is_empty() {
             let _ = data::extras::run_hook_command(&hooks.post_close_cmd);
@@ -334,10 +352,14 @@ pub fn intercept_close(app: &tauri::App) {
 }
 
 /// 在独立线程里注册全局快捷键并跑消息循环（实现已移到 win::hotkey）
-pub fn spawn_hotkey(app: AppHandle, preset: &str, workspace_slots: bool) {
+pub fn spawn_hotkey(
+    app: AppHandle,
+    preset: &str,
+    workspace_slots: bool,
+) -> crate::win::hotkey::HotkeyUpdateResult {
     crate::win::hotkey::spawn(
         app,
         crate::win::hotkey::parse_preset(preset),
         workspace_slots,
-    );
+    )
 }

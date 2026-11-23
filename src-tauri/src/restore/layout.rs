@@ -83,8 +83,13 @@ pub fn clamp_visible(rect: Area, work: Area) -> Area {
     let min_w = (rect.w * VISIBLE).max(80.0);
     let min_h = (rect.h * VISIBLE).max(60.0);
 
-    let x = rect.x.clamp(work.x - rect.w + min_w, work.x + work.w - min_w);
-    let y = rect.y.clamp(work.y - rect.h + min_h, work.y + work.h - min_h);
+    // 工作区极小时 lo 可能大于 hi，f64::clamp 会 panic；先保证区间有序。
+    let lo_x = work.x - rect.w + min_w;
+    let hi_x = (work.x + work.w - min_w).max(lo_x);
+    let lo_y = work.y - rect.h + min_h;
+    let hi_y = (work.y + work.h - min_h).max(lo_y);
+    let x = rect.x.clamp(lo_x, hi_x);
+    let y = rect.y.clamp(lo_y, hi_y);
 
     Area { x, y, ..rect }
 }
@@ -181,6 +186,15 @@ mod tests {
         let lost = Area::new(-2000.0, 220.0, 1709.0, 962.0);
         let fixed = clamp_visible(lost, WORK);
         assert!(fixed.x + fixed.w > WORK.x + 80.0, "必须回到可见区域");
+    }
+
+    #[test]
+    fn clamp_visible_does_not_panic_on_tiny_work_area() {
+        // 极小工作区会让可见比例下界超过上界；必须收敛为有效区间而不是 panic。
+        let tiny = Area::new(0.0, 0.0, 100.0, 80.0);
+        let rect = Area::new(0.0, 0.0, 100.0, 80.0);
+        let fixed = clamp_visible(rect, tiny);
+        assert!(fixed.x.is_finite() && fixed.y.is_finite());
     }
 
     #[test]

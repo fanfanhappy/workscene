@@ -41,12 +41,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       qc.invalidateQueries({ queryKey: ["runs"] });
       qc.invalidateQueries({ queryKey: ["snapshots"] });
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
-      if (r.failed === 0) {
+      if (r.failed === 0 && r.skipped === 0 && r.totalSteps > 0) {
         toast.success(`已从托盘恢复「${r.sceneName}」`, `完成 ${r.succeeded} 项`);
       } else {
         toast.warning(
-          `托盘恢复「${r.sceneName}」部分完成`,
-          `成功 ${r.succeeded} · 未完成 ${r.failed + r.skipped}`,
+          `托盘恢复「${r.sceneName}」未全部完成`,
+          r.totalSteps === 0
+            ? "没有可执行的项目"
+            : `成功 ${r.succeeded} · 跳过 ${r.skipped} · 失败 ${r.failed}`,
         );
       }
     });
@@ -78,12 +80,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       toast.warning("后台任务提示", e.payload);
     });
 
+    const unlistenResume = listen<number>("system:resumed", () => {
+      toast.info(
+        "检测到系统唤醒",
+        "已暂停自动快照 90 秒，等桌面稳定后再保存，避免驱动重排后的窗口位置被记成现场。",
+      );
+    });
+
     return () => {
       unlistenRestore.then((fn) => fn()).catch(() => undefined);
       unlistenSnap.then((fn) => fn()).catch(() => undefined);
       unlistenAuto.then((fn) => fn()).catch(() => undefined);
       unlistenDisplays.then((fn) => fn()).catch(() => undefined);
       unlistenNotice.then((fn) => fn()).catch(() => undefined);
+      unlistenResume.then((fn) => fn()).catch(() => undefined);
     };
   }, [qc]);
 
@@ -96,9 +106,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
   const collapsed = userCollapsed || isNarrow;
 
+  /**
+   * 目标地址是否真的离开了当前上下文。
+   * 同一 pathname 但带着查询参数（如 /workspaces?id=A -> /workspaces）也算离开，
+   * 不能只比较 pathname，否则未保存的窗口摆法会被静默丢掉。
+   */
+  const leavesCurrentContext = (to: string) =>
+    location.pathname !== to || location.search !== "";
+
   /** 若布局画布有未保存改动，跨页导航前弹出确认，避免静默丢失 */
   const guardedNavigate = async (to: string) => {
-    if (location.pathname === to) return;
+    if (!leavesCurrentContext(to)) return;
     if (useUiStore.getState().hasUnsavedLayout) {
       const ok = await confirmAction({
         title: "放弃未保存的窗口摆法？",
@@ -203,7 +221,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 to={to}
                 end={end}
                 onClick={(e) => {
-                  if (useUiStore.getState().hasUnsavedLayout && location.pathname !== to) {
+                  if (useUiStore.getState().hasUnsavedLayout && leavesCurrentContext(to)) {
                     e.preventDefault();
                     void guardedNavigate(to);
                   }
@@ -248,7 +266,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <NavLink
             to="/settings"
             onClick={(e) => {
-              if (useUiStore.getState().hasUnsavedLayout && location.pathname !== "/settings") {
+              if (
+                useUiStore.getState().hasUnsavedLayout &&
+                leavesCurrentContext("/settings")
+              ) {
                 e.preventDefault();
                 void guardedNavigate("/settings");
               }
@@ -270,15 +291,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </NavLink>
 
           {collapsed ? (
-            <button
-              type="button"
-              onClick={toggleSidebar}
-              title="展开侧栏"
-              aria-label="展开侧栏"
-              className="mx-auto grid size-7 cursor-pointer place-items-center rounded-[7px] text-ink-3 hover:bg-raised hover:text-ink"
-            >
-              <PanelLeftOpen size={14} />
-            </button>
+            // 窄窗口下 collapsed 由 isNarrow 强制为真，展开按钮点了也不会生效，干脆不显示
+            isNarrow ? null : (
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                title="展开侧栏"
+                aria-label="展开侧栏"
+                className="mx-auto grid size-7 cursor-pointer place-items-center rounded-[7px] text-ink-3 hover:bg-raised hover:text-ink"
+              >
+                <PanelLeftOpen size={14} />
+              </button>
+            )
           ) : (
             <p className="px-2.5 font-mono text-[10px] text-ink-3">
               v{info.data?.version ?? "1.1.3"} · 本地离线优先

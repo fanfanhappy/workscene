@@ -339,7 +339,14 @@ pub fn apply(
     relaunch_missing: bool,
     pre_restore_scene_id: Option<String>,
 ) -> AppResult<RestoreReport> {
-    apply_with_options(app, scene, relaunch_missing, false, pre_restore_scene_id, None)
+    apply_with_options(
+        app,
+        scene,
+        relaunch_missing,
+        false,
+        pre_restore_scene_id,
+        None,
+    )
 }
 
 /// 按可选目标白名单恢复（用于「仅重试失败/未完成项」，不重复折腾已成功窗口）
@@ -486,8 +493,8 @@ pub fn apply_with_options(
         let rect = target_info.rect;
         // 阈值 = max(8px, 2×scale, 窗口宽度的 0.5%)：
         // 大窗口上 8px 的绝对误差没有视觉意义，按比例算更贴近"看起来一样"
-        let threshold = delta_threshold(target_info.dpi)
-            .max(((rect.2 as f64) * 0.005).round() as i32);
+        let threshold =
+            delta_threshold(target_info.dpi).max(((rect.2 as f64) * 0.005).round() as i32);
 
         let pool: Vec<Candidate> = current
             .iter()
@@ -514,7 +521,9 @@ pub fn apply_with_options(
                     threshold,
                     Duration::from_millis(250),
                 );
-                if delta.0 > threshold || (win.show_state == ShowState::Maximized && !state_restored) {
+                if delta.0 > threshold
+                    || (win.show_state == ShowState::Maximized && !state_restored)
+                {
                     // 二次校正 + 更长的稳定窗口（慢应用 / 自己会挪窗口的应用）
                     state_restored = place_window(hwnd, rect, win.show_state);
                     delta = wait_for_settle(
@@ -527,8 +536,7 @@ pub fn apply_with_options(
                 }
 
                 let position_ok = win.show_state == ShowState::Minimized || delta.0 <= threshold;
-                let maximized_failed =
-                    win.show_state == ShowState::Maximized && !state_restored;
+                let maximized_failed = win.show_state == ShowState::Maximized && !state_restored;
 
                 let status = if position_ok && !maximized_failed {
                     StepStatus::Success
@@ -703,8 +711,14 @@ pub fn apply_with_options(
         steps.push(step);
     }
 
-    let succeeded = steps.iter().filter(|s| s.status == StepStatus::Success).count();
-    let failed = steps.iter().filter(|s| s.status == StepStatus::Failed).count();
+    let succeeded = steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Success)
+        .count();
+    let failed = steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Failed)
+        .count();
     let skipped = steps
         .iter()
         .filter(|s| matches!(s.status, StepStatus::Skipped | StepStatus::NeedsReview))
@@ -844,12 +858,22 @@ fn inject_new_window_flag(exe: &str, args: &mut Vec<String>) {
         .to_lowercase();
     let has_flag = |f: &str| args.iter().any(|a| a.eq_ignore_ascii_case(f));
     match name.as_str() {
-        "chrome.exe" | "msedge.exe" | "brave.exe" | "vivaldi.exe" | "arc.exe" | "firefox.exe" => {
+        "firefox.exe" => {
+            // Firefox 的命令行选项是单横线 `-new-window`，不是 Chromium 的 `--new-window`。
+            if !has_flag("-new-window") && !has_flag("--new-window") {
+                args.insert(0, "-new-window".into());
+            }
+        }
+        "chrome.exe" | "msedge.exe" | "brave.exe" | "vivaldi.exe" | "arc.exe" => {
             if !has_flag("--new-window") && !has_flag("-new-window") {
                 args.insert(0, "--new-window".into());
             }
         }
-        "code.exe" | "code - insiders.exe" | "cursor.exe" | "windsurf.exe" | "trae.exe"
+        "code.exe"
+        | "code - insiders.exe"
+        | "cursor.exe"
+        | "windsurf.exe"
+        | "trae.exe"
         | "antigravity.exe" => {
             if !has_flag("-n") && !has_flag("--new-window") {
                 args.insert(0, "-n".into());
@@ -942,20 +966,23 @@ fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32), target_state: ShowState)
         ShowState::Maximized => {
             // 先给还原矩形，再最大化；SetWindowPlacement 失败时用 ShowWindow(SW_SHOWMAXIMIZED) 兜底
             window::set_window_rect(hwnd, rect.0, rect.1, rect.2, rect.3);
-            let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
+            let _ =
+                window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Maximized);
             if !window::is_zoomed(hwnd) {
                 let _ = window::show_maximized(hwnd);
             }
         }
         ShowState::Minimized => {
             // 保持后台最小化，同时写好还原矩形，不强行弹满屏幕
-            let _ = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Minimized);
+            let _ =
+                window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Minimized);
             if !window::is_iconic(hwnd) {
                 let _ = window::minimize_window(hwnd);
             }
         }
         ShowState::Normal => {
-            let placed = window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Normal);
+            let placed =
+                window::apply_placement(hwnd, rect.0, rect.1, rect.2, rect.3, ShowState::Normal);
             if !placed {
                 // 退一步：只改位置，至少布局对得上
                 window::set_window_rect(hwnd, rect.0, rect.1, rect.2, rect.3);
@@ -1006,6 +1033,13 @@ fn wait_for_settle(
 /// 不能拿它和还原矩形比较，否则会把成功的最大化判成失败；
 /// 这种情况下只校验「窗口中心是否落在目标显示器内」+ 是否真的处于最大化。
 fn verify(hwnd: HWND, target: &Target, state: ShowState) -> (i32, i32, i32) {
+    // 最小化窗口的 GetWindowRect 是 (-32000,-32000)，拿它和目标还原矩形比较
+    // 会得到 3 万像素的假偏差，还会让 wait_for_settle 误判需要二次校正。
+    // 最小化状态本身由 place_window/state_restored 校验，这里不再比较位置。
+    if state == ShowState::Minimized {
+        return (if window::is_iconic(hwnd) { 0 } else { i32::MAX }, 0, 0);
+    }
+
     let Some(r) = window::current_rect(hwnd) else {
         return (i32::MAX, 0, 0);
     };
@@ -1118,7 +1152,11 @@ mod tests {
 
     #[test]
     fn opener_always_uses_default_system_association() {
-        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Microsoft VS Code\Code.exe", 1);
+        let scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Microsoft VS Code\Code.exe",
+            1,
+        );
         let folder = SceneResource {
             item_type: "folder".into(),
             target: r"D:\work\app".into(),
@@ -1150,7 +1188,11 @@ mod tests {
     /// 所以测的是决策点本身（match_window 返回 None 时收工不会动手）。
     #[test]
     fn matcher_never_picks_unrelated_window() {
-        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Mozilla Firefox\firefox.exe", 1);
+        let scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            1,
+        );
         let target = (0, 0, 1920, 1080);
         let intruder = Candidate {
             hwnd: 999,
@@ -1191,7 +1233,10 @@ mod tests {
 
     #[test]
     fn policy_parses_three_values_and_defaults_safely() {
-        assert_eq!(parse_policy("reuse_if_matched"), ReusePolicy::ReuseIfMatched);
+        assert_eq!(
+            parse_policy("reuse_if_matched"),
+            ReusePolicy::ReuseIfMatched
+        );
         assert_eq!(parse_policy("ALWAYS_LAUNCH"), ReusePolicy::AlwaysLaunch);
         assert_eq!(parse_policy("reuse_or_launch"), ReusePolicy::ReuseOrLaunch);
         // 未知值必须退化成最保守的默认策略，而不是 panic 或不启动
@@ -1282,11 +1327,33 @@ mod tests {
     }
 
     #[test]
+    fn firefox_uses_single_dash_new_window_flag() {
+        let scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            2,
+        );
+        let plans = plan_launches(
+            &scene,
+            &candidate(r"C:\Program Files\Mozilla Firefox\firefox.exe", 1),
+        );
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].args.iter().any(|a| a == "-new-window"));
+        assert!(!plans[0].args.iter().any(|a| a == "--new-window"));
+    }
+
+    #[test]
     fn multi_window_chrome_injects_new_window_flag() {
-        let scene = scene_with("reuse_or_launch", r"C:\Program Files\Google\Chrome\chrome.exe", 2);
-        let plans = plan_launches(&scene, &candidate(r"C:\Program Files\Google\Chrome\chrome.exe", 1));
+        let scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Google\Chrome\chrome.exe",
+            2,
+        );
+        let plans = plan_launches(
+            &scene,
+            &candidate(r"C:\Program Files\Google\Chrome\chrome.exe", 1),
+        );
         assert_eq!(plans.len(), 1);
         assert!(plans[0].args.iter().any(|a| a == "--new-window"));
     }
 }
-

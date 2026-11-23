@@ -83,17 +83,22 @@ pub fn score_window(
 ) -> f64 {
     let mut score = 0.0;
 
-    let exact_path = match (norm_path(&target.process_path), norm_path(&cand.process_path)) {
+    let exact_path = match (
+        norm_path(&target.process_path),
+        norm_path(&cand.process_path),
+    ) {
         (Some(a), Some(b)) if a == b => {
             score += 0.55;
             true
         }
         _ => {
-            // 路径不可读（受保护进程）时退化为进程名匹配，权重明显更低
+            // 路径不可读（受保护进程）时退化为进程名匹配。
+            // 0.30 + 类名 0.25 + 标题 0.15 + 位置 0.05 = 0.75，必须达到 ACCEPT；
+            // 旧值 0.22 的上限只有 0.67，等于让这条回退分支永远失效。
             if !target.process_name.is_empty()
                 && target.process_name.eq_ignore_ascii_case(&cand.process_name)
             {
-                score += 0.22;
+                score += 0.30;
             }
             false
         }
@@ -304,6 +309,29 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_path_falls_back_to_process_name_and_still_matches() {
+        let mut t = target(
+            "项目 - 编辑器",
+            "Chrome_WidgetWin_1",
+            r"C:\Chrome\chrome.exe",
+        );
+        t.process_path = None;
+        let mut c = cand(
+            "项目 - 编辑器",
+            "Chrome_WidgetWin_1",
+            r"C:\Chrome\chrome.exe",
+            (0, 0, 800, 600),
+        );
+        c.process_path = None;
+        let out = match_window(&t, &[c], (0, 0, 800, 600));
+        assert!(
+            out.picked.is_some(),
+            "路径不可读时应能按进程名+类名+标题回退匹配：{}",
+            out.note
+        );
+    }
+
+    #[test]
     fn two_identical_notepads_pick_nearest_instead_of_deadlocking() {
         let t = target("未命名 - 记事本", "Notepad", r"C:\Windows\notepad.exe");
         let c = vec![
@@ -321,13 +349,21 @@ mod tests {
             ),
         ];
         let out = match_window(&t, &c, (0, 0, 800, 600));
-        assert_eq!(out.picked, Some(1), "同应用多实例应优先选位置最近的窗口，不再歧义死锁");
+        assert_eq!(
+            out.picked,
+            Some(1),
+            "同应用多实例应优先选位置最近的窗口，不再歧义死锁"
+        );
         assert!(!out.ambiguous);
     }
 
     #[test]
     fn close_matcher_rejects_unrelated_window_by_title_and_position() {
-        let t = target("项目 A - Chrome", "Chrome_WidgetWin_1", r"C:\Chrome\chrome.exe");
+        let t = target(
+            "项目 A - Chrome",
+            "Chrome_WidgetWin_1",
+            r"C:\Chrome\chrome.exe",
+        );
         let c = vec![cand(
             "哔哩哔哩 - Chrome",
             "Chrome_WidgetWin_1",

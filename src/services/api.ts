@@ -55,6 +55,8 @@ function normalize(raw: unknown): string {
 export const api = {
   getAppInfo: () => call<AppInfo>("system_get_info"),
   getDisplays: () => call<DisplayInfo[]>("system_get_displays"),
+  getHotkeyStatus: () =>
+    call<import("@/types/contract").HotkeyStatus>("system_hotkey_status"),
   captureStart: () => call<CaptureResult>("capture_start"),
   sceneHealth: () => call<SceneHealth>("scene_health"),
   windowSetTheme: (theme: "light" | "dark") => call<void>("window_set_theme", { theme }),
@@ -112,6 +114,25 @@ export const api = {
       launchPriority,
       launchDelayMs,
     }),
+  /** 只提交改动字段，避免失焦保存与点击开关互相覆盖 */
+  workspaceItemPatch: (
+    itemId: string,
+    patch: {
+      reusePolicy?: string;
+      launchArgs?: string | null;
+      enabled?: boolean;
+      launchPriority?: number;
+      launchDelayMs?: number;
+    },
+  ) =>
+    call<void>("workspace_item_patch", {
+      itemId,
+      reusePolicy: patch.reusePolicy ?? null,
+      launchArgs: patch.launchArgs ?? null,
+      enabled: patch.enabled ?? null,
+      launchPriority: patch.launchPriority ?? null,
+      launchDelayMs: patch.launchDelayMs ?? null,
+    }),
   workspaceItemRelocate: (workspaceId: string, itemId: string, newPath: string) =>
     call<WorkspaceItem>("workspace_item_relocate", {
       workspaceId,
@@ -135,6 +156,17 @@ export const api = {
 
   workspaceLayoutUpdate: (workspaceId: string, updates: LayoutUpdate[]) =>
     call<void>("workspace_layout_update", { workspaceId, updates }),
+  /** 删除 + 更新一次事务提交，画布保存不会只成功一半 */
+  workspaceLayoutSave: (
+    workspaceId: string,
+    removedWindowIds: string[],
+    updates: LayoutUpdate[],
+  ) =>
+    call<void>("workspace_layout_save", {
+      workspaceId,
+      removedWindowIds,
+      updates,
+    }),
   workspaceWindowDelete: (workspaceId: string, windowId: string) =>
     call<void>("workspace_window_delete", { workspaceId, windowId }),
   workspaceItemDelete: (workspaceId: string, itemId: string) =>

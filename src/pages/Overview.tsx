@@ -24,7 +24,6 @@ import {
   Button,
   Card,
   EmptyState,
-  ErrorNote,
   Metric,
   SectionTitle,
   Spinner,
@@ -95,7 +94,13 @@ export function OverviewPage() {
       dismissHint.mutate();
       qc.invalidateQueries({ queryKey: ["workspaces"] });
       qc.invalidateQueries({ queryKey: ["runs"] });
-      if (report.failed === 0 && report.skipped === 0) {
+      // 恢复会写入保护快照与新的执行记录，存储/健康/快照列表必须一起失效
+      qc.invalidateQueries({ queryKey: ["storage-stats"] });
+      qc.invalidateQueries({ queryKey: ["snapshots"] });
+      qc.invalidateQueries({ queryKey: ["scene-health"] });
+      if (report.totalSteps === 0) {
+        toast.warning("上次现场没有可恢复的项目", "未对桌面做任何改动");
+      } else if (report.failed === 0 && report.skipped === 0) {
         toast.success("已恢复上次现场", `共完成 ${report.succeeded} 项`);
       } else if (report.succeeded > 0) {
         toast.warning(
@@ -144,7 +149,12 @@ export function OverviewPage() {
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-4">
       {/* 崩溃恢复横幅 */}
-      {hint.data ? (
+      {hint.isError ? (
+        <QueryError
+          message={`无法读取崩溃恢复提示：${String(hint.error?.message ?? "未知错误")}`}
+          onRetry={() => hint.refetch()}
+        />
+      ) : hint.data ? (
         <Card className="border-warning/35 bg-warning/8">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
@@ -155,7 +165,16 @@ export function OverviewPage() {
               <p className="mt-0.5 text-aux text-ink-2">
                 {formatTime(hint.data.crashedAt)}
                 {hint.data.workspaceName ? ` · 可恢复「${hint.data.workspaceName}」` : ""}
+                {hint.data.snapshotAt ? ` · 快照 ${formatTime(hint.data.snapshotAt)}` : ""}
+                {hint.data.snapshotType
+                  ? ` · ${snapshotTypeLabel(hint.data.snapshotType)}`
+                  : ""}
               </p>
+              {hint.data.snapshotType === "protection" ? (
+                <p className="mt-1 text-[11px] text-warning">
+                  这是恢复前保护快照，恢复的是上次恢复前状态。
+                </p>
+              ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {hint.data.snapshotId ? (
@@ -205,14 +224,29 @@ export function OverviewPage() {
             </div>
           </div>
 
-          {capture.isError ? <ErrorNote message={String(capture.error.message)} /> : null}
+          {capture.isError ? (
+            <QueryError
+              message={`桌面扫描失败：${String(capture.error?.message ?? "未知错误")}`}
+              onRetry={() => capture.refetch()}
+            />
+          ) : null}
 
           <div className="flex items-end gap-6">
-            <Metric label="顶层窗口" value={capture.isPending ? "—" : stats.windows} />
-            <Metric label="运行应用" value={capture.isPending ? "—" : stats.apps} />
+            <Metric
+              label="顶层窗口"
+              value={capture.isPending || capture.isError ? "—" : stats.windows}
+            />
+            <Metric
+              label="运行应用"
+              value={capture.isPending || capture.isError ? "—" : stats.apps}
+            />
             <Metric
               label="显示器"
-              value={capture.isPending ? "—" : (capture.data?.displays.length ?? 0)}
+              value={
+                capture.isPending || capture.isError
+                  ? "—"
+                  : (capture.data?.displays.length ?? 0)
+              }
             />
           </div>
 
@@ -222,6 +256,10 @@ export function OverviewPage() {
               windows={capture.data.windows}
               height={145}
             />
+          ) : capture.isError ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-aux text-ink-3">
+              <AlertTriangle size={14} className="text-warning" /> 未获取到桌面窗口
+            </div>
           ) : (
             <div className="flex items-center gap-2 py-8 text-aux text-ink-3">
               <Spinner /> 扫描桌面窗口…
@@ -233,32 +271,55 @@ export function OverviewPage() {
           <Card className="flex flex-col gap-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-card font-semibold text-ink">自动快照与存储</span>
-              <Badge tone={settings.data?.autoSnapshotEnabled ? "success" : "neutral"}>
-                {settings.data?.autoSnapshotEnabled ? "已开启" : "已关闭"}
-              </Badge>
+              {settings.isError ? (
+                <button
+                  type="button"
+                  onClick={() => settings.refetch()}
+                  className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-danger hover:underline"
+                >
+                  <RefreshCw size={11} /> 读取失败，重试
+                </button>
+              ) : (
+                <Badge tone={settings.data?.autoSnapshotEnabled ? "success" : "neutral"}>
+                  {settings.data?.autoSnapshotEnabled ? "已开启" : "已关闭"}
+                </Badge>
+              )}
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
-                <p className="text-[10px] text-ink-3">快照</p>
-                <p className="tabnum text-body font-semibold text-ink">
-                  {storage.data?.snapshotCount ?? 0} 份
-                </p>
+            {storage.isError ? (
+              <div className="flex items-center justify-between gap-2 rounded-[8px] bg-canvas/70 px-2.5 py-2 text-[11px] text-danger">
+                <span>存储信息读取失败</span>
+                <button
+                  type="button"
+                  onClick={() => storage.refetch()}
+                  className="inline-flex cursor-pointer items-center gap-1 hover:underline"
+                >
+                  <RefreshCw size={11} /> 重试
+                </button>
               </div>
-              <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
-                <p className="text-[10px] text-ink-3">占用</p>
-                <p className="tabnum text-body font-semibold text-ink">
-                  {formatBytes(
-                    (storage.data?.dbBytes ?? 0) + (storage.data?.snapshotBytes ?? 0),
-                  )}
-                </p>
+            ) : (
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
+                  <p className="text-[10px] text-ink-3">快照</p>
+                  <p className="tabnum text-body font-semibold text-ink">
+                    {storage.data?.snapshotCount ?? 0} 份
+                  </p>
+                </div>
+                <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
+                  <p className="text-[10px] text-ink-3">占用</p>
+                  <p className="tabnum text-body font-semibold text-ink">
+                    {formatBytes(
+                      (storage.data?.dbBytes ?? 0) + (storage.data?.snapshotBytes ?? 0),
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
+                  <p className="text-[10px] text-ink-3">报告</p>
+                  <p className="tabnum text-body font-semibold text-ink">
+                    {storage.data?.runCount ?? 0} 条
+                  </p>
+                </div>
               </div>
-              <div className="rounded-[8px] bg-canvas/70 px-2.5 py-1.5">
-                <p className="text-[10px] text-ink-3">报告</p>
-                <p className="tabnum text-body font-semibold text-ink">
-                  {storage.data?.runCount ?? 0} 条
-                </p>
-              </div>
-            </div>
+            )}
             <div className="flex items-center justify-between gap-2 text-[11px] text-ink-3">
               <span className="flex min-w-0 items-center gap-1 truncate font-mono">
                 <HardDrive size={11} className="shrink-0" />
@@ -281,7 +342,9 @@ export function OverviewPage() {
                 <Spinner /> 检测显示器中…
               </div>
             ) : (capture.data?.displays ?? []).length === 0 ? (
-              <p className="py-3 text-aux text-ink-3">暂未读取到显示器信息</p>
+              <p className="py-3 text-aux text-ink-3">
+                {capture.isError ? "显示器信息读取失败，请点击上方「重试」" : "暂未读取到显示器信息"}
+              </p>
             ) : (
               <ul className="flex flex-col gap-1.5">
                 {(capture.data?.displays ?? []).map((d: DisplayInfo) => (
@@ -322,7 +385,12 @@ export function OverviewPage() {
               ) : null
             }
           />
-          {workspaces.isPending ? (
+          {workspaces.isError ? (
+            <QueryError
+              message={`工作空间列表读取失败：${String(workspaces.error?.message ?? "未知错误")}`}
+              onRetry={() => workspaces.refetch()}
+            />
+          ) : workspaces.isPending ? (
             <Card className="flex items-center gap-2 text-aux text-ink-3">
               <Spinner /> 读取中…
             </Card>
@@ -415,7 +483,14 @@ export function OverviewPage() {
             }
           />
           <Card padded={false} className="flex-1 overflow-hidden">
-            {runs.isPending ? (
+            {runs.isError ? (
+              <div className="p-3">
+                <QueryError
+                  message={`恢复记录读取失败：${String(runs.error?.message ?? "未知错误")}`}
+                  onRetry={() => runs.refetch()}
+                />
+              </div>
+            ) : runs.isPending ? (
               <div className="flex items-center gap-2 p-4 text-aux text-ink-3">
                 <Spinner /> 读取中…
               </div>
@@ -430,7 +505,9 @@ export function OverviewPage() {
                   const tone =
                     r.status === "completed"
                       ? "success"
-                      : r.status === "partial" || r.status === "cancelled"
+                      : r.status === "partial" ||
+                          r.status === "cancelled" ||
+                          r.status === "skipped"
                         ? "warning"
                         : "danger";
                   const label =
@@ -440,7 +517,9 @@ export function OverviewPage() {
                         ? "部分"
                         : r.status === "cancelled"
                           ? "取消"
-                          : "失败";
+                          : r.status === "skipped"
+                            ? "跳过"
+                            : "失败";
                   return (
                     <li key={r.id}>
                       <button
@@ -476,13 +555,45 @@ export function OverviewPage() {
         </section>
       </div>
 
-      {(health.data?.corrupted.length ?? 0) > 0 ? (
+      {health.isError ? (
+        <QueryError
+          message={`快照健康检查失败：${String(health.error?.message ?? "未知错误")}`}
+          onRetry={() => health.refetch()}
+        />
+      ) : (health.data?.corrupted.length ?? 0) > 0 ? (
         <div className="rounded-[10px] border border-warning/35 bg-warning/8 px-3.5 py-2 text-aux text-warning">
-          检测到 {health.data!.corrupted.length} 个损坏的快照文件（已隔离）。
+          检测到 {health.data!.corrupted.length} 个损坏的快照文件（不会自动加载，建议在历史中删除）。
         </div>
       ) : null}
     </div>
   );
+}
+
+/** 查询失败时的统一提示 + 重试（避免把后端错误渲染成"空数据"） */
+function QueryError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-[10px] border border-danger/30 bg-danger/10 px-3.5 py-2.5 text-aux text-danger">
+      <span className="min-w-0 flex-1 truncate">{message}</span>
+      <Button size="xs" variant="ghost" onClick={onRetry}>
+        <RefreshCw size={12} /> 重试
+      </Button>
+    </div>
+  );
+}
+
+function snapshotTypeLabel(type: string): string {
+  switch (type) {
+    case "protection":
+      return "恢复前保护快照";
+    case "auto":
+      return "自动快照";
+    case "manual":
+      return "手动快照";
+    case "initial":
+      return "初始快照";
+    default:
+      return "快照";
+  }
 }
 
 function formatBytes(bytes: number): string {

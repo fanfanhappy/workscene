@@ -34,6 +34,7 @@ export function Button({
   ariaLabel,
   className = "",
   type = "button",
+  autoFocus = false,
 }: {
   variant?: ButtonVariant;
   size?: "xs" | "sm" | "md";
@@ -44,6 +45,8 @@ export function Button({
   ariaLabel?: string;
   className?: string;
   type?: "button" | "submit";
+  /** 弹窗打开时优先获得焦点（由 Dialog 读取 data-autofocus，而不是浏览器原生 autoFocus） */
+  autoFocus?: boolean;
 }) {
   const height =
     size === "xs"
@@ -58,6 +61,7 @@ export function Button({
       aria-label={ariaLabel ?? (typeof children === "string" ? undefined : title)}
       disabled={disabled}
       onClick={onClick}
+      data-autofocus={autoFocus ? "true" : undefined}
       className={`inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${height} ${buttonStyles[variant]} ${className}`}
     >
       {children}
@@ -387,6 +391,16 @@ export function Tabs<T extends string>({
 const dialogEscStack: Array<() => void> = [];
 let escListenerBound = false;
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** 取弹窗内当前可见、可聚焦的元素（用于初始焦点与 Tab 循环） */
+function getFocusable(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => !el.hasAttribute("aria-hidden") && el.getClientRects().length > 0,
+  );
+}
+
 function ensureEscListener() {
   if (escListenerBound || typeof window === "undefined") return;
   escListenerBound = true;
@@ -424,6 +438,7 @@ export function Dialog({
   const titleId = useId();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -436,7 +451,67 @@ export function Dialog({
     };
   }, [open]);
 
+  // 打开时把焦点移进弹窗（优先 data-autofocus 的按钮），关闭/卸载时还回原来的元素。
+  // 不做这一步时焦点会留在遮罩后的页面上，Tab / Enter 会继续操作看不见的控件。
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const panel = panelRef.current;
+    const raf = requestAnimationFrame(() => {
+      if (!panel) return;
+      // 页面里用原生 autoFocus 指定的输入框已经拿到焦点时不要抢走（编辑器弹窗靠它定位输入框）
+      const current = document.activeElement;
+      if (
+        current instanceof HTMLElement &&
+        current !== document.body &&
+        panel.contains(current)
+      ) {
+        return;
+      }
+      const preferred = panel.querySelector<HTMLElement>("[data-autofocus]");
+      const body = panel.querySelector<HTMLElement>('[data-dialog-body="true"]');
+      const bodyFirst = body ? getFocusable(body)[0] : undefined;
+      const all = getFocusable(panel);
+      // 没有明确目标时优先正文里的输入框，其次页脚主按钮（最后一个），最后才是标题栏关闭键
+      const fallback = bodyFirst ?? all[all.length - 1] ?? panel;
+      (preferred ?? fallback).focus();
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      if (previouslyFocused && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [open]);
+
   if (!open) return null;
+
+  /** Tab / Shift+Tab 只在弹窗内循环 */
+  const trapTab = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Tab") return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const items = getFocusable(panel);
+    if (items.length === 0) {
+      e.preventDefault();
+      panel.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (!first || !last) return;
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || active === panel) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   const content = (
     <div
@@ -447,10 +522,13 @@ export function Dialog({
       }}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`animate-dialog flex max-h-[85vh] w-full flex-col overflow-hidden rounded-[14px] border border-line-strong/60 bg-surface shadow-overlay ${maxWidth}`}
+        tabIndex={-1}
+        onKeyDown={trapTab}
+        className={`animate-dialog flex max-h-[85vh] w-full flex-col overflow-hidden rounded-[14px] border border-line-strong/60 bg-surface shadow-overlay outline-none ${maxWidth}`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-3.5">
           <div className="min-w-0">
@@ -458,7 +536,7 @@ export function Dialog({
               {title}
             </h3>
             {description ? (
-              <p className="mt-0.5 text-aux text-ink-2">{description}</p>
+              <p className="mt-0.5 whitespace-pre-line text-aux text-ink-2">{description}</p>
             ) : null}
           </div>
           <button
@@ -472,7 +550,9 @@ export function Dialog({
         </div>
 
         {children ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          <div data-dialog-body="true" className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            {children}
+          </div>
         ) : null}
 
         {footer ? (
@@ -507,6 +587,7 @@ export function ConfirmDialogHost() {
           <Button
             variant={req?.variant === "danger" ? "danger" : "primary"}
             onClick={() => resolveConfirm(true)}
+            autoFocus
           >
             {req?.confirmLabel ?? "确认"}
           </Button>

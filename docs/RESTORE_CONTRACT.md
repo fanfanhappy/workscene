@@ -13,7 +13,7 @@
 | 位置正确但最大化未生效 | `failed`（`message` 明确说"未能保持最大化"） |
 | 快照为最小化，已还原成普通窗口 | `success` + `stateRestored=false` + 文案说明 |
 | 匹配歧义 / 无候选 / 应用未运行 | `skipped`（绝不静默改别的窗口） |
-| `SetWindowPlacement` 返回失败 | `failed` |
+| `SetWindowPlacement` 返回失败，但实测位置/状态已到位 | `success`（不以 API 返回值判成败） |
 | 应用自身把窗口改回原点（二次校正后仍超阈值） | `failed` + 实际偏差值 |
 
 `stateRestored` 存在的唯一目的：让"位置对了但状态没还原"这种半成功不被算成完全成功。
@@ -29,7 +29,7 @@
 | 最大化失败 | failed | `位置已恢复，但窗口未能保持最大化` | Yes |
 | 最小化被还原为普通 | success | `已恢复到目标位置；原快照中该窗口为最小化…` | Yes |
 | 漂移 | failed | `窗口被应用自身改回原位置（偏差 Npx，阈值 Mpx）…` | Yes |
-| 写入失败 | failed | `SetWindowPlacement 调用失败（窗口已关闭或受 UIPI 限制）` | Yes |
+| 写入失败 | failed | `窗口已关闭或受 UIPI 限制，实测位置仍偏离` | Yes（按实测偏差判定） |
 | 歧义 | skipped | `窗口匹配存在歧义，已跳过（不改动任何窗口）` | Yes |
 | 无窗口 | skipped | `未找到可用的对应窗口…` | Yes |
 | 显示器缺失 | — | 走 `displayNotes`，位置映射到主屏 | Yes |

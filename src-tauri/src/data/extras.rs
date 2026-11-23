@@ -79,9 +79,20 @@ pub fn current_display_signature() -> (String, String) {
     if monitors.is_empty() {
         return ("1@unknown".into(), "默认单屏".into());
     }
+    // 只按分辨率排序会让“双屏并排”和“双屏上下叠放”得到同一个签名，
+    // 恢复时把布局套到错误的物理拓扑上。把相对位置和 DPI 也纳入签名。
     let mut parts: Vec<String> = monitors
         .iter()
-        .map(|m| format!("{}x{}", m.rect.right - m.rect.left, m.rect.bottom - m.rect.top))
+        .map(|m| {
+            format!(
+                "{}x{}@{},{}@{}dpi",
+                m.rect.right - m.rect.left,
+                m.rect.bottom - m.rect.top,
+                m.rect.left,
+                m.rect.top,
+                m.dpi
+            )
+        })
         .collect();
     parts.sort();
     let sig = format!("{}@{}", monitors.len(), parts.join("+"));
@@ -138,6 +149,24 @@ pub async fn save_display_profile(db: &Db, workspace_id: &str) -> AppResult<Disp
         updated_at: now,
         is_current: true,
     })
+}
+
+/// 若当前显示器组合已经保存过专属方案，则把工作空间的当前布局同步进去。
+/// 布局保存/重新捕获后必须调用，否则恢复时 `apply_matching_profile` 会继续用旧方案。
+pub async fn sync_current_profile(db: &Db, workspace_id: &str) -> AppResult<bool> {
+    let (sig, _) = current_display_signature();
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM workspace_profiles WHERE workspace_id = ? AND display_signature = ?",
+    )
+    .bind(workspace_id)
+    .bind(&sig)
+    .fetch_optional(&db.pool)
+    .await?;
+    if exists.is_none() {
+        return Ok(false);
+    }
+    save_display_profile(db, workspace_id).await?;
+    Ok(true)
 }
 
 pub async fn list_display_profiles(
@@ -197,13 +226,11 @@ pub async fn delete_display_profile(
     workspace_id: &str,
     display_signature: &str,
 ) -> AppResult<()> {
-    sqlx::query(
-        "DELETE FROM workspace_profiles WHERE workspace_id = ? AND display_signature = ?",
-    )
-    .bind(workspace_id)
-    .bind(display_signature)
-    .execute(&db.pool)
-    .await?;
+    sqlx::query("DELETE FROM workspace_profiles WHERE workspace_id = ? AND display_signature = ?")
+        .bind(workspace_id)
+        .bind(display_signature)
+        .execute(&db.pool)
+        .await?;
     Ok(())
 }
 
@@ -231,11 +258,21 @@ pub async fn apply_matching_profile(db: &Db, workspace_id: &str, scene: &mut Sce
     let mut used = vec![false; saved.len()];
     let mut applied = false;
     for win in &mut scene.windows {
-        let found = saved.iter().enumerate().find(|(i, s)| {
-            !used[*i]
-                && s.process_name.eq_ignore_ascii_case(&win.process_name)
+        // 同一应用多窗口时，先按标题精确配对，再退回“进程+类名”的第一个未用项。
+        let matches_identity = |s: &SavedProfileLayout| {
+            s.process_name.eq_ignore_ascii_case(&win.process_name)
                 && (s.class_name.is_empty() || s.class_name == win.class_name)
-        });
+        };
+        let found = saved
+            .iter()
+            .enumerate()
+            .find(|(i, s)| !used[*i] && matches_identity(s) && s.title == win.title)
+            .or_else(|| {
+                saved
+                    .iter()
+                    .enumerate()
+                    .find(|(i, s)| !used[*i] && matches_identity(s))
+            });
         if let Some((i, s)) = found {
             used[i] = true;
             win.monitor_key = s.monitor_key.clone();
@@ -333,17 +370,26 @@ pub fn run_hook_command_with_timeout(
                     let _ = se.read_to_string(&mut err_text);
                 }
                 let detail = err_text.trim();
-                let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "未知".into());
+                let code = status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "未知".into());
                 return Err(if detail.is_empty() {
                     format!("命令退出码 {code}")
                 } else {
-                    format!("命令退出码 {code}：{}", detail.chars().take(160).collect::<String>())
+                    format!(
+                        "命令退出码 {code}：{}",
+                        detail.chars().take(160).collect::<String>()
+                    )
                 });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     // 超时不强杀子进程（例如后台常驻服务启动命令），放行后续恢复并明确提示
-                    return Ok(format!("命令已后台启动（超过 {}s 仍在运行，已继续后续步骤）", timeout.as_secs()));
+                    return Ok(format!(
+                        "命令已后台启动（超过 {}s 仍在运行，已继续后续步骤）",
+                        timeout.as_secs()
+                    ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(60));
             }

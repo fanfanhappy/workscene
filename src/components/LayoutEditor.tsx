@@ -30,6 +30,9 @@ interface DragState {
   snapshotBefore: WorkspaceWindow[];
 }
 
+/** 最小可编辑尺寸（与 Rust 侧 restore::layout::MIN_RATIO 保持一致） */
+const MIN_RATIO = 0.08;
+
 /**
  * Visual Workspace Map 可编辑画布 + Inspector 工作台（UI 规范 §7.3–7.6 & 评审 U5/U6）。
  *
@@ -72,13 +75,8 @@ export function LayoutEditor({
     }
   }, [selectedId, windows]);
 
-  // 外部重置或切换工作空间后清空撤销栈
-  useEffect(() => {
-    if (!dirty) {
-      setUndoStack([]);
-      setRedoStack([]);
-    }
-  }, [dirty]);
+  // 撤销/重做历史只跟随组件生命周期：切换工作空间由父级用 key 重新挂载来清空，
+  // 保存后（dirty 变回 false）不能清空，否则「撤销回初始状态」会同时把重做也清掉。
 
   const commitChange = useCallback(
     (next: WorkspaceWindow[], prevSnapshot?: WorkspaceWindow[]) => {
@@ -254,6 +252,22 @@ export function LayoutEditor({
         });
       }
 
+      // 窗口很多时，模板单元格被最小高度/宽度撑大，row/col 累加后会越出工作区：
+      // 统一夹一次，保证每个窗口都满足 x+width <= 1、y+height <= 1。
+      for (const [id, p] of patchMap) {
+        const x = clamp(p.xRatio ?? 0, 0, 1 - MIN_RATIO);
+        const y = clamp(p.yRatio ?? 0, 0, 1 - MIN_RATIO);
+        const w = clamp(p.widthRatio ?? 0, MIN_RATIO, 1 - x);
+        const h = clamp(p.heightRatio ?? 0, MIN_RATIO, 1 - y);
+        patchMap.set(id, {
+          ...p,
+          xRatio: round4(x),
+          yRatio: round4(y),
+          widthRatio: round4(w),
+          heightRatio: round4(h),
+        });
+      }
+
       const next = windows.map((w) => {
         const p = patchMap.get(w.id);
         return p ? { ...w, ...p } : w;
@@ -377,7 +391,7 @@ export function LayoutEditor({
 
   const onMove = (e: React.PointerEvent) => {
     if (!drag) return;
-    const minRatio = 0.08;
+    const minRatio = MIN_RATIO;
     const dxWorld = (e.clientX - drag.startX) * drag.scaleX;
     const dyWorld = (e.clientY - drag.startY) * drag.scaleY;
     const dxRatio = dxWorld / drag.workW;

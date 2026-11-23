@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { api } from "@/services/api";
 import type { AppSettings } from "@/types/contract";
-import { toast, useUiStore, type ThemeMode } from "@/stores/ui.store";
+import { confirmAction, toast, useUiStore, type ThemeMode } from "@/stores/ui.store";
 import { Button, Switch } from "@/components/ui";
 
 const TOTAL_STEPS = 4;
@@ -63,6 +63,9 @@ export function OnboardingModal() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // 引导层上方可能弹出确认框（如「放弃未保存的窗口摆法？」）：此时键盘交给确认框，
+      // 否则 Esc 会关掉后面的引导层、把确认框留在最上面。
+      if (useUiStore.getState().confirmRequest) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -89,10 +92,18 @@ export function OnboardingModal() {
   };
 
   const finishAndCapture = async () => {
-    complete();
+    // 不再静默丢弃未保存的窗口摆法：与侧栏跳转一致，先确认再离开
     if (useUiStore.getState().hasUnsavedLayout) {
+      const ok = await confirmAction({
+        title: "放弃未保存的窗口摆法？",
+        description: "前往捕获页将丢弃尚未保存的窗口位置调整。",
+        confirmLabel: "放弃并前往",
+        variant: "danger",
+      });
+      if (!ok) return;
       useUiStore.getState().setHasUnsavedLayout(false);
     }
+    complete();
     navigate("/capture");
   };
 
@@ -231,7 +242,7 @@ export function OnboardingModal() {
                     icon: Play,
                     color: "text-[#30d158] bg-[#30d158]/14",
                     title: "一键切换整套现场",
-                    desc: "点「一键恢复」、右键系统托盘或直接按 Ctrl+Alt+1~9 快捷槽，自动拉起未开软件并精准摆回原位。",
+                    desc: "点「一键恢复」、右键系统托盘，或开启快捷槽后按 Ctrl+Alt+1~9，自动拉起未开软件并精准摆回原位。",
                   },
                 ].map((item) => {
                   const Icon = item.icon;
@@ -348,7 +359,7 @@ export function OnboardingModal() {
               <div className="mt-4 grid w-full grid-cols-2 gap-2 text-left text-aux">
                 {[
                   ["Ctrl + Alt + W", "随时唤起主窗口"],
-                  ["Ctrl + Alt + 1~9", "秒切已绑定快捷槽"],
+                  ["Ctrl + Alt + 1~9", "开启快捷槽后秒切"],
                   ["Ctrl + K", "聚焦搜索与命令"],
                   ["右键托盘图标", "不弹主窗一键恢复"],
                 ].map(([k, desc]) => (

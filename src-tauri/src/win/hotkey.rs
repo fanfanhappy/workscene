@@ -71,11 +71,39 @@ pub fn normalize_preset(text: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HotkeyUpdateResult {
     pub main_ok: bool,
     /// 未能成功注册的快捷槽编号（1..=9），空表示全部成功或已关闭
     pub failed_slots: Vec<usize>,
+}
+
+impl Default for HotkeyUpdateResult {
+    fn default() -> Self {
+        Self {
+            main_ok: true,
+            failed_slots: Vec::new(),
+        }
+    }
+}
+
+/// 最近一次真实注册结果：启动时注册失败也要能让 UI 查到，
+/// 不能只靠用户改一次设置才发现“热键其实没生效”。
+static LAST_STATUS: OnceLock<Mutex<HotkeyUpdateResult>> = OnceLock::new();
+
+fn set_last_status(status: &HotkeyUpdateResult) {
+    let store = LAST_STATUS.get_or_init(|| Mutex::new(HotkeyUpdateResult::default()));
+    if let Ok(mut guard) = store.lock() {
+        *guard = status.clone();
+    }
+}
+
+pub fn last_status() -> HotkeyUpdateResult {
+    LAST_STATUS
+        .get()
+        .and_then(|m| m.lock().ok().map(|g| g.clone()))
+        .unwrap_or_default()
 }
 
 struct HotkeyRequest {
@@ -86,10 +114,15 @@ struct HotkeyRequest {
 static SENDER: OnceLock<Mutex<Sender<HotkeyRequest>>> = OnceLock::new();
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入零轮询阻塞消息循环
-pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: bool) {
+/// 窗口线程调用一次：注册初始组合（主唤起键 + 可选 Ctrl+Alt+1~9 空间切屏键）并进入零轮询阻塞消息循环。
+/// 返回真实注册结果；启动阶段失败会由设置页读到，而不是静默无效。
+pub fn spawn(
+    app: tauri::AppHandle,
+    initial: Option<Combo>,
+    workspace_slots: bool,
+) -> HotkeyUpdateResult {
     let (tx, rx) = channel::<HotkeyRequest>();
-    let (ready_tx, ready_rx) = sync_channel::<()>(0);
+    let (ready_tx, ready_rx) = sync_channel::<HotkeyUpdateResult>(0);
     let _ = SENDER.set(Mutex::new(tx));
 
     std::thread::spawn(move || unsafe {
@@ -97,14 +130,19 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
         let mut init_msg: MSG = std::mem::zeroed();
         PeekMessageW(&mut init_msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
         THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
-        let _ = ready_tx.send(());
 
         let mut current_main = register(initial);
-        let mut current_slots = if workspace_slots {
-            register_ws_slots().0
+        let (mut current_slots, failed_slots) = if workspace_slots {
+            register_ws_slots()
         } else {
-            false
+            (false, Vec::new())
         };
+        let initial_status = HotkeyUpdateResult {
+            main_ok: if initial.is_some() { current_main } else { true },
+            failed_slots,
+        };
+        set_last_status(&initial_status);
+        let _ = ready_tx.send(initial_status);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -135,10 +173,12 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
                         }
                     }
 
-                    let _ = req.reply.send(HotkeyUpdateResult {
+                    let result = HotkeyUpdateResult {
                         main_ok,
                         failed_slots,
-                    });
+                    };
+                    set_last_status(&result);
+                    let _ = req.reply.send(result);
                 }
             } else if msg.message == WM_HOTKEY {
                 let id = msg.wParam as i32;
@@ -155,7 +195,14 @@ pub fn spawn(app: tauri::AppHandle, initial: Option<Combo>, workspace_slots: boo
             }
         }
     });
-    let _ = ready_rx.recv_timeout(std::time::Duration::from_millis(500));
+    let status = ready_rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .unwrap_or_else(|_| HotkeyUpdateResult {
+            main_ok: initial.is_none(),
+            failed_slots: Vec::new(),
+        });
+    set_last_status(&status);
+    status
 }
 
 /// 运行中切换快捷键配置（设置页调用）：通过 PostThreadMessageW 立即唤醒阻塞线程并返回真实 RegisterHotKey 结果
@@ -165,6 +212,7 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> HotkeyUpdateResult
         failed_slots: Vec::new(),
     };
     let Some(tx) = SENDER.get() else {
+        set_last_status(&fallback);
         return fallback;
     };
     let (reply_tx, reply_rx) = sync_channel(1);
@@ -182,6 +230,7 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> HotkeyUpdateResult
         })
         .unwrap_or(false);
     if !sent {
+        set_last_status(&fallback);
         return fallback;
     }
     let tid = THREAD_ID.load(Ordering::Acquire);
@@ -190,9 +239,11 @@ pub fn update(combo: Option<Combo>, workspace_slots: bool) -> HotkeyUpdateResult
             PostThreadMessageW(tid, WM_HOTKEY_RELOAD, 0, 0);
         }
     }
-    reply_rx
+    let result = reply_rx
         .recv_timeout(std::time::Duration::from_millis(800))
-        .unwrap_or(fallback)
+        .unwrap_or(fallback);
+    set_last_status(&result);
+    result
 }
 
 unsafe fn register(combo: Option<Combo>) -> bool {

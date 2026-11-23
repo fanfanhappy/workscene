@@ -62,6 +62,9 @@ pub struct RecoveryHint {
     pub workspace_name: Option<String>,
     pub snapshot_id: Option<String>,
     pub snapshot_at: Option<i64>,
+    /// 快照类型（manual/auto/initial/protection），用于提示恢复的是哪个时间点
+    #[serde(default)]
+    pub snapshot_type: Option<String>,
 }
 
 /// 组装恢复提示：崩溃标记 + 激活工作空间 + 该空间最近一份快照

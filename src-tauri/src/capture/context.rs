@@ -202,15 +202,21 @@ pub fn match_title_to_workspace(title: &str, workspaces: &[String]) -> Option<St
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
+    let mut matched: Vec<&String> = Vec::new();
     for dir in workspaces {
         let Some(base) = Path::new(dir).file_name().and_then(|s| s.to_str()) else {
             continue;
         };
         if segments.iter().any(|seg| seg.eq_ignore_ascii_case(base)) {
-            return Some(dir.clone());
+            matched.push(dir);
         }
     }
-    None
+    match matched.as_slice() {
+        [only] => Some((*only).clone()),
+        // 同名项目（如两个 app 目录）无法仅凭标题区分，宁可放弃自动关联，
+        // 也不要把 Project A 的启动参数写到 Project B 上。
+        _ => None,
+    }
 }
 
 /// 静默查询当前已打开的 Windows 文件资源管理器文件夹路径（带 3 秒超时与 UNC 跳过，永不阻塞）
@@ -279,6 +285,16 @@ mod tests {
         assert_eq!(
             file_uri_to_windows_path("file:///c%3A/My%20Projects/app"),
             Some(r"C:\My Projects\app".to_string())
+        );
+    }
+
+    #[test]
+    fn ambiguous_same_basename_is_not_guessed() {
+        let dirs = vec![r"D:\work\app".to_string(), r"D:\other\app".to_string()];
+        assert_eq!(
+            match_title_to_workspace("main.rs - app - Visual Studio Code", &dirs),
+            None,
+            "同名项目无法仅凭标题区分，应放弃自动关联"
         );
     }
 

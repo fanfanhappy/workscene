@@ -11,7 +11,13 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api } from "@/services/api";
-import type { CaptureResult, DetectedContext, WindowInfo, WorkspaceSummary } from "@/types/contract";
+import type {
+  CaptureResult,
+  DetectedContext,
+  WindowInfo,
+  WorkspaceDetail,
+  WorkspaceSummary,
+} from "@/types/contract";
 import { confirmAction, toast } from "@/stores/ui.store";
 import {
   Badge,
@@ -24,6 +30,9 @@ import {
 } from "@/components/ui";
 import { MonitorCanvas } from "@/components/MonitorCanvas";
 import { AppIcon, useAppIcons } from "@/components/AppIcon";
+
+/** 上下文唯一键：同一路径可能既是资源管理器文件夹又是 IDE 项目，必须带上 kind */
+const detectedKey = (ctx: DetectedContext) => `${ctx.kind}|${ctx.target}`;
 
 export function CapturePage() {
   const navigate = useNavigate();
@@ -105,7 +114,7 @@ export function CapturePage() {
         .then((items) => {
           if (detectSeqRef.current !== seq) return;
           setDetectedCtx(items);
-          setSelectedCtx(new Set(items.map((it) => it.target)));
+          setSelectedCtx(new Set(items.map(detectedKey)));
         })
         .catch(() => undefined);
     },
@@ -137,52 +146,78 @@ export function CapturePage() {
       );
       const pickedCtx = detectedCtx.filter(
         (c) =>
-          selectedCtx.has(c.target) &&
+          selectedCtx.has(detectedKey(c)) &&
           selectedApps.has(c.sourceApp.toLowerCase()),
       );
-      const applyDetectedContext = async (wsId: string) => {
-        if (pickedCtx.length === 0) return;
+      // 资源已存在不算失败（重复更新时很常见）；其余失败必须如实汇报，不能假装成功
+      const isDuplicateResourceError = (message: string) =>
+        message.includes("该资源已在此工作空间中");
+
+      const applyDetectedContext = async (wsId: string): Promise<string[]> => {
+        if (pickedCtx.length === 0) return [];
+        const failures: string[] = [];
+        const addFolder = async (target: string, displayName: string, label: string) => {
+          try {
+            await api.workspaceItemAdd(wsId, "folder", target, displayName);
+          } catch (e) {
+            if (!isDuplicateResourceError(String((e as Error).message))) {
+              failures.push(label);
+            }
+          }
+        };
+
         const folders = pickedCtx.filter((c) => c.kind !== "ide_project");
         const ideProjects = pickedCtx.filter((c) => c.kind === "ide_project");
         for (const ctx of folders) {
-          await api
-            .workspaceItemAdd(wsId, "folder", ctx.target, ctx.displayName)
-            .catch(() => undefined);
+          await addFolder(ctx.target, ctx.displayName, `文件夹「${ctx.displayName}」`);
         }
         if (ideProjects.length > 0) {
-          const detail = await api.workspaceGet(wsId).catch(() => null);
-          if (detail) {
-            const assignedIds = new Set<string>();
+          let detail: WorkspaceDetail | null = null;
+          try {
+            detail = await api.workspaceGet(wsId);
+          } catch {
+            detail = null;
+          }
+          if (!detail) {
+            failures.push(...ideProjects.map((p) => `IDE 项目「${p.displayName}」`));
+          } else {
+            // 每个 IDE 只把第一个项目写入启动参数（覆盖旧的自动写入参数，便于切换项目）；
+            // 同款 IDE 的其余项目目录加入资源列表，避免互相覆盖而丢失
+            const handledApps = new Set<string>();
             for (const proj of ideProjects) {
+              const appKey = proj.sourceApp.toLowerCase();
+              if (handledApps.has(appKey)) {
+                await addFolder(proj.target, proj.displayName, `IDE 项目「${proj.displayName}」`);
+                continue;
+              }
               const appItem = detail.items.find(
                 (it) =>
                   it.itemType === "application" &&
-                  !assignedIds.has(it.id) &&
-                  (it.displayName.toLowerCase() === proj.sourceApp.toLowerCase() ||
-                    (it.target ?? "").toLowerCase().endsWith(proj.sourceApp.toLowerCase())),
+                  (it.displayName.toLowerCase() === appKey ||
+                    (it.target ?? "").toLowerCase().endsWith(appKey)),
               );
-              if (appItem && !appItem.launchArgs) {
-                assignedIds.add(appItem.id);
+              if (appItem) {
+                handledApps.add(appKey);
                 const arg = proj.target.includes(" ") ? `"${proj.target}"` : proj.target;
-                await api
-                  .workspaceItemUpdate(
+                try {
+                  await api.workspaceItemUpdate(
                     appItem.id,
                     appItem.reusePolicy,
                     arg,
                     appItem.enabled,
                     appItem.launchPriority,
                     appItem.launchDelayMs,
-                  )
-                  .catch(() => undefined);
+                  );
+                } catch {
+                  failures.push(`IDE 项目「${proj.displayName}」的启动参数`);
+                }
               } else {
-                // 同款 IDE 打开了多个项目目录（或已有自定义启动参数）时，将额外项目目录加入资源列表，避免丢失
-                await api
-                  .workspaceItemAdd(wsId, "folder", proj.target, proj.displayName)
-                  .catch(() => undefined);
+                await addFolder(proj.target, proj.displayName, `IDE 项目「${proj.displayName}」`);
               }
             }
           }
         }
+        return failures;
       };
 
       if (saveMode === "update") {
@@ -191,31 +226,33 @@ export function CapturePage() {
           (workspaces.data ?? []).find((w) => w.id === targetWsId)?.name ?? "所选工作空间";
         const ok = await confirmAction({
           title: `覆盖更新「${targetName}」？`,
-          description: `将用当前勾选的 ${subset.windows.length} 个窗口替换原有布局（已有的网页/文件夹资源与启动参数会保留，并自动创建覆盖前保护快照）。`,
+          description: `将用当前勾选的 ${subset.windows.length} 个窗口更新对应的应用布局；本次未捕获的应用及其上次布局、已有网页/文件夹资源和启动参数都会保留，并自动创建覆盖前保护快照。`,
           confirmLabel: "确认覆盖更新",
         });
         if (!ok) return null;
         const updated = await api.workspaceUpdateFromCapture(targetWsId, subset);
-        await applyDetectedContext(updated.id);
+        const contextFailures = await applyDetectedContext(updated.id);
         return {
           id: updated.id,
           name: updated.name,
           updated: true,
           count: updated.windows.length,
           createdSummary: null as WorkspaceSummary | null,
+          contextFailures,
         };
       }
 
       const trimmed = name.trim();
       if (!trimmed) throw new Error("请给工作空间起个名字");
       const created = await api.workspaceCreate(trimmed, subset);
-      await applyDetectedContext(created.id);
+      const contextFailures = await applyDetectedContext(created.id);
       return {
         id: created.id,
         name: created.name,
         updated: false,
         count: created.windowCount,
         createdSummary: created,
+        contextFailures,
       };
     },
     onSuccess: (res) => {
@@ -232,10 +269,17 @@ export function CapturePage() {
       qc.invalidateQueries({ queryKey: ["ws-profiles", res.id] });
       qc.invalidateQueries({ queryKey: ["snapshots", res.id] });
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
-      if (res.updated) {
+      if (res.contextFailures.length > 0) {
+        const shown = res.contextFailures.slice(0, 5).join("、");
+        const more = res.contextFailures.length > 5 ? " 等" : "";
+        toast.warning(
+          `已保存，但有 ${res.contextFailures.length} 个自动识别项写入失败`,
+          `${shown}${more}。可在工作空间详情页手动补充。`,
+        );
+      } else if (res.updated) {
         toast.success(
           `已更新「${res.name}」的窗口摆法`,
-          `同步 ${res.count} 个窗口，原文件和网址已保留，并自动备份了旧版本`,
+          `同步 ${res.count} 个窗口，未打开的应用、原文件和网址已保留，并自动备份了旧版本`,
         );
       } else {
         toast.success(`已保存工作空间「${res.name}」`, `记录了 ${res.count} 个窗口`);
@@ -311,13 +355,26 @@ export function CapturePage() {
 
   return (
     <div className="mx-auto flex max-w-[1040px] flex-col gap-3.5">
-      {error ? <ErrorNote message={error} onDismiss={() => setError(null)} /> : null}
+      {error && (result || scan.isPending) ? (
+        <ErrorNote message={error} onDismiss={() => setError(null)} />
+      ) : null}
 
       {scan.isPending && !result ? (
         <Card className="flex flex-col items-center gap-3 py-14 text-center">
           <ScanLine size={24} className="animate-pulse text-accent" />
           <p className="text-card font-semibold text-ink">正在扫描你当前打开的窗口…</p>
           <p className="text-aux text-ink-3">仅记录窗口位置和软件名称，不截屏、不读密码</p>
+        </Card>
+      ) : !result && scan.isError ? (
+        <Card className="flex flex-col items-center gap-3 py-14 text-center">
+          <AlertTriangle size={22} className="text-danger" />
+          <p className="text-card font-semibold text-ink">扫描桌面失败</p>
+          <p className="max-w-[560px] text-aux text-ink-3">
+            {error ?? "未能读取当前桌面窗口，请重试"}
+          </p>
+          <Button variant="primary" onClick={() => scan.mutate()} disabled={scan.isPending}>
+            <RefreshCw size={13} /> 重新扫描
+          </Button>
         </Card>
       ) : result && result.windows.length === 0 ? (
         <EmptyState
@@ -477,7 +534,7 @@ export function CapturePage() {
                   onClick={() => setShowExcluded((v) => !v)}
                   className="flex w-full cursor-pointer items-center justify-between px-3.5 py-2 text-[11px] text-ink-3 hover:text-ink-2"
                 >
-                  <span>已自动跳过 {result.excluded.length} 个系统后台窗口</span>
+                  <span>可诊断的排除项 {result.excluded.length} 个（其余不可见窗口不列出）</span>
                   <ChevronDown
                     size={13}
                     className={`transition-transform ${showExcluded ? "rotate-180" : ""}`}
@@ -493,6 +550,11 @@ export function CapturePage() {
                         <span className="shrink-0 text-warning">{e.reason}</span>
                       </li>
                     ))}
+                    {result.excluded.length > 25 ? (
+                      <li className="py-0.5 text-ink-3">
+                        仅显示前 25 条，另有 {result.excluded.length - 25} 条未列出
+                      </li>
+                    ) : null}
                   </ul>
                 ) : null}
               </div>
@@ -503,6 +565,7 @@ export function CapturePage() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
+              if (save.isPending || scan.isPending) return;
               save.mutate();
             }}
             className="flex min-w-0 flex-col gap-3.5"
@@ -590,10 +653,11 @@ export function CapturePage() {
                   </div>
                   <div className="flex max-h-28 flex-col gap-1 overflow-y-auto">
                     {visibleDetectedCtx.map((ctx) => {
-                      const on = selectedCtx.has(ctx.target);
+                      const key = detectedKey(ctx);
+                      const on = selectedCtx.has(key);
                       return (
                         <label
-                          key={ctx.target}
+                          key={key}
                           className="flex cursor-pointer items-center gap-2 rounded-[7px] bg-canvas/80 px-2 py-1 text-[11px] hover:bg-raised/60"
                         >
                           <input
@@ -602,8 +666,8 @@ export function CapturePage() {
                             onChange={() =>
                               setSelectedCtx((prev) => {
                                 const next = new Set(prev);
-                                if (next.has(ctx.target)) next.delete(ctx.target);
-                                else next.add(ctx.target);
+                                if (next.has(key)) next.delete(key);
+                                else next.add(key);
                                 return next;
                               })
                             }
@@ -645,6 +709,7 @@ export function CapturePage() {
                 className="w-full"
                 disabled={
                   save.isPending ||
+                  scan.isPending ||
                   selectedWindows.length === 0 ||
                   (saveMode === "new" ? name.trim() === "" : !targetWsId)
                 }

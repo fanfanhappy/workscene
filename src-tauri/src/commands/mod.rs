@@ -31,6 +31,12 @@ async fn scan_blocking() -> AppResult<CaptureResult> {
         .map_err(|e| AppError::msg(format!("扫描桌面任务异常：{e}")))?
 }
 
+/// 最近一次真实热键注册结果（启动时冲突也能在设置页看到）
+#[tauri::command]
+pub fn system_hotkey_status() -> crate::win::hotkey::HotkeyUpdateResult {
+    crate::win::hotkey::last_status()
+}
+
 #[tauri::command]
 pub fn system_get_displays() -> AppResult<Vec<DisplayInfo>> {
     capture::displays()
@@ -241,6 +247,29 @@ pub async fn workspace_item_update(
     .await
 }
 
+/// 局部更新单个应用项：只写改动字段，避免“失焦保存参数 + 点击开关”两次全量写入互相覆盖。
+#[tauri::command]
+pub async fn workspace_item_patch(
+    db: State<'_, Db>,
+    item_id: String,
+    reuse_policy: Option<String>,
+    launch_args: Option<String>,
+    enabled: Option<bool>,
+    launch_priority: Option<i64>,
+    launch_delay_ms: Option<i64>,
+) -> AppResult<()> {
+    workspaces::patch_item(
+        &db,
+        &item_id,
+        reuse_policy,
+        launch_args,
+        enabled,
+        launch_priority,
+        launch_delay_ms,
+    )
+    .await
+}
+
 /// 布局编辑：批量提交窗口的新比例坐标（一个事务）
 #[tauri::command]
 pub async fn workspace_layout_update(
@@ -249,6 +278,17 @@ pub async fn workspace_layout_update(
     updates: Vec<workspaces::LayoutUpdate>,
 ) -> AppResult<()> {
     workspaces::update_layouts(&db, &workspace_id, &updates).await
+}
+
+/// 画布整体保存：删除 + 更新在同一个数据库事务里，避免逐条保存只成功一半。
+#[tauri::command]
+pub async fn workspace_layout_save(
+    db: State<'_, Db>,
+    workspace_id: String,
+    removed_window_ids: Vec<String>,
+    updates: Vec<workspaces::LayoutUpdate>,
+) -> AppResult<()> {
+    workspaces::save_layout(&db, &workspace_id, &removed_window_ids, &updates).await
 }
 
 #[tauri::command]
@@ -278,7 +318,14 @@ pub async fn workspace_item_add(
     target: String,
     display_name: Option<String>,
 ) -> AppResult<workspaces::WorkspaceItem> {
-    workspaces::add_item(&db, &workspace_id, &item_type, &target, display_name.as_deref()).await
+    workspaces::add_item(
+        &db,
+        &workspace_id,
+        &item_type,
+        &target,
+        display_name.as_deref(),
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -295,10 +342,8 @@ pub async fn workspace_items_add_batch(
     workspace_id: String,
     entries: Vec<UrlBatchEntry>,
 ) -> AppResult<usize> {
-    let pairs: Vec<(String, Option<String>)> = entries
-        .into_iter()
-        .map(|e| (e.url, e.name))
-        .collect();
+    let pairs: Vec<(String, Option<String>)> =
+        entries.into_iter().map(|e| (e.url, e.name)).collect();
     workspaces::add_urls_batch(&db, &workspace_id, &pairs).await
 }
 
@@ -365,6 +410,9 @@ pub fn prepend_hook_step(report: &mut RestoreReport, step: RestoreStepResult) {
 /// 若该工作空间启用了收工后钩子命令，则在发送关闭请求后执行。
 #[tauri::command]
 pub async fn workspace_close_windows(db: State<'_, Db>, id: String) -> AppResult<usize> {
+    // 收工同样在操作窗口，必须与恢复互斥；否则恢复中一键收工会把刚摆好的窗口关掉。
+    let _guard = crate::restore::try_acquire()
+        .ok_or_else(|| AppError::msg("已有恢复/收工任务在执行，请等它结束再试"))?;
     let mut scene = workspaces::to_scene(&db, &id).await?;
     let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
     let hooks = crate::data::extras::get_hooks(&db, &id)
@@ -384,9 +432,7 @@ pub async fn workspace_close_windows(db: State<'_, Db>, id: String) -> AppResult
 
 /// 导入前预检：只看不写，供 UI 提示"这份文件会启动什么"
 #[tauri::command]
-pub fn workspace_import_preview(
-    raw_json: String,
-) -> AppResult<workspaces::ImportPreview> {
+pub fn workspace_import_preview(raw_json: String) -> AppResult<workspaces::ImportPreview> {
     workspaces::import_preview(&raw_json)
 }
 
@@ -523,6 +569,8 @@ pub async fn snapshot_restore(
     if let Some(ws) = &workspace_id {
         let _ = runs::save(&db, &report, Some(ws), Some(&id), "snapshot").await;
         let _ = workspaces::mark_restored(&db, ws).await;
+        // 从历史快照恢复后，该工作空间也应成为自动快照的归属，否则会继续记到旧空间。
+        let _ = snapshots::set_active_workspace(&db, ws).await;
     } else {
         let _ = runs::save(&db, &report, None, Some(&id), "snapshot").await;
     }
@@ -537,10 +585,7 @@ pub async fn run_list(db: State<'_, Db>, limit: Option<usize>) -> AppResult<Vec<
 
 /// 单次恢复的逐步结果（关窗/重启后仍可回查）
 #[tauri::command]
-pub async fn run_steps(
-    db: State<'_, Db>,
-    run_id: String,
-) -> AppResult<Vec<runs::RunStepRow>> {
+pub async fn run_steps(db: State<'_, Db>, run_id: String) -> AppResult<Vec<runs::RunStepRow>> {
     runs::steps(&db, &run_id).await
 }
 
@@ -598,9 +643,56 @@ pub async fn workspace_restore_retry(
     let _ = crate::data::extras::apply_matching_profile(&db, &id, &mut scene).await;
     let snapshot_id = workspaces::latest_snapshot(&db, &id).await?;
 
+    // 过滤后没有任何目标时，直接报错；不能返回 0 步报告让 UI 误报“重试完成”。
+    let matched = scene
+        .windows
+        .iter()
+        .filter(|w| {
+            let name = if w.title.trim().is_empty() {
+                &w.process_name
+            } else {
+                &w.title
+            };
+            targets.contains(name)
+        })
+        .count()
+        + scene
+            .resources
+            .iter()
+            .filter(|r| targets.contains(&r.display_name))
+            .count();
+    if matched == 0 {
+        return Err(AppError::msg(
+            "未找到与重试目标匹配的窗口或资源（可能已被关闭或改名）",
+        ));
+    }
+
+    // 重试同样会移动窗口，必须留下保护快照，否则这次重试无法撤销。
+    let pre_restore = match scan_blocking().await {
+        Ok(current) => workspaces::add_snapshot(
+            &db,
+            &id,
+            "重试前自动保护",
+            "protection",
+            "restore_retry",
+            &current,
+            true,
+        )
+        .await
+        .ok(),
+        Err(_) => None,
+    };
+
     let scene_for_task = scene.clone();
+    let pre_for_task = pre_restore.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        crate::restore::apply_subset(Some(&app), &scene_for_task, relaunch_missing, None, Some(&targets))
+        crate::restore::apply_subset(
+            Some(&app),
+            &scene_for_task,
+            relaunch_missing,
+            pre_for_task,
+            Some(&targets),
+        )
     })
     .await;
 
@@ -644,10 +736,7 @@ pub async fn dialog_pick_folder() -> AppResult<Option<String>> {
 
 /// 弹出 Windows 原生「另存为 JSON」对话框并直接写入文件，返回保存后的完整路径（取消返回 None）
 #[tauri::command]
-pub async fn dialog_save_json(
-    default_name: String,
-    content: String,
-) -> AppResult<Option<String>> {
+pub async fn dialog_save_json(default_name: String, content: String) -> AppResult<Option<String>> {
     let picked = tauri::async_runtime::spawn_blocking(move || {
         crate::win::dialog::save_json_file("导出 WorkScene 配置文件", &default_name)
     })
@@ -658,10 +747,12 @@ pub async fn dialog_save_json(
         return Ok(None);
     };
     let path_for_write = path.clone();
-    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path_for_write, content.as_bytes()))
-        .await
-        .map_err(|e| AppError::msg(format!("写入导出文件异常：{e}")))?
-        .map_err(|e| AppError::msg(format!("无法写入文件：{e}")))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::write(&path_for_write, content.as_bytes())
+    })
+    .await
+    .map_err(|e| AppError::msg(format!("写入导出文件异常：{e}")))?
+    .map_err(|e| AppError::msg(format!("无法写入文件：{e}")))?;
     Ok(Some(path))
 }
 
@@ -696,7 +787,11 @@ pub async fn snapshot_list(
 
 /// 手动快照：立即捕获当前桌面并归档（永远创建，不做去重）
 #[tauri::command]
-pub async fn snapshot_create(db: State<'_, Db>, workspace_id: String, name: String) -> AppResult<SnapshotSummary> {
+pub async fn snapshot_create(
+    db: State<'_, Db>,
+    workspace_id: String,
+    name: String,
+) -> AppResult<SnapshotSummary> {
     let capture = scan_blocking().await?;
     let name = if name.trim().is_empty() {
         "手动快照".to_string()
@@ -770,9 +865,7 @@ pub fn adapter_suggest(exe_name: String, target: Option<String>) -> AdapterSugge
 
 /// 批量识别软件的适配等级（供设置页「我常用软件的适配状态」一次返回）
 #[tauri::command]
-pub fn adapter_classify_batch(
-    exe_names: Vec<String>,
-) -> std::collections::HashMap<String, String> {
+pub fn adapter_classify_batch(exe_names: Vec<String>) -> std::collections::HashMap<String, String> {
     exe_names
         .into_iter()
         .map(|name| {
@@ -807,9 +900,12 @@ pub async fn settings_set(
 /// 用户重启后才发现没生效。
 pub async fn apply_settings(
     db: &Db,
-    mut settings: settings::AppSettings,
+    settings: settings::AppSettings,
 ) -> AppResult<settings::AppSettings> {
     use crate::win::autostart;
+
+    let previous = settings::get(db).await.unwrap_or_default();
+    let mut settings = settings.sanitized();
 
     // 仅当开机启动状态发生变化时同步系统启动项（避免改其它设置时被注册表策略误伤）
     let mut autostart_err = None;
@@ -819,9 +915,7 @@ pub async fn apply_settings(
             Ok(()) => {
                 // 写成功但读不回来，同样说明没生效，不能假装成功
                 if autostart::is_enabled() != settings.autostart {
-                    autostart_err = Some(
-                        "启动项写入后未能读回，可能被安全软件拦截。".to_string(),
-                    );
+                    autostart_err = Some("启动项写入后未能读回，可能被安全软件拦截。".to_string());
                 }
             }
         }
@@ -830,32 +924,59 @@ pub async fn apply_settings(
     // 落库前校正为真实状态：失败时库里留 false，界面刷新回来就是关的
     settings.autostart = autostart::is_enabled();
 
+    // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程。
+    // 关键不变量：新组合注册失败时必须恢复旧组合，不能把用户原来能用的热键弄丢。
+    let hotkey_changed = settings.hotkey != previous.hotkey
+        || settings.workspace_hotkeys_enabled != previous.workspace_hotkeys_enabled;
+    let attempted_hotkey = settings.hotkey.clone();
+    let new_combo = crate::win::hotkey::parse_preset(&settings.hotkey);
+    let mut hotkey_res = crate::win::hotkey::HotkeyUpdateResult {
+        main_ok: true,
+        failed_slots: Vec::new(),
+    };
+    let mut hotkey_rolled_back = false;
+    if hotkey_changed {
+        hotkey_res = crate::win::hotkey::update(new_combo, settings.workspace_hotkeys_enabled);
+        if new_combo.is_some() && !hotkey_res.main_ok {
+            // 恢复旧组合；若旧组合本身已是关闭状态，update(None) 会安全地保持关闭。
+            let old_combo = crate::win::hotkey::parse_preset(&previous.hotkey);
+            let _ = crate::win::hotkey::update(old_combo, previous.workspace_hotkeys_enabled);
+            settings.hotkey = previous.hotkey.clone();
+            settings.workspace_hotkeys_enabled = previous.workspace_hotkeys_enabled;
+            hotkey_rolled_back = true;
+        }
+    }
+
     let mut saved = settings::set(db, &settings).await?;
     saved.autostart = settings.autostart;
     crate::win::filter::set_ignored_processes(&saved.ignored_processes);
-
-    // 快捷键：热键注册是线程绑定的，这里只把"换成哪个"投递给热键线程
-    let combo = crate::win::hotkey::parse_preset(&saved.hotkey);
-    let hotkey_res = crate::win::hotkey::update(combo, saved.workspace_hotkeys_enabled);
 
     if let Some(msg) = autostart_err {
         return Err(AppError::msg(format!("开机启动设置失败：{msg}")));
     }
     let mut hk_errors: Vec<String> = Vec::new();
-    if !hotkey_res.main_ok && combo.is_some() {
-        hk_errors.push(format!("主唤起热键 {} 被其他程序占用", saved.hotkey));
+    if !hotkey_res.main_ok && new_combo.is_some() {
+        hk_errors.push(if hotkey_rolled_back {
+            format!(
+                "主唤起热键 {attempted_hotkey} 被其他程序占用，已保留原热键 {}",
+                previous.hotkey
+            )
+        } else {
+            format!("主唤起热键 {attempted_hotkey} 被其他程序占用")
+        });
     }
-    if saved.workspace_hotkeys_enabled && !hotkey_res.failed_slots.is_empty() {
-        let slots: Vec<String> = hotkey_res
+    if settings.workspace_hotkeys_enabled && !hotkey_res.failed_slots.is_empty() {
+        let slots: String = hotkey_res
             .failed_slots
             .iter()
             .map(|n| format!("Ctrl+Alt+{n}"))
-            .collect();
-        hk_errors.push(format!("以下快捷槽被其他程序占用：{}", slots.join("、")));
+            .collect::<Vec<_>>()
+            .join("、");
+        hk_errors.push(format!("以下快捷槽被其他程序占用：{slots}"));
     }
     if !hk_errors.is_empty() {
         return Err(AppError::msg(format!(
-            "{}（已保存设置，冲突项本次未生效）",
+            "{}（已保存其它设置，冲突项本次未生效）",
             hk_errors.join("；")
         )));
     }
@@ -942,6 +1063,10 @@ pub async fn workspace_import_all(
     db: State<'_, Db>,
     json: String,
 ) -> AppResult<ImportAllResult> {
+    // 全量备份可能包含多个工作空间；给一个总上限，避免一次性解析超大文件卡死 UI。
+    if json.len() > 20 * 1024 * 1024 {
+        return Err(AppError::msg("备份文件过大（上限 20 MB）"));
+    }
     let val: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| crate::core::AppError::msg(format!("备份文件不是合法的 JSON：{e}")))?;
     let arr = val
@@ -1077,6 +1202,24 @@ mod tests {
     /// 注意：注册表 `HKCU\Run` 在部分环境（例如 GitHub Actions 的普通用户）可以写入成功，
     /// 所以这里不预设"一定失败"，而是按真实结果分支断言；测完把系统状态恢复原样，
     /// 避免在开发机/CI 上留下指向测试二进制的启动项。
+    #[tokio::test]
+    async fn hotkey_conflict_rolls_back_to_previous_preset() {
+        let db = crate::data::in_memory().await.unwrap();
+        let previous = settings::get(&db).await.unwrap();
+        let mut input = previous.clone();
+        input.hotkey = "Ctrl+Shift+W".into();
+
+        // 测试进程没有热键消息循环，update 会失败；此时必须保留旧 preset，
+        // 不能把新组合写进库、让用户既没有新热键也没有旧热键。
+        let result = apply_settings(&db, input).await;
+        let stored = settings::get(&db).await.unwrap();
+        assert_eq!(stored.hotkey, previous.hotkey);
+        if result.is_err() {
+            let msg = format!("{}", result.unwrap_err());
+            assert!(msg.contains("热键"), "错误信息应说明热键冲突：{msg}");
+        }
+    }
+
     #[tokio::test]
     async fn settings_report_only_the_real_autostart_state() {
         let db = crate::data::in_memory().await.unwrap();

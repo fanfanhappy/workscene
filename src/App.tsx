@@ -1,5 +1,12 @@
 import { lazy, Suspense } from "react";
-import { HashRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import {
+  HashRouter,
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PageSkeleton } from "@/components/ui";
@@ -23,9 +30,11 @@ const SettingsPage = lazy(() =>
 );
 
 function Shell() {
+  const location = useLocation();
   return (
     <AppShell>
-      <ErrorBoundary>
+      {/* key 用路由路径：某个页面崩溃后，切换页面会重建边界，而不是一直卡在错误卡片上 */}
+      <ErrorBoundary key={location.pathname}>
         <Suspense fallback={<PageSkeleton />}>
           <Outlet />
         </Suspense>
