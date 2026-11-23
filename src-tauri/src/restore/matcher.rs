@@ -162,6 +162,25 @@ pub fn match_window(
 
     let best = scored.first().copied();
     let second = scored.get(1).copied();
+    let describe = |entry: Option<(usize, f64, i64)>| {
+        entry.map(|(i, score, _)| {
+            let c = &candidates[i];
+            format!(
+                "{score:.3} pid={} name={} class={} path={:?} title={:?}",
+                c.pid, c.process_name, c.class_name, c.process_path, c.title
+            )
+        })
+    };
+    tracing::debug!(
+        target_title = %target.title,
+        target_process = %target.process_name,
+        target_path = ?target.process_path,
+        target_class = %target.class_name,
+        candidates = candidates.len(),
+        best = ?describe(best),
+        second = ?describe(second),
+        "window candidates scored"
+    );
 
     match best {
         None => MatchOutcome {

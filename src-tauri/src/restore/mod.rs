@@ -231,6 +231,17 @@ pub fn preview(scene: &SceneFile) -> AppResult<RestorePreview> {
             .unwrap_or(false);
 
         let outcome = match_window(win, &pool, rect);
+        tracing::debug!(
+            window = %win.title,
+            process = %win.process_name,
+            path = ?win.process_path,
+            class = %win.class_name,
+            candidates = pool.len(),
+            picked = outcome.picked.is_some(),
+            ambiguous = outcome.ambiguous,
+            note = %outcome.note,
+            "restore preview match"
+        );
         let target_name = if win.title.trim().is_empty() {
             win.process_name.clone()
         } else {
@@ -415,22 +426,49 @@ pub fn apply_with_options(
     let mut display_notes: Vec<String> = Vec::new();
     let mut used: HashSet<usize> = HashSet::new();
     let mut current = current_candidates(self_pid);
+    tracing::info!(
+        scene = %scene.name,
+        scene_id = %scene.id,
+        windows = scene.windows.len(),
+        resources = scene.resources.len(),
+        candidates = current.len(),
+        relaunch_missing,
+        focus_mode,
+        restricted_targets = only_targets.is_some(),
+        "restore apply start"
+    );
 
     // 先按复用策略补齐实例：保留每个窗口独立的 launch_args / priority / delay_ms，
     // 且记录启动前已有句柄，避免在软件已打开旧实例时瞬间误判为新窗口就绪
     if relaunch_missing {
         let mut launched_total: usize = 0;
         let mut launched_per_exe: HashMap<String, usize> = HashMap::new();
-        for plan in plan_launches(scene, &current) {
-            if is_cancelled() || launched_total >= MAX_LAUNCH_TOTAL {
+        let plans = plan_launches(scene, &current);
+        tracing::info!(plans = plans.len(), "restore launch plan");
+        for plan in plans {
+            if is_cancelled() {
+                tracing::warn!("restore launch aborted by cancel request");
+                break;
+            }
+            if launched_total >= MAX_LAUNCH_TOTAL {
+                tracing::warn!(
+                    cap = MAX_LAUNCH_TOTAL,
+                    "restore launch total cap reached; remaining apps will be skipped"
+                );
                 break;
             }
             if !std::path::Path::new(&plan.exe).is_file() {
+                tracing::warn!(exe = %plan.exe, "launch skipped: executable missing");
                 continue;
             }
             let exe_key = plan.exe.to_lowercase();
             let exe_count = launched_per_exe.entry(exe_key).or_insert(0);
             if *exe_count >= MAX_RELAUNCH_PER_EXE {
+                tracing::warn!(
+                    exe = %plan.exe,
+                    cap = MAX_RELAUNCH_PER_EXE,
+                    "restore per-exe launch cap reached"
+                );
                 continue;
             }
             let known_hwnds: HashSet<usize> = current.iter().map(|c| c.hwnd).collect();
@@ -439,6 +477,12 @@ pub fn apply_with_options(
             launched_total += 1;
             if wait_for_process_window(&plan.exe, &known_hwnds, self_pid) {
                 current = current_candidates(self_pid);
+            } else {
+                tracing::warn!(
+                    exe = %plan.exe,
+                    args = ?plan.args,
+                    "launch wait timed out; no new window detected"
+                );
             }
             if plan.delay_ms > 0 && !is_cancelled() {
                 let mut left = plan.delay_ms.min(15_000);
@@ -502,7 +546,44 @@ pub fn apply_with_options(
             .cloned()
             .collect();
 
+        let exe_exists = win
+            .process_path
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(false);
+        if relaunch_missing && !exe_exists {
+            tracing::warn!(
+                window = %target_name,
+                process = %win.process_name,
+                path = ?win.process_path,
+                "window cannot be auto-launched: executable missing or unreadable"
+            );
+        }
         let outcome = match_window(win, &pool, rect);
+        tracing::debug!(
+            window = %target_name,
+            process = %win.process_name,
+            path = ?win.process_path,
+            class = %win.class_name,
+            display = %win.monitor_key,
+            show_state = ?win.show_state,
+            target_rect = ?rect,
+            candidates = pool.len(),
+            picked = outcome.picked.is_some(),
+            ambiguous = outcome.ambiguous,
+            note = %outcome.note,
+            "restore window match"
+        );
+        if outcome.picked.is_none() {
+            tracing::warn!(
+                window = %target_name,
+                process = %win.process_name,
+                path = ?win.process_path,
+                class = %win.class_name,
+                note = %outcome.note,
+                "restore window skipped"
+            );
+        }
 
         let step = if let Some(idx) = outcome.picked {
             let target = &pool[idx];
@@ -607,6 +688,19 @@ pub fn apply_with_options(
                 code: Some("window_not_found".into()),
             }
         };
+
+        tracing::info!(
+            step_type = %step.step_type,
+            target = %step.target_name,
+            status = ?step.status,
+            code = ?step.code,
+            duration_ms = step.duration_ms,
+            delta_x = ?step.delta_x,
+            delta_y = ?step.delta_y,
+            state_restored = step.state_restored,
+            message = %step.message,
+            "restore step finished"
+        );
 
         // 真实进度：每完成一步推送一次（无 UI 的自检里 app 为 None）
         if let Some(app) = app {
@@ -724,6 +818,15 @@ pub fn apply_with_options(
         .filter(|s| matches!(s.status, StepStatus::Skipped | StepStatus::NeedsReview))
         .count();
 
+    tracing::info!(
+        run_id = %format!("run-{:x}", started_at),
+        scene = %scene.name,
+        succeeded,
+        failed,
+        skipped,
+        total = steps.len(),
+        "restore apply finished"
+    );
     let report = RestoreReport {
         run_id: format!("run-{:x}", started_at),
         scene_id: scene.id.clone(),

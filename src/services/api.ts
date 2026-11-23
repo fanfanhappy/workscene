@@ -57,6 +57,8 @@ export const api = {
   getDisplays: () => call<DisplayInfo[]>("system_get_displays"),
   getHotkeyStatus: () =>
     call<import("@/types/contract").HotkeyStatus>("system_hotkey_status"),
+  openLogDir: () => call<void>("system_open_log_dir"),
+  exportDiagnostics: () => call<string>("system_export_diagnostics"),
   captureStart: () => call<CaptureResult>("capture_start"),
   sceneHealth: () => call<SceneHealth>("scene_health"),
   windowSetTheme: (theme: "light" | "dark") => call<void>("window_set_theme", { theme }),

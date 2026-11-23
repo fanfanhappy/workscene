@@ -132,6 +132,7 @@ export function SettingsPage() {
     staleTime: 60_000,
   });
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
   // 汇总用户工作空间 + 当前桌面实际用到的软件，用于真实展示适配状态与一键忽略
@@ -935,7 +936,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "2.0.0"}
+              WorkScene v{info.data?.version ?? "2.0.1"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -945,6 +946,57 @@ export function SettingsPage() {
             <li>· 权限边界：受 Windows UIPI 限制，普通权限下无法移动管理员提权窗口。</li>
             <li>· 能力边界：不支持 UWP 打包应用窗口恢复；不读取浏览器密码/Cookie 或应用内存缓冲区。</li>
           </ul>
+          <div className="flex flex-col gap-1.5 rounded-[9px] border border-line bg-canvas/55 px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-aux font-medium text-ink">诊断日志</p>
+                <p className="truncate font-mono text-[10px] text-ink-3">
+                  {info.data?.logDir ?? "—"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() =>
+                    api
+                      .openLogDir()
+                      .catch((e) => toast.danger("打开日志目录失败", String((e as Error).message)))
+                  }
+                >
+                  打开日志目录
+                </Button>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  disabled={exportingDiagnostics}
+                  onClick={async () => {
+                    const ok = await confirmAction({
+                      title: "导出诊断包？",
+                      description:
+                        "诊断包包含本地日志、当前窗口标题/路径、显示器信息、设置和最近 20 次恢复记录；不包含数据库和快照文件。请只发给可信任的人。",
+                      confirmLabel: "导出",
+                    });
+                    if (!ok) return;
+                    setExportingDiagnostics(true);
+                    try {
+                      const path = await api.exportDiagnostics();
+                      toast.success("诊断包已导出", path);
+                    } catch (e) {
+                      toast.danger("导出诊断包失败", String((e as Error).message));
+                    } finally {
+                      setExportingDiagnostics(false);
+                    }
+                  }}
+                >
+                  {exportingDiagnostics ? "打包中…" : "导出诊断包"}
+                </Button>
+              </div>
+            </div>
+            <p className="text-[10px] text-ink-3">
+              遇到窗口被跳过时，先点「导出诊断包」；日志会记录每个窗口的匹配依据、候选数量、偏差和被过滤原因。
+            </p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
@@ -959,7 +1011,7 @@ export function SettingsPage() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const data = (await res.json()) as { tag_name?: string; html_url?: string };
                   const latest = (data.tag_name ?? "").replace(/^v/i, "");
-                  const current = (info.data?.version ?? "2.0.0").replace(/^v/i, "");
+                  const current = (info.data?.version ?? "2.0.1").replace(/^v/i, "");
                   const toParts = (v: string) =>
                     v.split(".").map((n) => Number.parseInt(n, 10) || 0);
                   const a = toParts(latest);

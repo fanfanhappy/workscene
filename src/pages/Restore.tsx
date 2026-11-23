@@ -186,6 +186,7 @@ export function RestorePage() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [cancelling, setCancelling] = useState(false);
   const [autoPausedNote, setAutoPausedNote] = useState<string | null>(null);
+  const [exportingDiag, setExportingDiag] = useState(false);
   const autoTriggeredFor = useRef<string | null>(null);
   // 重试/撤销期间先把原报告收起来，失败时用它还原（也避免旧报告上的按钮被重复点击）
   const savedReportRef = useRef<RestoreReport | null>(null);
@@ -943,6 +944,32 @@ export function RestorePage() {
                       <Undo2 size={13} /> 撤销恢复
                     </Button>
                   ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={exportingDiag}
+                    onClick={async () => {
+                      const ok = await confirmAction({
+                        title: "导出诊断包？",
+                        description:
+                          "包含本地日志、当前窗口标题/路径、显示器信息、设置和最近 20 次恢复记录；不含数据库和快照文件。请只发给可信任的人。",
+                        confirmLabel: "导出",
+                      });
+                      if (!ok) return;
+                      setExportingDiag(true);
+                      try {
+                        const path = await api.exportDiagnostics();
+                        toast.success("诊断包已导出", path);
+                      } catch (e) {
+                        toast.danger("导出诊断包失败", String((e as Error).message));
+                      } finally {
+                        setExportingDiag(false);
+                      }
+                    }}
+                  >
+                    <AlertTriangle size={13} />
+                    {exportingDiag ? "打包中…" : "导出诊断"}
+                  </Button>
                   {!isUndoReport && incompleteTargets.length > 0 && active ? (
                     <Button
                       size="sm"

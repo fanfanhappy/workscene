@@ -1309,8 +1309,21 @@ pub async fn to_scene(db: &Db, id: &str) -> AppResult<SceneFile> {
         .collect();
 
     if windows.is_empty() && resources.is_empty() {
+        tracing::warn!(workspace_id = %id, "workspace has no enabled windows/resources");
         return Err(AppError::msg("该工作空间没有已启用的窗口或资源可恢复"));
     }
+    let disabled_apps = detail
+        .items
+        .iter()
+        .filter(|i| i.item_type == "application" && !i.enabled)
+        .count();
+    tracing::info!(
+        workspace_id = %id,
+        windows = windows.len(),
+        resources = resources.len(),
+        disabled_apps,
+        "workspace scene built"
+    );
 
     Ok(SceneFile {
         schema_version: storage::SCHEMA_VERSION,
@@ -2013,6 +2026,12 @@ pub async fn import_json(db: &Db, raw_json: &str) -> AppResult<WorkspaceSummary>
     }
 
     let mut notes: Vec<String> = Vec::new();
+    tracing::info!(
+        apps = parsed.apps.len(),
+        disabled = ?disabled_apps,
+        stripped_args,
+        "workspace import prepared"
+    );
     if !disabled_apps.is_empty() {
         notes.push(format!(
             "{} 个应用的路径不存在、位于网络位置或下载/桌面/临时目录，已停用：{}",
@@ -2500,6 +2519,13 @@ pub async fn recapture(
 
     tx.commit().await?;
 
+    tracing::info!(
+        workspace_id = %workspace_id,
+        captured_apps = item_ids.len(),
+        previous_apps = prev_app_count,
+        captured_windows = capture.windows.len(),
+        "workspace recaptured; unopened apps and their layouts preserved"
+    );
     let _ = add_snapshot(
         db,
         workspace_id,

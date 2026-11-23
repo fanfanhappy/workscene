@@ -232,4 +232,5 @@ pub struct AppInfo {
     pub dpi_awareness: String,
     pub data_dir: String,
     pub snapshot_dir: String,
+    pub log_dir: String,
 }

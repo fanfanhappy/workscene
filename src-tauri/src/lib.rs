@@ -3,6 +3,7 @@ mod capture;
 mod commands;
 mod core;
 mod data;
+pub mod logging;
 mod restore;
 mod storage;
 mod win;
@@ -15,6 +16,7 @@ use windows_sys::Win32::Foundation::HWND;
 pub fn run() {
     // 必须在创建任何窗口前设置，否则坐标会被 DWM 虚拟化
     win::dpi::enable_per_monitor_v2();
+    logging::init();
 
     // 单实例：第二个实例只负责把已存在的窗口拉到前台
     if !win::single_instance::acquire() {
@@ -121,6 +123,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::system_get_info,
             commands::system_hotkey_status,
+            commands::system_open_log_dir,
+            commands::system_export_diagnostics,
             commands::system_get_displays,
             commands::capture_start,
             commands::capture_detect_context,
@@ -1041,6 +1045,7 @@ fn spawn_display_watcher(app: tauri::AppHandle) {
 async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
     // 恢复过程中桌面是“半成品”：此时自动快照会把中间状态写成历史。
     if crate::restore::is_busy() {
+        tracing::debug!("auto snapshot skipped: restore is running");
         return Ok(None);
     }
     let settings = data::settings::get(db).await?;
@@ -1049,6 +1054,7 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
     }
 
     let Some(ws) = data::snapshots::active_workspace(db).await? else {
+        tracing::debug!("auto snapshot skipped: no active workspace");
         return Ok(None);
     };
 
@@ -1059,12 +1065,14 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
             .await?;
 
     if enabled.unwrap_or(0) == 0 {
+        tracing::debug!(workspace_id = %ws, "auto snapshot skipped: workspace disabled");
         return Ok(None);
     }
 
     let capture = capture::scan()?;
     // 扫描期间可能刚好开始恢复；再检查一次，避免把半恢复的桌面落库。
     if crate::restore::is_busy() {
+        tracing::debug!("auto snapshot discarded: restore started during scan");
         return Ok(None);
     }
     if data::snapshots::create_auto(db, &ws, &capture, settings.auto_min_interval_secs * 1000)
@@ -1075,6 +1083,10 @@ async fn auto_snapshot_once(db: &data::Db) -> core::AppResult<Option<String>> {
         let _ = data::snapshots::prune(db, &ws, settings.auto_keep as usize).await;
         return Ok(Some(ws));
     }
+    tracing::debug!(
+        workspace_id = %ws,
+        "auto snapshot skipped: fingerprint unchanged or interval not elapsed"
+    );
     Ok(None)
 }
 

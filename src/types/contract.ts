@@ -378,6 +378,7 @@ export interface AppInfo {
   dpiAwareness: string;
   dataDir: string;
   snapshotDir: string;
+  logDir: string;
 }
 
 /** 导入前预检（只读，不写库） */

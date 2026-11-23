@@ -22,6 +22,7 @@ pub fn system_get_info() -> AppInfo {
         dpi_awareness: "Per-Monitor V2".into(),
         data_dir: storage::data_dir().to_string_lossy().to_string(),
         snapshot_dir: storage::snapshot_dir().to_string_lossy().to_string(),
+        log_dir: crate::logging::log_dir().to_string_lossy().to_string(),
     }
 }
 
@@ -35,6 +36,70 @@ async fn scan_blocking() -> AppResult<CaptureResult> {
 #[tauri::command]
 pub fn system_hotkey_status() -> crate::win::hotkey::HotkeyUpdateResult {
     crate::win::hotkey::last_status()
+}
+
+#[tauri::command]
+pub fn system_open_log_dir() -> AppResult<()> {
+    let dir = crate::logging::log_dir();
+    std::fs::create_dir_all(&dir)?;
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| AppError::msg(format!("打开日志目录失败：{e}")))?;
+    Ok(())
+}
+
+/// 一键诊断包：日志 + 当前桌面快照 + 设置 + 最近 20 次恢复记录 + 系统信息。
+/// 默认不包含数据库和快照 payload，避免把完整用户数据发出去。
+#[tauri::command]
+pub async fn system_export_diagnostics(db: State<'_, Db>) -> AppResult<String> {
+    let dir = crate::logging::new_diagnostics_dir()?;
+    let info = system_get_info();
+    crate::logging::write_json(&dir, "system.json", &info)?;
+
+    let capture = tauri::async_runtime::spawn_blocking(capture::scan)
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    match &capture {
+        Some(c) => crate::logging::write_json(&dir, "capture.json", c)?,
+        None => crate::logging::write_json(
+            &dir,
+            "capture-error.json",
+            &serde_json::json!({ "error": "扫描桌面失败，详见日志" }),
+        )?,
+    }
+
+    if let Ok(settings) = settings::get(&db).await {
+        crate::logging::write_json(&dir, "settings.json", &settings)?;
+    }
+
+    let recent = runs::list(&db, 20).await.unwrap_or_default();
+    let mut run_bundle = Vec::new();
+    for run in &recent {
+        let steps = runs::steps(&db, &run.id).await.unwrap_or_default();
+        run_bundle.push(serde_json::json!({ "run": run, "steps": steps }));
+    }
+    crate::logging::write_json(&dir, "restore-runs.json", &run_bundle)?;
+
+    let copied = crate::logging::copy_logs(&dir)?;
+    tracing::info!(
+        logs = copied,
+        runs = recent.len(),
+        "diagnostics bundle prepared"
+    );
+
+    let zip_path = crate::logging::diagnostics_zip_path();
+    if let Some(parent) = zip_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::logging::zip_dir(&dir, &zip_path)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    // 直接选中诊断包，用户不用去数据目录里翻。
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", zip_path.display()))
+        .spawn();
+    Ok(zip_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -458,6 +523,12 @@ pub async fn workspace_restore(
     // 同一时刻只允许一个恢复任务：两个恢复互相搬窗口会让报告完全失真
     let _guard = crate::restore::try_acquire()
         .ok_or_else(|| AppError::msg("已有恢复任务在执行，请等它结束再试"))?;
+    tracing::info!(
+        workspace_id = %id,
+        relaunch_missing,
+        focus_mode = focus_mode.unwrap_or(false),
+        "workspace_restore command start"
+    );
 
     let mut scene = workspaces::to_scene(&db, &id).await?;
     // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标
@@ -534,6 +605,11 @@ pub async fn snapshot_restore(
 ) -> AppResult<RestoreReport> {
     let _guard = crate::restore::try_acquire()
         .ok_or_else(|| AppError::msg("已有恢复任务在执行，请等它结束再试"))?;
+    tracing::info!(
+        snapshot_id = %id,
+        relaunch_missing,
+        "snapshot_restore command start"
+    );
 
     let scene: SceneFile = storage::load_scene(&id)?;
     let workspace_id = workspaces::workspace_of_snapshot(&db, &id).await?;
@@ -637,6 +713,11 @@ pub async fn workspace_restore_retry(
     if targets.is_empty() {
         return Err(AppError::msg("没有需要重试的项目"));
     }
+    tracing::info!(
+        workspace_id = %id,
+        targets = ?targets,
+        "workspace_restore_retry command start"
+    );
 
     let mut scene = workspaces::to_scene(&db, &id).await?;
     // 若当前显示器拓扑存在专属布局方案，自动套用该拓扑的窗口坐标

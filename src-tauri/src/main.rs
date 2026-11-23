@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // CLI 自检/基线也要留下日志，方便用户把失败现场发回来。
+    workscene_lib::logging::init();
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--selftest") {

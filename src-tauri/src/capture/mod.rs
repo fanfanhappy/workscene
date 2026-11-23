@@ -52,6 +52,7 @@ pub fn scan_for_test() -> AppResult<CaptureResult> {
 fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
     let started = std::time::Instant::now();
     let self_pid = std::process::id();
+    tracing::debug!(allow_self_window, "desktop scan started");
 
     let monitors = display::enumerate();
     if monitors.is_empty() {
@@ -77,6 +78,13 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
                 let pinfo = pid_cache
                     .entry(raw.pid)
                     .or_insert_with(|| process::info(raw.pid));
+                tracing::debug!(
+                    process = %pinfo.name,
+                    class = %raw.class_name,
+                    title = %raw.title,
+                    %reason,
+                    "window excluded from capture"
+                );
                 excluded.push(ExcludedWindow {
                     title: raw.title,
                     class_name: raw.class_name,
@@ -95,6 +103,11 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         if !allow_self_window && filter::is_ignored_process(&pinfo.name) {
             excluded_total += 1;
             if excluded.len() < 120 {
+                tracing::debug!(
+                    process = %pinfo.name,
+                    title = %raw.title,
+                    "window excluded by user ignore list"
+                );
                 excluded.push(ExcludedWindow {
                     title: raw.title,
                     class_name: raw.class_name,
@@ -123,6 +136,15 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
             protected_processes += 1;
         }
 
+        tracing::debug!(
+            process = %pinfo.name,
+            pid = raw.pid,
+            class = %raw.class_name,
+            title = %raw.title,
+            monitor = mon.map(|m| m.key.as_str()).unwrap_or("-"),
+            state = ?raw.show_state,
+            "window captured"
+        );
         windows.push(WindowInfo {
             hwnd: raw.hwnd as usize,
             process_id: raw.pid,
@@ -169,9 +191,17 @@ fn scan_internal(allow_self_window: bool) -> AppResult<CaptureResult> {
         ));
     }
 
+    let duration_ms = started.elapsed().as_millis() as i64;
+    tracing::info!(
+        windows = windows.len(),
+        excluded = excluded_total,
+        displays = displays.len(),
+        duration_ms,
+        "desktop scan finished"
+    );
     Ok(CaptureResult {
         captured_at: now_ms(),
-        duration_ms: started.elapsed().as_millis() as i64,
+        duration_ms,
         windows,
         displays,
         excluded,
