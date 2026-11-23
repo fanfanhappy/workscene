@@ -5,6 +5,7 @@ use crate::core::models::{
     PreviewItem, PreviewSummary, RestorePreview, RestoreReport, RestoreStepResult, SceneFile,
     SceneResource, SceneWindow, ShowState, StepStatus,
 };
+use crate::adapters::{self, AdapterKind};
 use crate::core::time::now_ms;
 use crate::core::{AppError, AppResult};
 use crate::win::{display, filter, process, window};
@@ -974,6 +975,16 @@ struct LaunchPlan {
 }
 
 /// 当桌面已有同进程实例时，为常见单实例转发型应用注入「新开窗口」参数，避免新启动只切焦点不开窗
+/// 浏览器标题在存在多个标签页时会带“和另外 N 个页面”/“and N more pages”。
+/// 这是判断“该窗口里有标签页”的唯一本地信号，不需要读取浏览历史。
+fn title_has_tabs(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    (title.contains("和另外") && title.contains("个页面"))
+        || lower.contains("other page")
+        || lower.contains("more page")
+        || lower.contains("more tab")
+}
+
 fn inject_new_window_flag(exe: &str, args: &mut Vec<String>) {
     let name = exe
         .rsplit(['\\', '/'])
@@ -1028,13 +1039,38 @@ fn plan_launches(scene: &SceneFile, current: &[Candidate]) -> Vec<LaunchPlan> {
 
     let mut plans: Vec<LaunchPlan> = Vec::new();
     let mut running_count: HashMap<String, usize> = available_by_exe.clone();
+    let mut tabbed_browser_launched: HashSet<String> = HashSet::new();
 
     for w in windows_ordered {
         let Some(path) = w.process_path.as_ref() else {
             continue;
         };
         let key = path.to_lowercase();
-        let should_launch = match parse_policy(&w.reuse_policy) {
+        let policy = parse_policy(&w.reuse_policy);
+        let is_browser = adapters::classify(&w.process_name) == AdapterKind::Browser;
+        let tabbed = is_browser && title_has_tabs(&w.title);
+        if tabbed && policy != ReusePolicy::AlwaysLaunch {
+            let running = available_by_exe.get(&key).copied().unwrap_or(0) > 0;
+            if running {
+                // 浏览器已经开着：再按窗口补启会把同一窗口里的标签页拆成多个窗口。
+                // 直接复用现有窗口，多出来的场景窗口在匹配阶段如实跳过。
+                tracing::info!(
+                    exe = %path,
+                    title = %w.title,
+                    "browser has tabs and is already running; skip additional window launch"
+                );
+                continue;
+            }
+            if !tabbed_browser_launched.insert(key.clone()) {
+                tracing::info!(
+                    exe = %path,
+                    title = %w.title,
+                    "browser tabs: only one launch for this browser"
+                );
+                continue;
+            }
+        }
+        let should_launch = match policy {
             ReusePolicy::AlwaysLaunch => true,
             ReusePolicy::ReuseIfMatched => false,
             ReusePolicy::ReuseOrLaunch => {
@@ -1479,5 +1515,44 @@ mod tests {
         );
         assert_eq!(plans.len(), 1);
         assert!(plans[0].args.iter().any(|a| a == "--new-window"));
+    }
+
+    #[test]
+    fn tabbed_browser_running_does_not_launch_extra_windows() {
+        let mut scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            2,
+        );
+        for (i, w) in scene.windows.iter_mut().enumerate() {
+            w.process_name = "chrome.exe".into();
+            w.title = format!("工作页{i} 和另外 3 个页面 - Google Chrome");
+        }
+        let plans = plan_launches(
+            &scene,
+            &candidate(
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                1,
+            ),
+        );
+        assert!(
+            plans.is_empty(),
+            "浏览器已开着且窗口含标签页时，不能再新开窗口拆散标签"
+        );
+    }
+
+    #[test]
+    fn tabbed_browser_closed_launches_only_one_window() {
+        let mut scene = scene_with(
+            "reuse_or_launch",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            3,
+        );
+        for (i, w) in scene.windows.iter_mut().enumerate() {
+            w.process_name = "chrome.exe".into();
+            w.title = format!("工作页{i} 和另外 3 个页面 - Google Chrome");
+        }
+        let plans = plan_launches(&scene, &[]);
+        assert_eq!(plans.len(), 1, "浏览器未运行时最多只拉起一个窗口");
     }
 }
