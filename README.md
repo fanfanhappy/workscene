@@ -88,8 +88,8 @@ Windows 10 / 11 · 本地优先 · 无需账号 · 数据不出本机
 | **标准安装版**（推荐） | `WorkScene_1.1.3_x64-setup.exe` | NSIS 当前用户安装，无需管理员权限，带开始菜单快捷方式与标准卸载。数据默认在 `%LOCALAPPDATA%\WorkScene`。 |
 | **绿色便携版** | `WorkScene-1.1.3-portable.zip` | 解压即用。双击 `start.cmd` 启动时自动使用同目录 `data\`，整个文件夹可拷入 U 盘或同步盘随身迁移。 |
 
-- **系统要求**：Windows 10 1809+ / Windows 11（x64）；安装包会在缺少 WebView2 Runtime 时自动下载安装。
-- **完整性校验**：每个 Release 都附带 `SHA256SUMS.txt`，下载后可执行 `certutil -hashfile <文件名> SHA256` 对照。
+- **系统要求**：Windows 10 / 11（x64）；安装包会在缺少 WebView2 Runtime 时自动下载安装（需联网）。
+- **完整性校验**：最新 Release 附带 `SHA256SUMS.txt`，下载后可执行 `certutil -hashfile <文件名> SHA256` 对照。
 
 > **Windows SmartScreen 提示**：当前构建没有购买商业 EV 代码签名。首次运行安装包或主程序时若出现「Windows 已保护你的电脑」，请点 **「更多信息」→「仍要运行」**。
 
