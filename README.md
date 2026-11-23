@@ -13,6 +13,7 @@ Windows 10 / 11 · 本地优先 · 无需账号 · 数据不出本机
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D6)]()
 [![Stack](https://img.shields.io/badge/stack-Tauri%202%20%C2%B7%20React%2019%20%C2%B7%20Rust-111827)]()
 [![Privacy](https://img.shields.io/badge/privacy-100%25%20local-22c55e)]()
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [下载安装](#下载与安装) · [界面预览](#界面预览) · [快速上手](#快速上手) · [快捷键](#快捷键) · [版本记录](docs/RELEASE.md) · [问题反馈](https://github.com/fanfanhappy/workscene/issues)
 
@@ -69,13 +70,15 @@ Windows 10 / 11 · 本地优先 · 无需账号 · 数据不出本机
 
 ## 界面预览
 
-| 工作空间详情 | 布局画布 |
+| 窗口摆法画布 | 软件列表 |
 |---|---|
-| ![应用与窗口列表](docs/screenshot-workspace-detail.png) | ![窗口布局编辑](docs/screenshot-layout-editor.png) |
+| ![窗口布局编辑](docs/screenshot-layout-editor.png) | ![软件列表](docs/screenshot-workspace-detail.png) |
 
 | 历史快照 | 设置 |
 |---|---|
 | ![历史快照与恢复记录](docs/screenshot-history.png) | ![设置页](docs/screenshot-settings.png) |
+
+> 截图取自 v1.1.3，Windows 11 深色主题，150% 缩放。
 
 ---
 
@@ -272,4 +275,6 @@ pnpm tauri build
 
 ## 许可
 
-本仓库目前未附带 `LICENSE` 文件。在补充正式许可证之前，请勿将代码或构建产物用于再分发或商业用途；如需授权，请通过 Issue 联系作者。
+本项目以 [MIT License](LICENSE) 开源，可自由使用、修改与分发（保留版权与许可声明）。
+
+WorkScene 是一个独立的第三方桌面工具，与 Microsoft、GitHub 及文中提到的其他软件厂商无隶属关系；相关商标归各自所有者所有。
