@@ -79,18 +79,18 @@ Windows 10 / 11 · 本地优先 · 无需账号 · 数据不出本机
 |---|---|
 | ![历史快照与恢复记录](docs/screenshot-history.png) | ![设置页](docs/screenshot-settings.png) |
 
-> 截图取自 v1.1.3；v2.0.1 主要补充诊断日志与底层修复，界面延续该版本。Windows 11 深色主题，150% 缩放。
+> 截图取自 v1.1.3；v2.0.2 主要补充诊断日志与底层修复，界面延续该版本。Windows 11 深色主题，150% 缩放。
 
 ---
 
 ## 下载与安装
 
-前往 [GitHub Releases](https://github.com/fanfanhappy/workscene/releases/latest) 下载最新版本（当前正式版 **v2.0.1**）。
+前往 [GitHub Releases](https://github.com/fanfanhappy/workscene/releases/latest) 下载最新版本（当前正式版 **v2.0.2**）。
 
 | 版本形态 | 文件名 | 适用场景 |
 |---|---|---|
-| **标准安装版**（推荐） | `WorkScene_2.0.1_x64-setup.exe` | NSIS 当前用户安装，无需管理员权限，带开始菜单快捷方式与标准卸载。数据默认在 `%LOCALAPPDATA%\WorkScene`。 |
-| **绿色便携版** | `WorkScene-2.0.1-portable.zip` | 解压即用。双击 `start.cmd` 启动时自动使用同目录 `data\`，整个文件夹可拷入 U 盘或同步盘随身迁移。 |
+| **标准安装版**（推荐） | `WorkScene_2.0.2_x64-setup.exe` | NSIS 当前用户安装，无需管理员权限，带开始菜单快捷方式与标准卸载。数据默认在 `%LOCALAPPDATA%\WorkScene`。 |
+| **绿色便携版** | `WorkScene-2.0.2-portable.zip` | 解压即用。双击 `start.cmd` 启动时自动使用同目录 `data\`，整个文件夹可拷入 U 盘或同步盘随身迁移。 |
 
 - **系统要求**：Windows 10 / 11（x64）；安装包会在缺少 WebView2 Runtime 时自动下载安装（需联网）。
 - **完整性校验**：最新 Release 附带 `SHA256SUMS.txt`，下载后可执行 `certutil -hashfile <文件名> SHA256` 对照。

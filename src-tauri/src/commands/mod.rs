@@ -1277,6 +1277,9 @@ pub async fn workspace_resource_update(
 mod tests {
     use super::*;
 
+    /// 这些用例会改真实 HKCU 启动项；测试并行跑时会互相把 autostart 关掉。
+    static AUTOSTART_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 不变量：`apply_settings` 返回的开机启动状态必须等于系统真实状态，
     /// 且没能改变真实状态时必须返回错误，不能出现"界面显示已开启、系统里却没有"。
     ///
@@ -1285,10 +1288,13 @@ mod tests {
     /// 避免在开发机/CI 上留下指向测试二进制的启动项。
     #[tokio::test]
     async fn hotkey_conflict_rolls_back_to_previous_preset() {
+        let _guard = AUTOSTART_TEST_LOCK.lock().unwrap();
         let db = crate::data::in_memory().await.unwrap();
         let previous = settings::get(&db).await.unwrap();
         let mut input = previous.clone();
         input.hotkey = "Ctrl+Shift+W".into();
+        // 不要因为测试默认值把 CI/本机真实的 autostart 关掉
+        input.autostart = crate::win::autostart::is_enabled();
 
         // 测试进程没有热键消息循环，update 会失败；此时必须保留旧 preset，
         // 不能把新组合写进库、让用户既没有新热键也没有旧热键。
@@ -1303,6 +1309,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_report_only_the_real_autostart_state() {
+        let _guard = AUTOSTART_TEST_LOCK.lock().unwrap();
         let db = crate::data::in_memory().await.unwrap();
         let before = crate::win::autostart::is_enabled();
         if before {

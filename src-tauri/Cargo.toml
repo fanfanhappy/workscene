@@ -1,6 +1,6 @@
 [package]
 name = "workscene"
-version = "2.0.1"
+version = "2.0.2"
 description = "WorkScene - Windows workspace manager"
 authors = ["WorkScene"]
 license = "MIT"
