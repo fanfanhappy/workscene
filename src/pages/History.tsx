@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -74,6 +74,13 @@ export function HistoryPage() {
     (requestedId && (workspaces.data ?? []).some((w) => w.id === requestedId)
       ? requestedId
       : workspaces.data?.[0]?.id) ?? null;
+
+  useEffect(() => {
+    setPicked([]);
+    setInspectedId(null);
+    setDiff(null);
+    setRestoreReport(null);
+  }, [activeId]);
 
   const list = useQuery({
     queryKey: ["snapshots", activeId],
@@ -478,7 +485,9 @@ export function HistoryPage() {
           value={snapName}
           onChange={(e) => setSnapName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create.mutate(snapName.trim() || "手动快照");
+            if (e.key === "Enter" && !create.isPending) {
+              create.mutate(snapName.trim() || "手动快照");
+            }
           }}
           className="h-9 w-full rounded-[8px] border border-line-strong bg-canvas px-3 text-body text-ink outline-none focus:border-accent"
           placeholder="输入快照名称"

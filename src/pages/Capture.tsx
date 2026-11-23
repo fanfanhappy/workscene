@@ -61,6 +61,7 @@ export function CapturePage() {
 
   const scannedOnce = useRef(false);
   const detectSeqRef = useRef(0);
+  const prevResultRef = useRef<CaptureResult | null>(null);
 
   const scan = useMutation({
     mutationFn: api.captureStart,
@@ -72,24 +73,24 @@ export function CapturePage() {
     },
     onSuccess: (data) => {
       qc.setQueryData(["capture"], data);
-      setResult((prevResult) => {
-        if (!prevResult) {
-          setSelected(new Set(data.windows.map((w) => w.hwnd)));
-        } else {
-          // 重新扫描时保留用户已取消勾选的窗口，只把新出现的窗口自动勾选
-          const prevKnown = new Set(prevResult.windows.map((w) => w.hwnd));
-          setSelected((prevSel) => {
-            const next = new Set<number>();
-            for (const w of data.windows) {
-              if (!prevKnown.has(w.hwnd) || prevSel.has(w.hwnd)) {
-                next.add(w.hwnd);
-              }
+      const prevResult = prevResultRef.current;
+      prevResultRef.current = data;
+      setResult(data);
+      if (!prevResult) {
+        setSelected(new Set(data.windows.map((w) => w.hwnd)));
+      } else {
+        // 重新扫描时保留用户已取消勾选的窗口，只把新出现的窗口自动勾选
+        const prevKnown = new Set(prevResult.windows.map((w) => w.hwnd));
+        setSelected((prevSel) => {
+          const next = new Set<number>();
+          for (const w of data.windows) {
+            if (!prevKnown.has(w.hwnd) || prevSel.has(w.hwnd)) {
+              next.add(w.hwnd);
             }
-            return next;
-          });
-        }
-        return data;
-      });
+          }
+          return next;
+        });
+      }
       setName((prevName) => {
         if (prevName.trim()) return prevName;
         const d = new Date();
@@ -144,14 +145,17 @@ export function CapturePage() {
         if (ideProjects.length > 0) {
           const detail = await api.workspaceGet(wsId).catch(() => null);
           if (detail) {
+            const assignedIds = new Set<string>();
             for (const proj of ideProjects) {
               const appItem = detail.items.find(
                 (it) =>
                   it.itemType === "application" &&
+                  !assignedIds.has(it.id) &&
                   (it.displayName.toLowerCase() === proj.sourceApp.toLowerCase() ||
                     (it.target ?? "").toLowerCase().endsWith(proj.sourceApp.toLowerCase())),
               );
               if (appItem && !appItem.launchArgs) {
+                assignedIds.add(appItem.id);
                 const arg = proj.target.includes(" ") ? `"${proj.target}"` : proj.target;
                 await api
                   .workspaceItemUpdate(
@@ -212,6 +216,8 @@ export function CapturePage() {
       }
       qc.invalidateQueries({ queryKey: ["workspaces"], refetchType: "all" });
       qc.invalidateQueries({ queryKey: ["workspace", res.id] });
+      qc.invalidateQueries({ queryKey: ["preview", res.id] });
+      qc.invalidateQueries({ queryKey: ["ws-profiles", res.id] });
       qc.invalidateQueries({ queryKey: ["snapshots", res.id] });
       qc.invalidateQueries({ queryKey: ["storage-stats"] });
       if (res.updated) {

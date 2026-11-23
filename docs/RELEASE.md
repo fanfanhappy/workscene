@@ -1,8 +1,14 @@
-# WorkScene v1.1.2 正式版发布说明
+# WorkScene v1.1.3 正式版发布说明
 
-- 日期：2026-11-22
-- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.1.2_x64-setup.exe` 与免安装便携版 `WorkScene-1.1.2-portable.zip`）
+- 日期：2026-11-23
+- 形态：Windows 10/11 桌面应用（提供 NSIS 单文件安装包 `WorkScene_1.1.3_x64-setup.exe` 与免安装便携版 `WorkScene-1.1.3-portable.zip`）
 - 数据：100% 本地离线（安装版默认 `%LOCALAPPDATA%\WorkScene`，便携版双击 `start.cmd` 自动存入同目录 `data\`），无遥测、无云同步、不截屏、不读取浏览器密码/Cookie
+
+## v1.1.3 前端健壮性与交互打磨
+
+- **React StrictMode 零副作用修复**：彻底消除布局画布撤销/重做、设置页保存、捕获页重扫中的非纯 state updater。
+- **弹窗层级与快捷键栈**：实现嵌套弹窗 LIFO `Esc` 栈（优先关闭顶层确认框）、`ToastHost` 独立 Portal `z-[70]` 永不被弹窗遮罩遮挡、`Ctrl+K`/`Ctrl+S`/`Ctrl+Z`/方向键不再穿透模态框。
+- **页面切换与缓存一致性**：恢复报告页支持 `Ctrl+K` 直接切换恢复另一空间；历史页与资源卡片切换空间自动重置状态；Windows 应用图标缓存改为大小写不敏感匹配；窄屏自动折叠侧栏不再永久覆盖用户偏好。
 
 ## v1.1.2 完整性补强
 

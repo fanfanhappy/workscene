@@ -402,10 +402,11 @@ export function WorkspacesPage() {
     },
   });
 
-  // 详情页支持 Ctrl+S 快速保存未提交的窗口摆法
+  // 详情页支持 Ctrl+S 快速保存未提交的窗口摆法（仅在布局 Tab 且无弹窗开启时生效）
   useEffect(() => {
-    if (!activeId || !layoutDirty) return;
+    if (!activeId || !layoutDirty || tab !== "layout") return;
     const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[data-ws-modal="true"]')) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         if (!saveLayout.isPending) saveLayout.mutate();
@@ -413,7 +414,7 @@ export function WorkspacesPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activeId, layoutDirty, saveLayout]);
+  }, [activeId, layoutDirty, tab, saveLayout]);
 
   const saveItem = useMutation({
     mutationFn: (v: {
@@ -528,7 +529,7 @@ export function WorkspacesPage() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       toast.success("已导出配置文件", `${safe}.workscene.json`);
     } catch (e) {
       toast.danger("导出失败", String((e as Error).message));
@@ -1246,11 +1247,13 @@ export function WorkspacesPage() {
           {tab === "resources" ? (
             <div className="flex flex-col gap-3.5">
               <ResourcesCard
+                key={detail.data.id}
                 workspaceId={detail.data.id}
                 items={resourceItems}
                 onChanged={() => {
                   qc.invalidateQueries({ queryKey: ["workspace", activeId] });
                   qc.invalidateQueries({ queryKey: ["workspaces"] });
+                  qc.invalidateQueries({ queryKey: ["preview", activeId] });
                 }}
                 onError={setError}
               />
@@ -1388,7 +1391,9 @@ export function WorkspacesPage() {
           value={dupName}
           onChange={(e) => setDupName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && dupName.trim()) duplicateWs.mutate();
+            if (e.key === "Enter" && dupName.trim() && !duplicateWs.isPending) {
+              duplicateWs.mutate();
+            }
           }}
           maxLength={80}
           className="h-9 w-full rounded-[8px] border border-line-strong bg-canvas px-3 text-body text-ink outline-none focus:border-accent"

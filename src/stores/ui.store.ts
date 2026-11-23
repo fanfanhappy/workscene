@@ -32,13 +32,10 @@ interface UiState {
   commandPaletteOpen: boolean;
   onboardingOpen: boolean;
   hasUnsavedLayout: boolean;
-  captureOpen: boolean;
-  restoreWorkspaceId: string | null;
   toasts: ToastItem[];
   confirmRequest: ConfirmRequest | null;
 
   setThemeMode: (mode: ThemeMode) => void;
-  cycleThemeMode: () => void;
   syncSystemTheme: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
@@ -47,10 +44,6 @@ interface UiState {
   openOnboarding: () => void;
   completeOnboarding: () => void;
   setHasUnsavedLayout: (dirty: boolean) => void;
-  openCapture: () => void;
-  closeCapture: () => void;
-  openRestore: (workspaceId: string) => void;
-  closeRestore: () => void;
 
   pushToast: (toast: Omit<ToastItem, "id">, durationMs?: number) => void;
   dismissToast: (id: string) => void;
@@ -112,8 +105,6 @@ export const useUiStore = create<UiState>((set, get) => ({
   commandPaletteOpen: false,
   onboardingOpen: loadInitialOnboardingOpen(),
   hasUnsavedLayout: false,
-  captureOpen: false,
-  restoreWorkspaceId: null,
   toasts: [],
   confirmRequest: null,
 
@@ -126,12 +117,6 @@ export const useUiStore = create<UiState>((set, get) => ({
       // ignore storage errors
     }
     set({ themeMode: mode, resolvedTheme: resolved });
-  },
-
-  cycleThemeMode: () => {
-    const cur = get().themeMode;
-    const next: ThemeMode = cur === "dark" ? "light" : cur === "light" ? "system" : "dark";
-    get().setThemeMode(next);
   },
 
   syncSystemTheme: () => {
@@ -167,11 +152,6 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ onboardingOpen: false });
   },
   setHasUnsavedLayout: (dirty) => set({ hasUnsavedLayout: dirty }),
-  openCapture: () => set({ captureOpen: true, commandPaletteOpen: false }),
-  closeCapture: () => set({ captureOpen: false }),
-  openRestore: (workspaceId) =>
-    set({ restoreWorkspaceId: workspaceId, commandPaletteOpen: false }),
-  closeRestore: () => set({ restoreWorkspaceId: null }),
 
   pushToast: (toast, durationMs = 3600) => {
     const id = `t-${++toastSeq}`;

@@ -53,6 +53,11 @@ export function CommandPalette() {
   useEffect(() => {
     const onGlobalKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        // 若已有其他模态框（Dialog / 确认框 / 新手引导）打开，不叠加唤起命令面板
+        const isOpen = useUiStore.getState().commandPaletteOpen;
+        if (!isOpen && document.querySelector('[data-ws-modal="true"]')) {
+          return;
+        }
         e.preventDefault();
         useUiStore.getState().toggleCommandPalette();
       }
@@ -283,6 +288,7 @@ export function CommandPalette() {
 
   return (
     <div
+      data-ws-modal="true"
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/38 px-4 pt-[12vh] backdrop-blur-sm"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) setOpen(false);

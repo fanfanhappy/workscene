@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertTriangle,
@@ -383,6 +383,27 @@ export function Tabs<T extends string>({
   );
 }
 
+/** 全局模态框 Esc 栈：确保嵌套弹窗（如编辑框上弹确认框）按 Esc 总是先关最顶层 */
+const dialogEscStack: Array<() => void> = [];
+let escListenerBound = false;
+
+function ensureEscListener() {
+  if (escListenerBound || typeof window === "undefined") return;
+  escListenerBound = true;
+  window.addEventListener(
+    "keydown",
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape" && dialogEscStack.length > 0) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const top = dialogEscStack[dialogEscStack.length - 1];
+        top?.();
+      }
+    },
+    true,
+  );
+}
+
 export function Dialog({
   open,
   onClose,
@@ -400,24 +421,27 @@ export function Dialog({
   footer?: ReactNode;
   maxWidth?: string;
 }) {
+  const titleId = useId();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        onClose();
-      }
+    ensureEscListener();
+    const handler = () => onCloseRef.current();
+    dialogEscStack.push(handler);
+    return () => {
+      const idx = dialogEscStack.lastIndexOf(handler);
+      if (idx >= 0) dialogEscStack.splice(idx, 1);
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
   const content = (
     <div
-      className="animate-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+      data-ws-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -425,12 +449,12 @@ export function Dialog({
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="ws-dialog-title"
+        aria-labelledby={titleId}
         className={`animate-dialog flex max-h-[85vh] w-full flex-col overflow-hidden rounded-[14px] border border-line-strong/60 bg-surface shadow-overlay ${maxWidth}`}
       >
         <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-3.5">
           <div className="min-w-0">
-            <h3 id="ws-dialog-title" className="text-[15px] font-semibold text-ink">
+            <h3 id={titleId} className="text-[15px] font-semibold text-ink">
               {title}
             </h3>
             {description ? (
@@ -521,10 +545,10 @@ export function ToastHost() {
 
   if (toasts.length === 0) return null;
 
-  return (
+  const toastLayer = (
     <div
       aria-live="polite"
-      className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[320px] max-w-[calc(100vw-2rem)] flex-col gap-2"
+      className="pointer-events-none fixed bottom-4 right-4 z-[70] flex w-[320px] max-w-[calc(100vw-2rem)] flex-col gap-2"
     >
       {toasts.map((t) => {
         const meta = toastToneMeta[t.tone];
@@ -554,4 +578,6 @@ export function ToastHost() {
       })}
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(toastLayer, document.body) : toastLayer;
 }

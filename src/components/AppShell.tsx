@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
@@ -88,9 +88,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [qc]);
 
   const syncSystemTheme = useUiStore((s) => s.syncSystemTheme);
-  const collapsed = useUiStore((s) => s.sidebarCollapsed);
+  const userCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const setCommandPaletteOpen = useUiStore((s) => s.setCommandPaletteOpen);
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < 940,
+  );
+  const collapsed = userCollapsed || isNarrow;
 
   /** 若布局画布有未保存改动，跨页导航前弹出确认，避免静默丢失 */
   const guardedNavigate = async (to: string) => {
@@ -116,11 +120,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [syncSystemTheme]);
 
   useEffect(() => {
-    const onResize = () => {
-      if (window.innerWidth < 940 && !useUiStore.getState().sidebarCollapsed) {
-        useUiStore.getState().setSidebarCollapsed(true);
-      }
-    };
+    const onResize = () => setIsNarrow(window.innerWidth < 940);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -281,7 +281,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           ) : (
             <p className="px-2.5 font-mono text-[10px] text-ink-3">
-              v{info.data?.version ?? "1.1.2"} · 本地离线优先
+              v{info.data?.version ?? "1.1.3"} · 本地离线优先
             </p>
           )}
         </div>

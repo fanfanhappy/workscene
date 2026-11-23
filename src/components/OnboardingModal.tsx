@@ -88,13 +88,17 @@ export function OnboardingModal() {
     saveSettings.mutate({ ...settings.data, ...partial });
   };
 
-  const finishAndCapture = () => {
+  const finishAndCapture = async () => {
     complete();
+    if (useUiStore.getState().hasUnsavedLayout) {
+      useUiStore.getState().setHasUnsavedLayout(false);
+    }
     navigate("/capture");
   };
 
   const content = (
     <div
+      data-ws-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/48 p-4 backdrop-blur-md"
       role="dialog"
       aria-modal="true"
@@ -307,7 +311,7 @@ export function OnboardingModal() {
                   </div>
                   <Switch
                     checked={settings.data?.restoreRelaunchDefault ?? true}
-                    disabled={!settings.data}
+                    disabled={!settings.data || saveSettings.isPending}
                     onChange={(v) => patchSetting({ restoreRelaunchDefault: v })}
                     ariaLabel="恢复时自动启动未打开的软件"
                   />
@@ -322,7 +326,7 @@ export function OnboardingModal() {
                   </div>
                   <Switch
                     checked={settings.data?.restoreFocusModeDefault ?? false}
-                    disabled={!settings.data}
+                    disabled={!settings.data || saveSettings.isPending}
                     onChange={(v) => patchSetting({ restoreFocusModeDefault: v })}
                     ariaLabel="专注模式"
                   />

@@ -90,24 +90,20 @@ export function LayoutEditor({
   );
 
   const handleUndo = useCallback(() => {
-    setUndoStack((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1]!;
-      setRedoStack((r) => [...r.slice(-29), windows]);
-      onChange(last);
-      return prev.slice(0, -1);
-    });
-  }, [onChange, windows]);
+    if (undoStack.length === 0) return;
+    const last = undoStack[undoStack.length - 1]!;
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((r) => [...r.slice(-29), windows]);
+    onChange(last);
+  }, [onChange, undoStack, windows]);
 
   const handleRedo = useCallback(() => {
-    setRedoStack((prev) => {
-      if (prev.length === 0) return prev;
-      const next = prev[prev.length - 1]!;
-      setUndoStack((u) => [...u.slice(-29), windows]);
-      onChange(next);
-      return prev.slice(0, -1);
-    });
-  }, [onChange, windows]);
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1]!;
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((u) => [...u.slice(-29), windows]);
+    onChange(next);
+  }, [onChange, redoStack, windows]);
 
   const bounds = useMemo(() => {
     if (displays.length === 0) return { x: 0, y: 0, w: 1, h: 1 };
@@ -270,6 +266,7 @@ export function LayoutEditor({
   // 键盘编辑支持：方向键微调、Shift+方向键 5% 步进、Ctrl+Z/Y 撤销重做、Esc 取消选中
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[data-ws-modal="true"]')) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -426,7 +423,8 @@ export function LayoutEditor({
       (cur.xRatio !== drag.origin.xRatio ||
         cur.yRatio !== drag.origin.yRatio ||
         cur.widthRatio !== drag.origin.widthRatio ||
-        cur.heightRatio !== drag.origin.heightRatio);
+        cur.heightRatio !== drag.origin.heightRatio ||
+        cur.showState !== drag.origin.showState);
     if (changed) {
       setUndoStack((s) => [...s.slice(-29), drag.snapshotBefore]);
       setRedoStack([]);

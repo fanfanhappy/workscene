@@ -115,6 +115,20 @@ export function RestorePage() {
     [workspaces.data, workspaceId],
   );
 
+  // 当通过 Ctrl+K 或路由切换到另一工作空间时，自动清理旧空间报告与状态，确保 ?auto=1 正常触发
+  const lastWorkspaceIdRef = useRef<string | null>(workspaceId);
+  useEffect(() => {
+    if (workspaceId && lastWorkspaceIdRef.current && workspaceId !== lastWorkspaceIdRef.current) {
+      setReport(null);
+      setIsUndoReport(false);
+      setLiveSteps([]);
+      setError(null);
+      setAutoPausedNote(null);
+      autoTriggeredFor.current = null;
+    }
+    lastWorkspaceIdRef.current = workspaceId;
+  }, [workspaceId]);
+
   const filteredWorkspaces = useMemo(() => {
     const q = wsSearch.trim().toLowerCase();
     return (workspaces.data ?? []).filter((w) =>
@@ -693,12 +707,18 @@ export function RestorePage() {
                     <Button
                       size="sm"
                       variant="primary"
+                      disabled={running || busy.data === true}
                       onClick={() => retryFailed.mutate(incompleteTargets)}
                     >
                       <RotateCw size={13} /> 仅重试未完成项 ({incompleteTargets.length})
                     </Button>
                   ) : (
-                    <Button size="sm" variant="primary" onClick={() => run.mutate()}>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={running || busy.data === true}
+                      onClick={() => run.mutate()}
+                    >
                       <RefreshCw size={13} /> {isUndoReport ? "重新恢复工作空间" : "再恢复一次"}
                     </Button>
                   )}

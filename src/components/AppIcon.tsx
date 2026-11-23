@@ -29,7 +29,15 @@ export function useAppIcons(paths: (string | null | undefined)[]) {
     retry: 0,
   });
 
-  return q.data ?? {};
+  return useMemo(() => {
+    const raw = q.data ?? {};
+    const map: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      map[k] = v;
+      map[k.toLowerCase()] = v;
+    }
+    return map;
+  }, [q.data]);
 }
 
 /** 展示 Windows 软件真实图标，读取不到时优雅降级为苹果风首字母圆角块 */
@@ -44,7 +52,7 @@ export function AppIcon({
   icons?: Record<string, string>;
   size?: number;
 }) {
-  const src = path && icons ? icons[path] : undefined;
+  const src = path && icons ? icons[path] ?? icons[path.trim().toLowerCase()] : undefined;
   const cleanName = name.replace(/\.exe$/i, "").trim() || "?";
 
   if (src) {

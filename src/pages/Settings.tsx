@@ -187,12 +187,10 @@ export function SettingsPage() {
   });
 
   const patch = (next: Partial<AppSettings>) => {
-    setDraft((prev) => {
-      if (!prev) return prev;
-      const merged = { ...prev, ...next };
-      save.mutate(merged);
-      return merged;
-    });
+    if (!draft) return;
+    const merged = { ...draft, ...next };
+    setDraft(merged);
+    save.mutate(merged);
   };
 
   const normalizeExe = (raw: string) => {
@@ -234,6 +232,19 @@ export function SettingsPage() {
     },
     onError: (e) => toast.danger("快捷槽设置失败", String((e as Error).message)),
   });
+
+  if (settings.isError) {
+    return (
+      <Card className="flex flex-col items-start gap-3">
+        <ErrorNote
+          message={`读取设置失败：${String((settings.error as Error)?.message ?? "未知错误")}`}
+        />
+        <Button size="sm" variant="secondary" onClick={() => settings.refetch()}>
+          <RefreshCw size={13} /> 重试读取
+        </Button>
+      </Card>
+    );
+  }
 
   if (settings.isPending || !draft) {
     return (
@@ -557,8 +568,12 @@ export function SettingsPage() {
                 onClick={async () => {
                   const dir = stats.data?.dataDir ?? info.data?.dataDir ?? "";
                   if (!dir) return;
-                  await navigator.clipboard.writeText(dir).catch(() => undefined);
-                  toast.success("已复制目录路径");
+                  try {
+                    await navigator.clipboard.writeText(dir);
+                    toast.success("已复制目录路径");
+                  } catch {
+                    toast.danger("复制失败", "剪贴板不可用，请点击「打开目录」查看");
+                  }
                 }}
               >
                 <Copy size={13} /> 复制
@@ -812,7 +827,7 @@ export function SettingsPage() {
         <Card className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-card font-semibold text-ink">
-              WorkScene v{info.data?.version ?? "1.1.2"}
+              WorkScene v{info.data?.version ?? "1.1.3"}
             </span>
             <Badge tone="accent">Tauri {info.data?.tauriVersion ?? "2"}</Badge>
             <Badge>{info.data?.dpiAwareness ?? "Per-Monitor V2"}</Badge>
@@ -836,7 +851,7 @@ export function SettingsPage() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const data = (await res.json()) as { tag_name?: string; html_url?: string };
                   const latest = (data.tag_name ?? "").replace(/^v/i, "");
-                  const current = (info.data?.version ?? "1.1.1").replace(/^v/i, "");
+                  const current = (info.data?.version ?? "1.1.3").replace(/^v/i, "");
                   const toParts = (v: string) =>
                     v.split(".").map((n) => Number.parseInt(n, 10) || 0);
                   const a = toParts(latest);
