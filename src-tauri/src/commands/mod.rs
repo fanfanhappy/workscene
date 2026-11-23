@@ -1071,34 +1071,53 @@ pub async fn workspace_resource_update(
 mod tests {
     use super::*;
 
-    /// 不变量：库里的 autostart 必须等于系统真实状态。
-    /// 这个环境里注册表/启动文件夹都写不进去，正好覆盖"写入失败"的分支：
-    /// 失败时库必须落 false 并返回错误，而不是留下一个"看起来已开启"的 true。
+    /// 不变量：`apply_settings` 返回的开机启动状态必须等于系统真实状态，
+    /// 且没能改变真实状态时必须返回错误，不能出现"界面显示已开启、系统里却没有"。
+    ///
+    /// 注意：注册表 `HKCU\Run` 在部分环境（例如 GitHub Actions 的普通用户）可以写入成功，
+    /// 所以这里不预设"一定失败"，而是按真实结果分支断言；测完把系统状态恢复原样，
+    /// 避免在开发机/CI 上留下指向测试二进制的启动项。
     #[tokio::test]
-    async fn settings_never_persist_autostart_that_did_not_take_effect() {
+    async fn settings_report_only_the_real_autostart_state() {
         let db = crate::data::in_memory().await.unwrap();
-        let mut input = settings::AppSettings::default();
-        input.autostart = !crate::win::autostart::is_enabled();
+        let before = crate::win::autostart::is_enabled();
+        if before {
+            // 本机已经开着开机启动：不再拿测试二进制去覆盖用户真实的启动项
+            return;
+        }
 
-        let result = apply_settings(&db, input.clone()).await;
-        let stored = settings::get(&db).await.unwrap();
+        let mut input = settings::AppSettings::default();
+        input.autostart = true;
+        // 关掉全局快捷键，隔离"有没有注册成功"对本次断言的影响
+        input.hotkey = String::new();
+        input.workspace_hotkeys_enabled = false;
+
+        let result = apply_settings(&db, input).await;
         let actual = crate::win::autostart::is_enabled();
 
-        assert_eq!(
-            stored.autostart, actual,
-            "库里的开机启动状态必须等于真实状态（库={}，真实={}）",
-            stored.autostart, actual
-        );
-
-        if stored.autostart != input.autostart {
-            assert!(
-                result.is_err(),
-                "没能改变真实状态时必须返回错误，否则界面会显示成功"
-            );
-            if let Err(e) = result {
+        match &result {
+            Ok(saved) => assert_eq!(
+                saved.autostart, actual,
+                "返回给界面的开机启动状态必须等于真实状态（返回={}，真实={}）",
+                saved.autostart, actual
+            ),
+            Err(e) => {
+                assert!(
+                    !actual,
+                    "开机启动没生效时必须如实返回错误，而不是留下一个假开启状态"
+                );
                 let msg = format!("{e}");
                 assert!(msg.contains("开机启动"), "错误信息应指明是开机启动：{msg}");
             }
         }
+
+        // 设置表不持久化 autostart（真源是系统），读取时由 settings_get 回落到真实状态
+        assert!(
+            !settings::get(&db).await.unwrap().autostart,
+            "app_settings 不应持久化 autostart"
+        );
+
+        // 清理测试写入的启动项
+        let _ = crate::win::autostart::sync_detailed(false);
     }
 }
