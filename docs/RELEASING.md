@@ -74,8 +74,15 @@ pnpm tauri build
 
 安装包未签名；如需签名，见 [`docs/PACKAGING.md`](PACKAGING.md)。
 
-## 6. 回滚
+## 6. 历史版本
 
-- 删除 Release：`gh release delete <tag> --yes`
+- **不要删除已发布的 tag / Release**：新版本发布不会影响旧版本；工作流只会对**同名 tag** `--clobber` 覆盖资产。
+- 每个新版本的 `docs/releases/<tag>.md` 末尾保留「历史版本」链接，避免用户只能看到 Latest。
+- 升级兼容性写在发布说明的「升级说明」里；数据库迁移只追加，不修改历史 migration。
+- 历史版本统一入口：<https://github.com/fanfanhappy/workscene/releases>
+
+## 7. 回滚
+
+- 删除 Release：`gh release delete <tag> --yes`（仅限误发/空包，正常历史版本不要删）。
 - 重新发布：修复后重跑工作流（会覆盖上传同名资产）。
 - 不要移动已发布的 tag；如需修复版本，发一个新的补丁版本。
